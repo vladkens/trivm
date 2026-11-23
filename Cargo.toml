@@ -1,0 +1,19 @@
+[package]
+name = "trivm"
+version = "0.1.0"
+edition = "2024"
+description = "Test desktop apps on macOS, Linux and Windows VMs on Apple silicon, driven by coding agents."
+authors = ["vladkens"]
+license = "MIT"
+repository = "https://github.com/vladkens/trivm"
+
+[dependencies]
+
+[profile.release]
+debug = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

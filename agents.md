@@ -1,0 +1,59 @@
+# trivm
+
+A command line that installs and runs macOS, Linux and Windows virtual machines on an Apple silicon
+Mac, so a coding agent can test desktop apps on other systems from the terminal: a system installed
+with no clicks, started in the background, commands and files through SSH, screenshots, clicks and
+typing; a person opens a window onto a running VM to look or use the mouse. Agents carry out each
+change end to end by following this file.
+
+Each fact has one source, which this file points to: what trivm does is `readme.md` and
+`trivm --help`, dependencies `Cargo.toml`, checks the `Makefile`, the work under way `docs/plans/`.
+
+## Scope
+
+- Host: macOS on Apple silicon. Guests are arm64 only, never emulated: macOS and Linux on
+  Virtualization.framework, Windows 11 on QEMU with HVF (Homebrew's `qemu` and `swtpm`), run as a
+  child process and driven over QMP.
+- trivm drives no other app: no AppleScript, no UTM, no permission prompts on the host. A
+  Virtualization.framework VM runs in trivm's own process. Screenshots and input go through the
+  VM's display from the host (the VM's view, QMP for QEMU), commands and files through SSH, so a
+  guest needs no agent of ours.
+- Systems come from their own sources (Apple's IPSW, the distros' cloud images, Microsoft's ISO)
+  and are installed by code; trivm hosts nothing.
+- Pure Rust: Virtualization.framework and AppKit through the `objc2-*` crates; no Swift, no C
+  compiled, no bindings generated. Enable only the `objc2-*` features the code uses.
+- Prefer a small own routine to a dependency. Change dependencies only with `cargo add` /
+  `cargo remove` / `cargo upgrade`, never by hand.
+
+## Code
+
+- Start every `.rs` file with the line
+  `// Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm`, then a `//!` doc
+  whose first sentence says what the file does.
+- Comment only what the code can't say: platform quirks, measured numbers, ordering that matters.
+  Write code that reads like the code around it. Code taken from another project names it in the
+  file's header (project, licence, link to the file).
+- Helper scripts go in `scripts/`, kebab-case, Python run with `uv run`.
+
+## Tests
+
+- `make check` (format; clippy with warnings denied and rust-lint's rules, on the lines a branch
+  changes) and `make test` run before every commit.
+- Unit-test what breaks silently: QEMU's command line, the unattended-install files, a VM's
+  configuration. The proof of a change to how a system is installed or driven is that system on
+  this Mac: installed, started, a command run in it, a screenshot taken.
+
+## Workflow
+
+- Keep multi-step work as a checklist in `docs/plans/yyyymmdd-<name>.md`, only ticking it during
+  the work; when done, add `Done: yyyy-mm-dd` on top and a short `## Result`, and move it to
+  `docs/plans/completed/`.
+- Before committing, run `make check` and `make test`. `make prepare` rewrites files: not a check.
+- Make each commit one meaningful change a person can check: one short lowercase line, no body,
+  docs updated in the same commit. Push only when asked.
+- When fixing your own unpushed commit, amend or fix up that commit instead of adding a separate
+  fix.
+- Ask the person only when what trivm does must change, a heavy dependency is needed, or the
+  request is ambiguous. Otherwise decide and say so in your report.
+- Keep docs to `readme.md` (users), the rustdoc, `agents.md` and the plans. No progress journals,
+  run logs or disclaimer paragraphs.
