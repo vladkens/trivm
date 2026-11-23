@@ -8,6 +8,18 @@ license = "MIT"
 repository = "https://github.com/vladkens/trivm"
 
 [dependencies]
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+miniz_oxide = "0.9.1"
+objc2 = "0.6.5"
+objc2-app-kit = "0.3.2"
+objc2-core-foundation = "0.3.2"
+objc2-core-graphics = "0.3.2"
+objc2-core-image = { version = "0.3.2", features = ["objc2-io-surface"] }
+objc2-foundation = "0.3.2"
+objc2-io-surface = "0.3.2"
+objc2-quartz-core = "0.3.2"
+objc2-virtualization = "0.3.2"
 
 [profile.release]
 debug = 1
