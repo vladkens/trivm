@@ -108,14 +108,16 @@ impl Display {
     Self { view, holder, window: None, screen, title: title.into(), flags, _sink: sink }
   }
 
-  /// The screen as a bitmap, scaled by `k`.
+  /// The screen as a bitmap, scaled by `k`, opaque: Linux's framebuffer is XRGB, its unused byte
+  /// zero, which an image reads as alpha.
   fn image(&self, k: f64) -> io::Result<Retained<NSBitmapImageRep>> {
     let surface = surface(&self.view).ok_or_else(|| bad("the screen has no frame yet"))?;
     let t = CGAffineTransform { a: k, b: 0.0, c: 0.0, d: k, tx: 0.0, ty: 0.0 };
     // SAFETY: the surface is an IOSurface (checked by `surface`), kept alive by the layer.
     let image = unsafe {
       let surface = &*(Retained::as_ptr(&surface) as *const IOSurfaceRef);
-      CIImage::imageWithIOSurface(surface).imageByApplyingTransform(t)
+      let image = CIImage::imageWithIOSurface(surface);
+      image.imageBySettingAlphaOneInExtent(image.extent()).imageByApplyingTransform(t)
     };
 
     Ok(NSBitmapImageRep::initWithCIImage(NSBitmapImageRep::alloc(), &image))
