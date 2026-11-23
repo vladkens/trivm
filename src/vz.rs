@@ -78,7 +78,7 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
     c.setCPUCount(vm.config.cpus as usize);
     c.setMemorySize(vm.config.memory_bytes());
 
-    let mut storage = vec![disk(&vm.path("disk.img"), false)?];
+    let mut storage = vec![disk(&vm.path("disk.img"), false, os)?];
 
     let net = VZVirtioNetworkDeviceConfiguration::new();
     net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
@@ -167,7 +167,7 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
         c.setPointingDevices(&NSArray::from_retained_slice(&[pointer]));
 
         if vm.path("seed.iso").exists() {
-          storage.push(disk(&vm.path("seed.iso"), true)?);
+          storage.push(disk(&vm.path("seed.iso"), true, Os::Linux)?);
         }
 
         let console = VZFileSerialPortAttachment::initWithURL_append_error(
@@ -188,13 +188,26 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
   }
 }
 
-fn disk(path: &Path, read_only: bool) -> io::Result<Retained<VZStorageDeviceConfiguration>> {
+/// A virtio disk. Linux's is cached by the host and synced with fsync, as Lima has it: with VZ's
+/// defaults (automatic, full) ext4 lost files on the first boot here.
+fn disk(
+  path: &Path,
+  read_only: bool,
+  os: Os,
+) -> io::Result<Retained<VZStorageDeviceConfiguration>> {
+  let (cache, sync) = match os {
+    Os::Macos => (VZDiskImageCachingMode::Automatic, VZDiskImageSynchronizationMode::Full),
+    Os::Linux => (VZDiskImageCachingMode::Cached, VZDiskImageSynchronizationMode::Fsync),
+  };
+
   // SAFETY: a configuration object for a file that exists.
   unsafe {
-    let a = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_error(
+    let a = VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
       VZDiskImageStorageDeviceAttachment::alloc(),
       &url(path),
       read_only,
+      cache,
+      sync,
     )
     .map_err(|e| bad(format!("{}: {}", path.display(), e.localizedDescription())))?;
     let d = VZVirtioBlockDeviceConfiguration::initWithAttachment(
