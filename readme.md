@@ -25,13 +25,14 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 
 ```sh
 trivm create macos-27          # downloads 25 GB once, installs, starts: about 20 minutes
-trivm create ubuntu-24.04      # about 10 minutes
+trivm create ubuntu-24.04      # downloads 600 MB once: about 3 minutes
 trivm list
 
 trivm exec macos-27 -- sw_vers
 trivm cp ./MyApp.dmg macos-27:/tmp/
 trivm exec macos-27 'hdiutil attach /tmp/MyApp.dmg && cp -R /Volumes/MyApp/MyApp.app /Applications/'
 trivm exec macos-27 -- open -a MyApp
+trivm exec ubuntu-24.04 'nohup myapp >/dev/null 2>&1 &'   # shows on the desktop
 
 trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Ubuntu
 trivm click macos-27 800 450
@@ -42,8 +43,9 @@ trivm open macos-27            # a window onto the VM, to look or use the mouse
 trivm stop macos-27
 ```
 
-Coordinates for `click` are the pixels of a shot. The guest's user is `user`, password `1234`, sudo
-without a password. VMs live in `~/.trivm` (`TRIVM_HOME`), downloads in `~/.trivm/cache`.
+`create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
+shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
+(`TRIVM_HOME`), downloads in `~/.trivm/cache`.
 
 ## License
 

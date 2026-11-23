@@ -13,7 +13,7 @@ Usage: trivm <command> [args]
 VMs:
   create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]
                           install a system unattended and start it; systems: macos-27, ubuntu-24.04
-  start <vm>              start in the background, wait for SSH
+  start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
   delete <vm>             stop and remove
@@ -144,7 +144,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     }
   }
 
-  if cmd == "help" || flags.iter().any(|(x, _)| x == "-h" || x == "--help") {
+  let help = |x: &str| ["help", "-h", "--help"].contains(&x);
+  if help(&cmd) || flags.iter().any(|(x, _)| help(x)) {
     return Ok(Cmd::Help);
   }
 
@@ -238,6 +239,8 @@ mod tests {
     assert_eq!(args("").unwrap(), Cmd::Help);
     assert_eq!(args("list").unwrap(), Cmd::List);
     assert_eq!(args("start a --help").unwrap(), Cmd::Help);
+    assert_eq!(args("--help").unwrap(), Cmd::Help);
+    assert_eq!(args("-h").unwrap(), Cmd::Help);
 
     assert_eq!(args("stop a --force").unwrap(), Cmd::Stop { vm: "a".into(), force: true });
     assert_eq!(
