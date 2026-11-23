@@ -238,7 +238,8 @@ ethernets:
 }
 
 /// cloud-init's config: the user with trivm's key, Xfce on X11 logged in automatically, the
-/// screen never blanked, the host's time zone; LightDM is started at the end, so no reboot.
+/// screen never blanked, the host's time zone, SSH sessions on the desktop's display (an app
+/// started over SSH shows on it); LightDM is started at the end, so no reboot.
 fn user_data(key: &str, tz: &str) -> String {
   format!(
     r#"#cloud-config
@@ -265,19 +266,27 @@ write_files:
       autologin-session=xfce
       user-session=xfce
       xserver-command=X -s 0 -dpms
+  - path: /etc/ssh/sshd_config.d/50-trivm.conf
+    content: |
+      SetEnv DISPLAY=:0
 runcmd:
+  - [systemctl, try-restart, ssh]
   - [systemctl, set-default, graphical.target]
   - [systemctl, start, --no-block, lightdm]
 "#
   )
 }
 
-/// The first boot of a new Linux VM: cloud-init done.
+/// The first boot of a new Linux VM: cloud-init done. The seed goes then, or the desktop would
+/// show it as a disk from the next boot on.
 pub fn linux_setup(vm: &Vm) -> io::Result<()> {
   eprintln!("waiting for cloud-init to install the desktop (several minutes)");
   ssh::wait(vm, Duration::from_secs(600))?;
   ssh::output(vm, "cloud-init status --wait >/dev/null || cloud-init status --long")?;
-  Ok(())
+  match fs::remove_file(vm.path("seed.iso")) {
+    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+    _ => Ok(()),
+  }
 }
 
 // MARK: Both
@@ -338,6 +347,7 @@ mod tests {
     assert!(text.contains(r#"ssh_authorized_keys: ["ssh-ed25519 AAAA trivm"]"#));
     assert!(text.contains("autologin-user=user\n"));
     assert!(text.contains("timezone: Europe/Sofia\n"));
+    assert!(text.contains("SetEnv DISPLAY=:0\n"));
     assert!(!text.contains('\t'));
     assert_eq!(
       meta_data("ubuntu-24.04", "02:aa:00:00:00:01"),
