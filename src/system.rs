@@ -206,6 +206,7 @@ fn linux(vm: &Vm, qcow2: &Path) -> io::Result<()> {
   fs::create_dir_all(&seed)?;
   fs::write(seed.join("user-data"), user_data(&ssh::public_key()?, &timezone()))?;
   fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.config.mac))?;
+  fs::write(seed.join("network-config"), network_config(&vm.config.mac))?;
   let mut hdiutil = Command::new("hdiutil");
   hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "cidata", "-o"]);
   run(hdiutil.arg(vm.path("seed.iso")).arg(&seed).stdin(Stdio::null()))?;
@@ -219,6 +220,21 @@ fn hostname(name: &str) -> String {
 fn meta_data(name: &str, mac: &str) -> String {
   let host = hostname(name);
   format!("instance-id: {host}-{}\nlocal-hostname: {host}\n", mac.replace(':', ""))
+}
+
+/// DHCP by the MAC address: Ubuntu's networkd sends a DUID by default, which bootpd writes in
+/// its leases in place of the address trivm looks the guest up by.
+fn network_config(mac: &str) -> String {
+  format!(
+    r#"version: 2
+ethernets:
+  nic:
+    match:
+      macaddress: "{mac}"
+    dhcp4: true
+    dhcp-identifier: mac
+"#
+  )
 }
 
 /// cloud-init's config: the user with trivm's key, Xfce on X11 logged in automatically, the
@@ -327,5 +343,6 @@ mod tests {
       meta_data("ubuntu-24.04", "02:aa:00:00:00:01"),
       "instance-id: ubuntu-24-04-02aa00000001\nlocal-hostname: ubuntu-24-04\n"
     );
+    assert!(network_config("02:aa:00:00:00:01").contains("dhcp-identifier: mac\n"));
   }
 }
