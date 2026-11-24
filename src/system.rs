@@ -312,8 +312,24 @@ fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
   vz::install(vm, ipsw)?;
   match vm.config.provisioned() {
     true => Ok(()),
+    false if apfs::encrypted(&vm.path("disk.img"), apfs::DATA)? => {
+      eprintln!("{}", mac_by_hand(&vm.name));
+      Ok(())
+    }
     false => mac_data(vm),
   }
+}
+
+/// macOS 13 and 14 leave their Data volume encrypted after the install, its keys the guest's: no
+/// file can be written to it from the host, and the Setup Assistant shows at the first boot.
+fn mac_by_hand(name: &str) -> String {
+  format!(
+    "{name}'s Data volume is encrypted, so its Setup Assistant can't be skipped: answer it in \
+    `trivm open {name}` (or with shot, click, type and key) with the user {USER} and the password \
+    {PASSWORD}, then turn Remote Login on in Terminal: \
+    sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist\n\
+    trivm goes on once SSH answers (it waits 30 minutes)"
+  )
 }
 
 /// The files an older macOS's first boot reads, relative to its Data volume: the Setup Assistant
@@ -397,7 +413,7 @@ fn mac_daemon() -> String {
 /// (Lima's `com.apple.SetupAssistant.plist`, Apache-2.0) and the automatic login, then a restart,
 /// as loginwindow logs in by itself only at boot; then Remote Login, so SSH answers after all that.
 fn mac_script() -> String {
-  let kc: String = kcpassword(PASSWORD).iter().map(|x| format!("\\{x:03o}")).collect();
+  let kc = kcpassword(PASSWORD);
   format!(
     r#"set -x
 if id {USER}; then
@@ -461,15 +477,15 @@ shutdown -r now
   )
 }
 
-/// `/etc/kcpassword`, the automatic login's password: NUL-terminated, padded with NULs to a
-/// multiple of 12 bytes, XORed with loginwindow's key, as `sysadminctl -autologin set` writes it
-/// (which fails at the first boot, `SACSetAutoLoginPassword error:22`).
-fn kcpassword(password: &str) -> Vec<u8> {
+/// `/etc/kcpassword`, the automatic login's password, in `printf`'s octal escapes: NUL-terminated,
+/// padded with NULs to a multiple of 12 bytes, XORed with loginwindow's key, as `sysadminctl
+/// -autologin set` writes it (which fails at the first boot, `SACSetAutoLoginPassword error:22`).
+fn kcpassword(password: &str) -> String {
   const KEY: [u8; 11] = [0x7d, 0x89, 0x52, 0x23, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f];
   let mut b = password.as_bytes().to_vec();
   b.push(0);
   b.resize(b.len().div_ceil(12) * 12, 0);
-  b.iter().zip(KEY.iter().cycle()).map(|(x, k)| x ^ k).collect()
+  b.iter().zip(KEY.iter().cycle()).map(|(x, k)| format!("\\{:03o}", x ^ k)).collect()
 }
 
 /// Run over the first SSH login with the password: trivm's key, sudo without a password, SSH
@@ -484,7 +500,8 @@ printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' > /e
 
 /// No sleep, screen saver or lock, which would leave the screen dark; no automatic updates
 /// (macOS 27 kept checking regardless of some of these, as the old `vm` tool found); the host's
-/// time zone, `$2`, which macOS would otherwise guess as Cupertino's.
+/// time zone, `$2`, which macOS would otherwise guess as Cupertino's; the automatic login of `$4`
+/// by its `kcpassword`, `$3`, which a Setup Assistant answered by hand leaves off.
 const MAC_TUNE: &str = r#"set -e
 sudo -n pmset -a displaysleep 0 sleep 0 disksleep 0 >/dev/null
 defaults -currentHost write com.apple.screensaver idleTime -int 0
@@ -495,6 +512,8 @@ done
 sudo -n defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false
 sudo -n defaults write /Library/Preferences/com.apple.timezone.auto Active -bool false
 sudo -n ln -sf "/var/db/timezone/zoneinfo/$2" /etc/localtime
+printf "$3" | sudo -n sh -c 'umask 077; cat > /etc/kcpassword'
+sudo -n defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$4"
 "#;
 
 /// The first boot of a new macOS VM, which made the user: the key, then the tuning.
@@ -504,7 +523,9 @@ pub fn macos_setup(vm: &Vm) -> io::Result<()> {
     format!("sh -ec {} enroll {} {USER}", ssh::quote(MAC_ENROLL), ssh::quote(&ssh::public_key()?));
   ssh::with_password(vm, &script, Duration::from_secs(1800))?;
   ssh::wait(vm, Duration::from_secs(60))?;
-  ssh::output(vm, &format!("sh -ec {} tune {PASSWORD} {}", ssh::quote(MAC_TUNE), timezone()))?;
+  let kc = ssh::quote(&kcpassword(PASSWORD));
+  let tune = format!("sh -ec {} tune {PASSWORD} {} {kc} {USER}", ssh::quote(MAC_TUNE), timezone());
+  ssh::output(vm, &tune)?;
   Ok(())
 }
 
@@ -879,18 +900,20 @@ mod tests {
   #[test]
   fn mac_files() {
     // The bytes that logged in on macOS 26.
-    let kc = [0x4c, 0xbb, 0x61, 0x17, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f, 0x7d];
+    let kc = r"\114\273\141\027\322\274\335\352\243\271\037\175";
     assert_eq!(kcpassword("1234"), kc);
-    assert_eq!(kcpassword("12345678901").len(), 12);
-    assert_eq!(kcpassword("123456789012").len(), 24);
+    assert_eq!(kcpassword("12345678901").len(), 12 * 4);
+    assert_eq!(kcpassword("123456789012").len(), 24 * 4);
 
     let script = mac_script();
-    assert!(script.contains(r"printf '\114\273\141\027\322\274\335\352\243\271\037\175' > /etc/k"));
+    assert!(script.contains(&format!("printf '{kc}' > /etc/kcpassword\n")));
     assert!(script.contains("rm -f /Library/LaunchDaemons/trivm.setup.plist /private/var/db/"));
     assert!(script.contains("shutdown -r now\n"));
     assert!(lint("sh", &["-n"], &script));
     assert!(lint("plutil", &["-lint", "-s", "-"], &mac_daemon()));
     assert!(mac_daemon().contains("<string>/private/var/db/trivm-setup.sh</string>"));
+    assert!(lint("sh", &["-n"], MAC_TUNE));
+    assert!(mac_by_hand("m").contains("trivm open m"));
   }
 
   #[test]

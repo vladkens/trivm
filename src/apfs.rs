@@ -71,6 +71,9 @@ struct Volume {
   root: u64,
   xid: u64,
   uuid: [u8; 16],
+  /// Encrypted, as macOS 13 and 14 leave their Data volume: locked to anyone without its keys,
+  /// which are the guest's.
+  encrypted: bool,
 }
 
 struct Container {
@@ -176,10 +179,6 @@ impl Container {
         continue;
       }
 
-      if le64(&v, 264) & UNENCRYPTED == 0 {
-        return Err(bad("APFS: the volume is encrypted"));
-      }
-
       // Directory records are keyed by a hash of the name only on volumes that ignore case or
       // normalization, as macOS's are.
       if le64(&v, 56) & (CASE_INSENSITIVE | NORMALIZATION_INSENSITIVE) == 0 {
@@ -191,6 +190,7 @@ impl Container {
         root: le64(&v, 136),
         xid: le64(&v, 16),
         uuid: v[240..256].try_into().unwrap_or_default(),
+        encrypted: le64(&v, 264) & UNENCRYPTED == 0,
       });
     }
 
@@ -417,11 +417,20 @@ pub fn uuid(disk: &Path, role: u16) -> io::Result<String> {
   Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
 }
 
+/// Whether the volume with `role` in the disk image is encrypted.
+pub fn encrypted(disk: &Path, role: u16) -> io::Result<bool> {
+  Ok(Container::open(disk, false)?.volume(role)?.encrypted)
+}
+
 /// Sets the owner of `paths`, relative to the volume's root, to root:wheel; each was written by a
 /// mount that ignored ownership, or is root's already.
 pub fn chown_root(disk: &Path, role: u16, paths: &[&str]) -> io::Result<()> {
   let c = Container::open(disk, true)?;
   let vol = c.volume(role)?;
+  if vol.encrypted {
+    return Err(bad("APFS: the volume is encrypted"));
+  }
+
   for path in paths {
     let mut id = ROOT_DIR;
     for name in path.split('/').filter(|x| !x.is_empty()) {
@@ -485,6 +494,7 @@ mod tests {
     // Root's already: nothing to do.
     chown_root(&img, 0, &["a b/file.plist"]).unwrap();
     assert_eq!(uuid(&img, 0).unwrap().len(), 36);
+    assert!(!encrypted(&img, 0).unwrap());
     assert!(uuid(&img, DATA).is_err());
 
     let out = run(Command::new("hdiutil").args(["attach", "-nomount"]).arg(&img)).unwrap();

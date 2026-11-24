@@ -6,14 +6,15 @@ trivm installs a system into a VM with one command and no clicks, runs it in the
 lets an agent (or you) run commands in it, copy files, take screenshots, click and type, all from
 the terminal. When you want to look, `trivm open` shows the VM in a window.
 
-- macOS 27 and Ubuntu 24.04 (Xfce) on Apple's Virtualization.framework.
+- macOS 13, 14, 15, 26 and 27 on Apple's Virtualization.framework.
+- Ubuntu 24.04 (Xfce) and 22.04 (KDE Plasma), Debian 13 (GNOME) and Fedora 45 (Xfce), on X11.
 - Windows 11 on QEMU with HVF (`brew install qemu swtpm`), from Microsoft's arm64 ISO.
-- Systems from their own sources (Apple's IPSW, Ubuntu's cloud image, Microsoft's ISO), pinned
-  by SHA-256.
+- Systems from their own sources (Apple's IPSWs, the distros' cloud images, Microsoft's ISO),
+  pinned by SHA-256.
 - No agent in the guest: commands go through SSH, the screen is driven from the host.
 - One binary in Rust, no other app driven: no UTM, no AppleScript.
 
-Requires a Mac with Apple silicon on macOS 27 (macOS guests are made with its guest provisioning).
+Requires a Mac with Apple silicon on macOS 27.
 
 ## Install
 
@@ -27,6 +28,7 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 
 ```sh
 trivm create macos-27          # downloads 25 GB once, installs, starts: about 20 minutes
+trivm create macos-14          # the last IPSW of each macOS: 13.6, 14.6.1, 15.6.1, 26.6.2
 trivm create ubuntu-24.04      # downloads 600 MB once: about 3 minutes
 trivm list
 
@@ -36,13 +38,24 @@ trivm exec macos-27 'hdiutil attach /tmp/MyApp.dmg && cp -R /Volumes/MyApp/MyApp
 trivm exec macos-27 -- open -a MyApp
 trivm exec ubuntu-24.04 'nohup myapp >/dev/null 2>&1 &'   # shows on the desktop
 
-trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Ubuntu, ≤1024×768 on Windows
+trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Linux, ≤1024×768 on Windows
 trivm click macos-27 800 450
 trivm type macos-27 'hello'
 trivm key macos-27 cmd+q
 
 trivm open macos-27            # a window onto the VM, to look or use the mouse
 trivm stop macos-27
+```
+
+### macOS 13 and 14
+
+Their Data volume is encrypted once installed, so their Setup Assistant can't be skipped from the
+host: `trivm create macos-14` boots into it and waits. Answer it in `trivm open macos-14` (or with
+`shot`, `click`, `type` and `key`) with the user `user` and the password `1234`, then turn Remote
+Login on in Terminal; trivm goes on once SSH answers.
+
+```sh
+sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
 ```
 
 ### Windows

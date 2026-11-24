@@ -58,11 +58,14 @@ fn start_cli() -> io::Result<ExitCode> {
       fs::remove_dir_all(&vm.dir)?;
     }
     Cmd::Open { vm } => {
-      if Vm::open(&vm)?.pid().is_none() {
-        start(&vm)?;
-      }
+      // One still being set up shows at once: an older macOS's Setup Assistant is answered in it.
+      let vm = match Vm::open(&vm)? {
+        x if x.config.setup => boot(&vm)?,
+        x if x.pid().is_none() => start(&vm).and_then(|_| Vm::open(&vm))?,
+        x => x,
+      };
 
-      ask(&Vm::open(&vm)?, "open", "")?;
+      ask(&vm, "open", "")?;
     }
     Cmd::Exec { vm, cmd } => return Ok(status(ssh::exec(&Vm::open(&vm)?, &cmd)?)),
     Cmd::Ssh { vm } => return Ok(status(ssh::interactive(&Vm::open(&vm)?)?)),
@@ -176,25 +179,7 @@ fn signed() -> io::Result<()> {
 /// Starts the VM's process unless it runs, and waits until the guest answers SSH and its desktop
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
-  let mut vm = Vm::open(name)?;
-  if vm.pid().is_none() {
-    match vm.config.os() {
-      Os::Windows => {
-        let cds = system::windows_cds(&vm);
-        qemu::spawn(&mut vm, &cds)?
-      }
-      _ => spawn(&vm)?,
-    }
-  } else {
-    // Another start runs it: its config, Windows' port among it, is saved once its VM runs.
-    let t = Instant::now();
-    while !ask(&vm, "status", "").is_ok_and(|x| x == "running") && t.elapsed().as_secs() < 60 {
-      thread::sleep(Duration::from_millis(200));
-    }
-
-    vm = Vm::open(name)?;
-  }
-
+  let mut vm = boot(name)?;
   if vm.config.setup {
     match vm.config.os() {
       Os::Macos => system::macos_setup(&vm)?,
@@ -211,6 +196,30 @@ pub fn start(name: &str) -> io::Result<()> {
   system::desktop(&vm)?;
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
+}
+
+/// Starts the VM's process unless it runs; the VM as that process saved it.
+fn boot(name: &str) -> io::Result<Vm> {
+  let mut vm = Vm::open(name)?;
+  if vm.pid().is_none() {
+    match vm.config.os() {
+      Os::Windows => {
+        let cds = system::windows_cds(&vm);
+        qemu::spawn(&mut vm, &cds)?
+      }
+      _ => spawn(&vm)?,
+    }
+
+    return Ok(vm);
+  }
+
+  // Another start runs it: its config, Windows' port among it, is saved once its VM runs.
+  let t = Instant::now();
+  while !ask(&vm, "status", "").is_ok_and(|x| x == "running") && t.elapsed().as_secs() < 60 {
+    thread::sleep(Duration::from_millis(200));
+  }
+
+  Vm::open(name)
 }
 
 /// Runs the VM's process in a session of its own and waits until the VM runs, in it or in another
