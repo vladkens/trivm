@@ -6,8 +6,10 @@ trivm installs a system into a VM with one command and no clicks, runs it in the
 lets an agent (or you) run commands in it, copy files, take screenshots, click and type, all from
 the terminal. When you want to look, `trivm open` shows the VM in a window.
 
-- macOS 27 and Ubuntu 24.04 (Xfce) on Apple's Virtualization.framework; Windows 11 next.
-- Systems from their own sources (Apple's IPSW, Ubuntu's cloud image), pinned by SHA-256.
+- macOS 27 and Ubuntu 24.04 (Xfce) on Apple's Virtualization.framework.
+- Windows 11 on QEMU with HVF (`brew install qemu swtpm`), from Microsoft's arm64 ISO.
+- Systems from their own sources (Apple's IPSW, Ubuntu's cloud image, Microsoft's ISO), pinned
+  by SHA-256.
 - No agent in the guest: commands go through SSH, the screen is driven from the host.
 - One binary in Rust, no other app driven: no UTM, no AppleScript.
 
@@ -34,7 +36,7 @@ trivm exec macos-27 'hdiutil attach /tmp/MyApp.dmg && cp -R /Volumes/MyApp/MyApp
 trivm exec macos-27 -- open -a MyApp
 trivm exec ubuntu-24.04 'nohup myapp >/dev/null 2>&1 &'   # shows on the desktop
 
-trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Ubuntu
+trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Ubuntu, ≤1024×768 on Windows
 trivm click macos-27 800 450
 trivm type macos-27 'hello'
 trivm key macos-27 cmd+q
@@ -43,9 +45,29 @@ trivm open macos-27            # a window onto the VM, to look or use the mouse
 trivm stop macos-27
 ```
 
+### Windows
+
+Microsoft gives its ISO only to a browser: download Windows 11 (multi-edition ISO for Arm64),
+English, from [its page](https://www.microsoft.com/en-us/software-download/windows11arm64) once.
+
+```sh
+trivm create windows-11 --iso ~/Downloads/Win11_26H2_English_Arm64.iso   # kept in the cache
+trivm exec windows-11 'Get-ComputerInfo OsName, OsVersion'   # PowerShell
+trivm cp ./MyApp-setup.exe windows-11:            # to C:\Users\user
+trivm exec windows-11 '.\MyApp-setup.exe /S'
+trivm exec windows-11 'desktop "C:\Program Files\MyApp\MyApp.exe"'   # shows on the desktop
+trivm key windows-11 win
+```
+
+`exec` runs PowerShell 5.1 and exits with the last program's code (1 when a cmdlet failed).
+PowerShell 5.1 drops a program's empty arguments and the double quotes in them: write such a
+command as one line, quoted for PowerShell. An SSH session has no desktop: `desktop <program>
+[args]` starts a program in the user's desktop session. `open` hands the VM's screen to Screen
+Sharing (VNC on 127.0.0.1, password `1234`). Windows isn't activated.
+
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
-shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
-(`TRIVM_HOME`), downloads in `~/.trivm/cache`.
+shot. The guest's user is `user`, password `1234`, sudo without a password (an administrator on
+Windows). VMs live in `~/.trivm` (`TRIVM_HOME`), downloads in `~/.trivm/cache`.
 
 ## License
 
