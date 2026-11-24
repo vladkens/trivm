@@ -222,16 +222,24 @@ fn png_size(png: &Path) -> io::Result<(f64, f64)> {
 
 // MARK: TCC grants
 
-/// A service `grant` takes, by name: TCC's services for it, and whether the user's database keeps
+/// A service `grant` takes: its name, TCC's services for it, and whether the user's database keeps
 /// them, not the system's.
-type Service = (&'static str, &'static [&'static str], bool);
+struct Service {
+  name: &'static str,
+  tcc: &'static [&'static str],
+  user: bool,
+}
 
 const SERVICES: &[Service] = &[
   // Sending events (CGEventPost) is a service of its own beside Accessibility.
-  ("accessibility", &["kTCCServiceAccessibility", "kTCCServicePostEvent"], false),
-  ("screen", &["kTCCServiceScreenCapture"], false),
-  ("input", &["kTCCServiceListenEvent"], false),
-  ("microphone", &["kTCCServiceMicrophone"], true),
+  Service {
+    name: "accessibility",
+    tcc: &["kTCCServiceAccessibility", "kTCCServicePostEvent"],
+    user: false,
+  },
+  Service { name: "screen", tcc: &["kTCCServiceScreenCapture"], user: false },
+  Service { name: "input", tcc: &["kTCCServiceListenEvent"], user: false },
+  Service { name: "microphone", tcc: &["kTCCServiceMicrophone"], user: true },
 ];
 
 /// Prints SIP's state, then the app's TCC client: a bundle by its identifier (type 0), which is
@@ -297,16 +305,16 @@ pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
 
   let kind: u8 = kind.parse().map_err(|_| bad(format!("{app} in {name}: {out}")))?;
   let pick = |user: bool| -> Vec<&str> {
-    services.iter().filter(|s| s.2 == user).flat_map(|s| s.1.iter().copied()).collect()
+    services.iter().filter(|s| s.user == user).flat_map(|s| s.tcc.iter().copied()).collect()
   };
   let (system, user) = (sql(&pick(false), client, kind), sql(&pick(true), client, kind));
   let script =
     format!("sh -c {} write {} {}", ssh::quote(WRITE), ssh::quote(&system), ssh::quote(&user));
   ssh::output(&vm, &script)?;
 
-  let names: Vec<_> = services.iter().map(|s| s.0).collect();
+  let names: Vec<_> = services.iter().map(|s| s.name).collect();
   eprintln!(
-    "{client} may use {} in {name}; an app that runs sees it once relaunched",
+    "{client} may use {} in {name}; an app that runs sees them once relaunched",
     names.join(", ")
   );
   Ok(())
@@ -314,9 +322,9 @@ pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
 
 /// The services named, all with none.
 fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
-  let all: Vec<_> = SERVICES.iter().map(|s| s.0).collect();
+  let all: Vec<_> = SERVICES.iter().map(|s| s.name).collect();
   let find = |x: &String| {
-    let known = SERVICES.iter().find(|s| s.0 == x);
+    let known = SERVICES.iter().find(|s| s.name == x);
     known.ok_or_else(|| bad(format!("unknown service {x}; {}", all.join(", "))))
   };
   match names {
@@ -347,7 +355,7 @@ mod tests {
   fn service_names() {
     let names = |x: &[&str]| -> io::Result<Vec<&str>> {
       let x: Vec<String> = x.iter().map(|x| x.to_string()).collect();
-      Ok(services(&x)?.iter().map(|s| s.0).collect())
+      Ok(services(&x)?.iter().map(|s| s.name).collect())
     };
     assert_eq!(names(&[]).unwrap(), ["accessibility", "screen", "input", "microphone"]);
     assert_eq!(names(&["microphone", "screen"]).unwrap(), ["microphone", "screen"]);
