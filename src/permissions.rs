@@ -31,9 +31,19 @@ fn macos(name: &str) -> io::Result<Vm> {
   Ok(vm)
 }
 
-/// Whether SIP is on in the running guest, from `csrutil status`.
+/// Whether SIP is on in the running guest, from `csrutil status`; asked up to three times, as a
+/// guest just booted (load 45) once dropped the SSH session, exit 255 with no message.
 fn sip_on(vm: &Vm) -> io::Result<bool> {
-  let out = ssh::output(vm, "csrutil status")?;
+  let mut tries = 1;
+  let out = loop {
+    match ssh::output(vm, "csrutil status") {
+      Err(_) if tries < 3 => tries += 1,
+      x => break x?,
+    }
+
+    thread::sleep(Duration::from_secs(3));
+  };
+
   match (out.contains("status: enabled"), out.contains("status: disabled")) {
     (true, _) => Ok(true),
     (_, true) => Ok(false),
