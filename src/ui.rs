@@ -33,9 +33,9 @@ const HAS: &str = r#"case "$(/usr/local/bin/agent-desktop version 2>/dev/null)" 
 esac
 "#;
 
-/// Exits 4 unless agent-desktop is allowed Accessibility. Run without it, it would have macOS put
-/// up its prompt to allow it on the guest's screen at its first call to AX; with SIP on, root
-/// can't read TCC's database.
+/// Exits 4 unless TCC's database allows agent-desktop Accessibility, which root reads with SIP on
+/// too. Run without it, it would have macOS put up its prompt to allow it on the guest's screen
+/// at its first call to AX.
 const ALLOWED: &str = r#"tcc='/Library/Application Support/com.apple.TCC/TCC.db'
 q="SELECT auth_value FROM access WHERE service = 'kTCCServiceAccessibility' AND client = '/usr/local/bin/agent-desktop'"
 [ "$(sudo -n sqlite3 "$tcc" "$q" 2>/dev/null)" = 2 ] || exit 4
@@ -233,16 +233,20 @@ fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
   };
 
   let line = format!("sh -c {} ui {VERSION} {rest}", ssh::quote(&script));
-  let mut fixed = false;
+  let (mut installed, mut granted) = (false, false);
   let out = loop {
     let out = ssh::ssh(vm)?.arg("--").arg(&line).stdin(Stdio::null()).output()?;
     match out.status.code() {
-      Some(3) if !fixed => install(vm)?,
-      Some(4) if !fixed => grant(vm)?,
+      Some(3) if !installed => {
+        install(vm)?;
+        installed = true;
+      }
+      Some(4) if !granted => {
+        grant(vm)?;
+        granted = true;
+      }
       _ => break out,
     }
-
-    fixed = true;
   };
 
   let text = String::from_utf8_lossy(&out.stdout);
@@ -261,8 +265,7 @@ fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
   }
 }
 
-/// Puts agent-desktop in the guest from trivm's cache; on Linux switches accessibility on, on
-/// macOS grants it Accessibility.
+/// Puts agent-desktop in the guest from trivm's cache; on Linux switches accessibility on.
 fn install(vm: &Vm) -> io::Result<()> {
   let os = vm.config.os();
   let (url, sha256) = match os {
@@ -278,13 +281,11 @@ fn install(vm: &Vm) -> io::Result<()> {
   };
 
   run(ssh::ssh(vm)?.arg("--").arg(script).stdin(fs::File::open(&archive)?))?;
-  match os {
-    Os::Macos => grant(vm),
-    Os::Linux => Ok(()),
-  }
+  Ok(())
 }
 
-/// Accessibility for agent-desktop by its path, as `grant` gives it, which needs SIP off.
+/// Accessibility for agent-desktop by its path, as `grant` gives it, which needs SIP off. The
+/// grant has no code requirement, so another version keeps it.
 fn grant(vm: &Vm) -> io::Result<()> {
   let services = permissions::services(&["accessibility".into()])?;
   let res = permissions::allow(vm, BIN, &services);
@@ -360,15 +361,22 @@ fn cut(x: &str) -> String {
 }
 
 /// The elements of a window's tree worth a line, depth first: one with no frame is left out but
-/// not its children, a hidden one with its children, and a nameless leaf with no value.
+/// not its children, a hidden one with its children, a closed menu (with no frame) with its
+/// items, and a nameless leaf with no value.
 fn flatten(node: &Json, depth: usize, out: &mut Vec<Node>) {
   let states: Vec<String> = node.get("states").items().iter().map(|x| x.str().into()).collect();
   if states.iter().any(|x| x == "hidden" || x == "offscreen") {
     return;
   }
 
+  let (role, name) = (node.get("role").str(), node.get("name").str());
   let children = node.get("children").items();
   let Some(frame) = frame(node.get("bounds")) else {
+    // A closed menu's custom views (Finder's tags) have frames at the screen's corner.
+    if role == "menu" {
+      return;
+    }
+
     for x in children {
       flatten(x, depth, out);
     }
@@ -376,7 +384,6 @@ fn flatten(node: &Json, depth: usize, out: &mut Vec<Node>) {
     return;
   };
 
-  let (role, name) = (node.get("role").str(), node.get("name").str());
   // A toggle's value is its state, which `checked` says.
   let value = match node.get("value").str() {
     x if x == name || ["checkbox", "switch", "radiobutton"].contains(&role) => "",
@@ -649,7 +656,7 @@ mod tests {
   }
 
   /// A snapshot of Wavo's window on macOS, cut down: a radio button, a combo box, a title, a
-  /// hidden element, a nameless group, a nameless leaf, and a group with no frame.
+  /// hidden element, a nameless group, a nameless leaf, a group with no frame and a closed menu.
   const WAVO: &str = r#"{"children":[
     {"bounds":{"height":16.0,"width":34.0,"x":783.0,"y":108.0},"name":"Wavo","role":"statictext","value":"Wavo"},
     {"bounds":{"height":48.0,"width":560.0,"x":520.0,"y":132.0},"role":"tablist","children":[
@@ -661,7 +668,9 @@ mod tests {
       {"bounds":{"height":14.0,"width":14.0,"x":575.0,"y":109.0},"role":"group"}]},
     {"role":"tab","states":["selected"],"children":[
       {"bounds":{"height":458.0,"width":802.0,"x":5.0,"y":81.0},"name":"Terminal","role":"textfield"}]},
-    {"bounds":{"height":0.0,"width":10.0,"x":5.0,"y":81.0},"name":"Flat","role":"button"}
+    {"bounds":{"height":0.0,"width":10.0,"x":5.0,"y":81.0},"name":"Flat","role":"button"},
+    {"bounds":{"height":0.0,"width":0.0,"x":0.0,"y":900.0},"name":"File","role":"menu","children":[
+      {"bounds":{"height":22.0,"width":24.0,"x":0.0,"y":878.0},"name":"Red","role":"radiobutton"}]}
   ]}"#;
 
   fn nodes() -> Vec<Node> {
