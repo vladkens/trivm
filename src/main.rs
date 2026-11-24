@@ -256,10 +256,11 @@ unsafe extern "C" {
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
+  // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.
   let gone = |secs: u64| {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
-      if vm.pid().is_none() {
+      if vm.pid() != Some(pid) {
         return true;
       }
 
@@ -275,8 +276,17 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
       Os::Linux => "sudo -n systemctl poweroff",
     };
 
-    let _ = ssh::ssh(vm)?.args(["--", cmd]).stdin(Stdio::null()).output();
-    if gone(120) {
+    // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
+    let mut ssh = ssh::ssh(vm)?;
+    ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let child = ssh.spawn();
+    let down = gone(120);
+    if let Ok(mut x) = child {
+      let _ = x.kill();
+      let _ = x.wait();
+    }
+
+    if down {
       return Ok(());
     }
   }

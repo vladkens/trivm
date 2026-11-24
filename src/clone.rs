@@ -52,6 +52,7 @@ pub fn clone(
   let tmp = vm::home().join(format!(".{name}.{}", process::id()));
   let _ = fs::remove_dir_all(&tmp);
   fs::create_dir(&tmp)?;
+  vm::private(&tmp)?;
 
   let new = Vm { name: name.into(), dir: tmp.clone(), config: Config { mac, ..vm.config } };
   let res = made(&tmp).and_then(|_| copy(&vm.dir, &new)).and_then(|_| {

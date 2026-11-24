@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::bad;
@@ -120,6 +121,7 @@ impl Vm {
     let dir = home().join(name);
     socket_fits(&dir)?;
     fs::create_dir_all(&dir)?;
+    private(&dir)?;
     match fs::OpenOptions::new().write(true).create_new(true).open(dir.join("config")) {
       Ok(_) => {}
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -212,10 +214,20 @@ impl Vm {
   }
 }
 
-/// A VM's name: a folder in trivm's, not a path out of it or the cache.
+/// trivm's own files beside the VMs' folders.
+const OWN: &[&str] =
+  &["cache", "entitlements.plist", "id_ed25519", "id_ed25519.pub", "id_ed25519.lock"];
+
+/// A VM's name: a folder in trivm's, not a path out of it or one of trivm's own files.
 pub fn valid(name: &str) -> bool {
   let chars = name.chars().all(|x| x.is_ascii_alphanumeric() || "-_.".contains(x));
-  chars && !name.is_empty() && !name.starts_with('.') && name != "cache"
+  chars && !name.is_empty() && !name.starts_with('.') && !OWN.contains(&name)
+}
+
+/// Makes a VM's folder its owner's only: the guest's disk holds its user's files, and the Mac's
+/// other users share the home folder's group.
+pub fn private(dir: &Path) -> io::Result<()> {
+  fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 /// Checks that the VM's `ctl.sock` fits a Unix socket's path, which macOS caps at 104 bytes with
@@ -339,10 +351,21 @@ mod tests {
     assert!(socket_fits(Path::new("/Users/user/.trivm/macos-27-run-1")).is_ok());
     assert!(socket_fits(&Path::new("/Users/user/.trivm").join("x".repeat(80))).is_err());
 
-    for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "cache"] {
+    for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "cache", "id_ed25519.pub"] {
       assert!(!valid(x), "{x}");
       assert!(Vm::open(x).is_err(), "{x}");
     }
+  }
+
+  #[test]
+  fn owner_only() {
+    let dir = std::env::temp_dir().join(format!("trivm-private-{}", std::process::id()));
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    private(&dir).unwrap();
+    let mode = fs::metadata(&dir).unwrap().permissions().mode();
+    fs::remove_dir(&dir).unwrap();
+    assert_eq!(mode & 0o777, 0o700);
   }
 
   #[test]
