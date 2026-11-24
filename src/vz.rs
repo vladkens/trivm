@@ -530,6 +530,11 @@ fn handle(req: &str) -> io::Result<String> {
 
 /// Sends a request to the VM's process and returns its answer.
 pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
+  ask_within(vm, req, body, Duration::from_secs(300))
+}
+
+/// [ask], waiting for the answer at most `wait`.
+pub fn ask_within(vm: &Vm, req: &str, body: &str, wait: Duration) -> io::Result<String> {
   let sock = vm.path("ctl.sock");
   let not_running = || bad(format!("{} isn't running; trivm start {}", vm.name, vm.name));
   if vm.pid().is_none() {
@@ -537,7 +542,7 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
   }
 
   let mut s = UnixStream::connect(&sock).map_err(|_| not_running())?;
-  s.set_read_timeout(Some(Duration::from_secs(300)))?;
+  s.set_read_timeout(Some(wait))?;
   s.write_all(format!("{req}\n{body}").as_bytes())?;
   s.shutdown(std::net::Shutdown::Write)?;
 
