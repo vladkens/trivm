@@ -1,3 +1,5 @@
+Done: 2026-11-24
+
 # Permissions for the app under test
 
 An app that needs Accessibility, Screen Recording, Input Monitoring or the microphone shows its warnings in a macOS VM, where no one clicks Allow: trivm turns SIP off from recoveryOS, driving its screen from the host, and writes the grants into the guest's TCC databases for an app given by its path. Done when, on this Mac, `macos-27` has SIP off by trivm, wavo-app v0.3.0's General page shows "Wavo needs two permissions" before a grant and no warning after it and a relaunch (shots read), and a `trivm run macos-27` clone shows the grants carried into it.
@@ -20,10 +22,36 @@ An app that needs Accessibility, Screen Recording, Input Monitoring or the micro
 - [x] 1. `_run --recovery`: the VM started into recoveryOS; its screens, the keys and clicks it takes, the times, found with shots.
 - [x] 2. `sip <vm> on|off`: recoveryOS driven from the host, `csrutil disable`, the VM back up, `csrutil status` checked.
 - [x] 3. `grant <vm> <app> [<service>...]`: the TCC tables of macOS 27, by-path or bundle grants, the csreq, `tccd` restarted.
-- [ ] 4. The proof: SIP off on `macos-27`; Wavo's warnings before and gone after `grant`; the same through a `run` clone; `readme.md` and `--help`.
+- [x] 4. The proof: SIP off on `macos-27`; Wavo's warnings before and gone after `grant`; the same through a `run` clone; `readme.md` and `--help`.
 
 ## Checks
 
 - `make check`, `make test`; unit tests for the arguments and the SQL written.
 - `trivm sip macos-27 off` on this Mac, its screens read in shots, then `csrutil status` says disabled.
 - `trivm grant macos-27 /Applications/Wavo.app`: Wavo's General page before and after, in shots read; the same in a `run` clone of `macos-27`; `grant` refused on `ubuntu-24.04` and on a VM with SIP on.
+
+## Result
+
+On this Mac (macOS 27.2, Apple silicon), guest macOS 27.2:
+
+- `sip macos-27 off`: 1:12, recoveryOS driven from its startup options to `csrutil disable` and
+  back, then `csrutil status` over SSH said disabled. A clone of it: `sip on` 1:06, `sip off` 50 s,
+  `sip on` again with nothing to do 0.3 s. One `sip on` turned SIP on but failed its last check: the
+  guest, up 12 s at load 45, dropped the SSH session (exit 255, no message); the check now asks up
+  to three times.
+- `grant macos-27 /Applications/Wavo.app`: 0.4 s. wavo-app v0.3.0 (its release's DMG, SHA-256
+  checked) showed "Wavo needs two permissions", Microphone and Accessibility with Allow, before it;
+  after it and a relaunch, the General page with no warning (shots `permissions-before.png`,
+  `permissions-after.png`). The microphone's status needs no audio device.
+- `grant macos-27 /usr/bin/osascript` (a bare executable, by its path): run by launchd, it read
+  false for Accessibility, Screen Recording, Input Monitoring and posting events before and true
+  for all four after. Its rows were removed after.
+- `run macos-27 -- sh permissions-run.sh`: 36 s; the clone had SIP off and Wavo's rows, Wavo opened
+  at its login with no warning (shot `permissions-run.png`), and the clone was deleted after.
+- Refused, each with its own message: `grant` and `sip` on `ubuntu-24.04`, `grant` on the clone
+  with SIP on, an unknown service, a relative path, an app that isn't there, an unknown VM.
+
+`macos-27` is left stopped with SIP off and Wavo installed and granted: the next item, the
+accessibility tree, needs both. Left: recording from the microphone would need an audio input
+device in the VM, which trivm doesn't add; recoveryOS's screens were read on macOS 27.2 only, and
+an older macOS's recoveryOS may need other steps.
