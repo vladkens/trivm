@@ -219,11 +219,11 @@ const OWN: &[&str] =
   &["cache", "entitlements.plist", "id_ed25519", "id_ed25519.pub", "id_ed25519.lock"];
 
 /// A VM's name: a folder in trivm's, not a path out of it or one of trivm's own files, in any case
-/// (APFS ignores it).
+/// (APFS ignores it), nor a flag to the commands trivm runs with it (`_run <vm>`).
 pub fn valid(name: &str) -> bool {
   let chars = name.chars().all(|x| x.is_ascii_alphanumeric() || "-_.".contains(x));
   let own = OWN.iter().any(|x| x.eq_ignore_ascii_case(name));
-  chars && !name.is_empty() && !name.starts_with('.') && !own
+  chars && !name.is_empty() && !name.starts_with(['.', '-']) && !own
 }
 
 /// Makes a VM's folder its owner's only: the guest's disk holds its user's files, and the Mac's
@@ -354,7 +354,7 @@ mod tests {
     assert!(socket_fits(&Path::new("/Users/user/.trivm").join("x".repeat(80))).is_err());
 
     let own = ["cache", "CACHE", "id_ed25519.pub", "Entitlements.plist"];
-    for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a"].into_iter().chain(own) {
+    for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "-a", "--help"].into_iter().chain(own) {
       assert!(!valid(x), "{x}");
       assert!(Vm::open(x).is_err(), "{x}");
     }
