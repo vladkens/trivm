@@ -13,11 +13,19 @@ use crate::{bad, run};
 /// Set when trivm runs as `ssh`'s askpass program: it prints the guest's password.
 pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
-/// trivm's key, made on first use.
+/// trivm's key, made on first use; `ssh-keygen` writes the public half last.
 pub fn key() -> io::Result<PathBuf> {
   let path = vm::home().join("id_ed25519");
-  if !path.exists() {
-    fs::create_dir_all(vm::home())?;
+  if path.with_extension("pub").exists() {
+    return Ok(path);
+  }
+
+  // Two first uses at once make one key.
+  fs::create_dir_all(vm::home())?;
+  let lock = fs::File::create(path.with_extension("lock"))?;
+  lock.lock()?;
+  if !path.with_extension("pub").exists() {
+    let _ = fs::remove_file(&path);
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
