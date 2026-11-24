@@ -13,7 +13,9 @@ Usage: trivm <command> [args]
 VMs:
   create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>] [--iso <path>]
                           install a system unattended and start it; systems: macos-27,
-                          ubuntu-24.04, windows-11 (its ISO from Microsoft's page by --iso, once)
+                          macos-26, macos-15, macos-14, macos-13, ubuntu-24.04, ubuntu-22.04,
+                          debian-13, fedora-45, windows-11 (its ISO from Microsoft's page by
+                          --iso, once)
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states

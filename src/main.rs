@@ -4,6 +4,7 @@
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
 //! (`display.rs`, QMP for QEMU), and `create` installs a system (`system.rs`, `windows.rs`).
 
+mod apfs;
 mod args;
 mod display;
 mod qcow2;

@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
-use crate::{bad, qcow2, qemu, run, ssh, vz, windows};
+use crate::{apfs, bad, qcow2, qemu, run, ssh, vz, windows};
 
 pub struct System {
   pub name: &'static str,
@@ -21,27 +21,107 @@ pub struct System {
   pub memory: u32,
   /// GiB.
   pub disk: u32,
+  pub desktop: Desktop,
+  /// A Linux system's packages for its desktop, installed by cloud-init on the first boot.
+  pub packages: &'static [&'static str],
+}
+
+/// The desktop a system starts to, logged in automatically; Linux's on X11, so an app started
+/// over SSH shows on `DISPLAY=:0`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Desktop {
+  /// The system's own: macOS's, Windows'.
+  Own,
+  /// Xfce with LightDM.
+  Xfce,
+  /// KDE Plasma with SDDM.
+  Plasma,
+  /// GNOME with GDM, Wayland off.
+  Gnome,
+}
+
+impl System {
+  /// macOS from an IPSW of Apple's.
+  const fn macos(name: &'static str, url: &'static str, sha256: &'static str) -> Self {
+    let (os, desktop) = (Os::Macos, Desktop::Own);
+    Self { name, os, url, sha256, cpus: 4, memory: 8, disk: 64, desktop, packages: &[] }
+  }
+
+  /// Linux from a distro's cloud image.
+  const fn linux(
+    name: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+    desktop: Desktop,
+    packages: &'static [&'static str],
+  ) -> Self {
+    Self { name, os: Os::Linux, url, sha256, cpus: 4, memory: 4, disk: 32, desktop, packages }
+  }
 }
 
 pub const SYSTEMS: &[System] = &[
-  System {
-    name: "macos-27",
-    os: Os::Macos,
-    url: "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw",
-    sha256: "6613b34e8589db2202a01ec37a2648afb141ece13428175183f8f3e38438534f",
-    cpus: 4,
-    memory: 8,
-    disk: 64,
-  },
-  System {
-    name: "ubuntu-24.04",
-    os: Os::Linux,
-    url: "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img",
-    sha256: "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
-    cpus: 4,
-    memory: 4,
-    disk: 32,
-  },
+  System::macos(
+    "macos-27",
+    "https://updates.cdn-apple.com/2026FallFCS/c9671975-52db-4fb5-9af2-00217169ba8d/UniversalMac_27.2_26B123_Restore.ipsw",
+    "6613b34e8589db2202a01ec37a2648afb141ece13428175183f8f3e38438534f",
+  ),
+  // The last IPSW of each older macOS: Apple publishes none for the security updates after it.
+  System::macos(
+    "macos-26",
+    "https://updates.cdn-apple.com/2026SummerFCS/fullrestores/140-75212/A2A24B94-1FC1-45A3-93F7-C51B02AF1F4D/UniversalMac_26.6.2_25G83_Restore.ipsw",
+    "885503b7f4b06609e9a512f2befd40f59730640a3f1233e3892d60affdd51c95",
+  ),
+  System::macos(
+    "macos-15",
+    "https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw",
+    "3d87686b691ac765eb6a6b3082b2334e2af9710096a00432dd519af89ff2ea78",
+  ),
+  System::macos(
+    "macos-14",
+    "https://updates.cdn-apple.com/2024SummerFCS/fullrestores/062-52859/932E0A8F-6644-4759-82DA-F8FA8DEA806A/UniversalMac_14.6.1_23G93_Restore.ipsw",
+    "e387251e63387150ba76cf784bdb97d2016e5d43c6f809c90a115eb067a097b8",
+  ),
+  System::macos(
+    "macos-13",
+    "https://updates.cdn-apple.com/2023FallFCS/fullrestores/042-55833/C0830847-A2F8-458F-B680-967991820931/UniversalMac_13.6_22G120_Restore.ipsw",
+    "9bf095739b8b2d5ebd20f7e8de938f10bc449f9843de21c4a41ae54d73526728",
+  ),
+  System::linux(
+    "ubuntu-24.04",
+    "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img",
+    "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
+    Desktop::Xfce,
+    &["xfce4", "xfce4-terminal", "lightdm", "lightdm-gtk-greeter", "xserver-xorg", "dbus-x11"],
+  ),
+  System::linux(
+    "ubuntu-22.04",
+    "https://cloud-images.ubuntu.com/releases/jammy/release-20261109/ubuntu-22.04-server-cloudimg-arm64.img",
+    "e429865ad84a083a84fdbd51bf6fd6e4174bbb1610ba0d72ca01014c656d45bc",
+    Desktop::Plasma,
+    &["kde-plasma-desktop", "sddm", "xserver-xorg"],
+  ),
+  // `generic`, not `genericcloud`: the cloud kernel has no DRM, USB or HID, so no screen or input.
+  System::linux(
+    "debian-13",
+    "https://cloud.debian.org/images/cloud/trixie/20261123-2671/debian-13-generic-arm64-20261123-2671.qcow2",
+    "c7e96fd672cfd7af9ab4412468d911bd7ff5d7b15cbe94ffa4c5df2c72e659c2",
+    Desktop::Gnome,
+    &[
+      "gdm3",
+      "gnome-session-xsession",
+      "gnome-shell",
+      "gnome-terminal",
+      "nautilus",
+      "xserver-xorg",
+    ],
+  ),
+  System::linux(
+    "fedora-45",
+    "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-45-1.4.aarch64.qcow2",
+    "1632acc8bc14d45b6c9596a0acc71b070d3748d1abdcf1a519be5c983bb0286c",
+    Desktop::Xfce,
+    &["@xfce-desktop", "lightdm", "lightdm-gtk", "xorg-x11-server-Xorg", "dbus-x11"],
+  ),
   System {
     name: "windows-11",
     os: Os::Windows,
@@ -52,6 +132,8 @@ pub const SYSTEMS: &[System] = &[
     cpus: 4,
     memory: 6,
     disk: 64,
+    desktop: Desktop::Own,
+    packages: &[],
   },
 ];
 
@@ -197,7 +279,7 @@ pub fn create(
   let vm = Vm::new(&name, config)?;
   let made = match sys.os {
     Os::Macos => macos(&vm, &file),
-    Os::Linux => linux(&vm, &file),
+    Os::Linux => linux(&vm, sys, &file),
     Os::Windows => windows(&vm),
   };
 
@@ -222,10 +304,172 @@ fn sparse(path: &Path, bytes: u64) -> io::Result<()> {
 // MARK: macOS
 
 fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
+  // VZ finds no IPSW through a symlink on its path, such as a cache shared by another home.
+  let ipsw = &fs::canonicalize(ipsw)?;
   sparse(&vm.path("disk.img"), vm.config.disk_bytes())?;
   vz::mac_platform(vm, ipsw)?;
   eprintln!("installing macOS on {} (about 10 minutes)", vm.name);
-  vz::install(vm, ipsw)
+  vz::install(vm, ipsw)?;
+  match vm.config.provisioned() {
+    true => Ok(()),
+    false => mac_data(vm),
+  }
+}
+
+/// The files an older macOS's first boot reads, relative to its Data volume: the Setup Assistant
+/// done, and a LaunchDaemon that runs the setup script as root. launchd loads a daemon only when
+/// root owns it.
+const MAC_SETUP_DONE: &str = "private/var/db/.AppleSetupDone";
+const MAC_SKIP_BUDDY: &str = "Library/User Template/.skipbuddy";
+const MAC_DAEMON: &str = "Library/LaunchDaemons/trivm.setup.plist";
+const MAC_SCRIPT: &str = "private/var/db/trivm-setup.sh";
+
+/// Writes the first boot's files to the Data volume of a new macOS VM before 27, as Lima does
+/// (`pkg/guestpatch/macos`): the disk attached, the volume mounted by this user, which ignores
+/// ownership, the files written, then their owner set to root on the disk itself.
+fn mac_data(vm: &Vm) -> io::Result<()> {
+  let disk = vm.path("disk.img");
+  let uuid = apfs::uuid(&disk, apfs::DATA)?;
+  let out = run(Command::new("diskutil").args(["image", "attach", "--noMount"]).arg(&disk))?;
+  let out = String::from_utf8_lossy(&out);
+  let dev = out.split_whitespace().next().ok_or_else(|| bad("diskutil attached no disk"))?;
+
+  let mnt = vm.path("data");
+  let written = mac_write(&uuid, &mnt);
+  let _ = fs::remove_dir(&mnt);
+  run(Command::new("hdiutil").args(["detach", "-force", dev]))?;
+  written?;
+
+  apfs::chown_root(&disk, apfs::DATA, &[MAC_SETUP_DONE, MAC_SKIP_BUDDY, MAC_DAEMON, MAC_SCRIPT])
+}
+
+fn mac_write(uuid: &str, mnt: &Path) -> io::Result<()> {
+  let info = run(Command::new("diskutil").args(["info", uuid]))?;
+  let info = String::from_utf8_lossy(&info);
+  let id = info.lines().find_map(|x| x.trim().strip_prefix("Device Identifier:"));
+  let id = id.map(str::trim).ok_or_else(|| bad(format!("diskutil: no volume {uuid}")))?;
+
+  fs::create_dir_all(mnt)?;
+  run(
+    Command::new("mount")
+      .args(["-t", "apfs", "-o", "noowners,nobrowse"])
+      .arg(format!("/dev/{id}"))
+      .arg(mnt),
+  )?;
+
+  let written = (|| {
+    fs::write(mnt.join(MAC_SETUP_DONE), "")?;
+    fs::write(mnt.join(MAC_SKIP_BUDDY), "")?;
+    fs::write(mnt.join(MAC_DAEMON), mac_daemon())?;
+    fs::write(mnt.join(MAC_SCRIPT), mac_script())
+  })();
+
+  run(Command::new("umount").arg(mnt))?;
+  written
+}
+
+fn mac_daemon() -> String {
+  format!(
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>trivm.setup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>/{MAC_SCRIPT}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/trivm-setup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/trivm-setup.log</string>
+</dict>
+</plist>
+"#
+  )
+}
+
+/// Run by the LaunchDaemon at the first two boots: the user, the first login's screens marked seen
+/// (Lima's `com.apple.SetupAssistant.plist`, Apache-2.0) and the automatic login, then a restart,
+/// as loginwindow logs in by itself only at boot; then Remote Login, so SSH answers after all that.
+fn mac_script() -> String {
+  let kc: String = kcpassword(PASSWORD).iter().map(|x| format!("\\{x:03o}")).collect();
+  format!(
+    r#"set -x
+if id {USER}; then
+  launchctl load -w /System/Library/LaunchDaemons/ssh.plist
+  rm -f /{MAC_DAEMON} /{MAC_SCRIPT}
+  exit
+fi
+
+for i in $(seq 60); do
+  sysadminctl -addUser {USER} -fullName User -password {PASSWORD} -admin
+  id {USER} && break
+  sleep 2
+done
+
+createhomedir -c -u {USER}
+prefs=/Users/{USER}/Library/Preferences
+mkdir -p $prefs
+version=$(sw_vers -productVersion)
+build=$(sw_vers -buildVersion)
+cat > $prefs/com.apple.SetupAssistant.plist <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>DidSeeAccessibility</key><true/>
+  <key>DidSeeActivationLock</key><true/>
+  <key>DidSeeAppStore</key><true/>
+  <key>DidSeeAppearanceSetup</key><true/>
+  <key>DidSeeApplePaySetup</key><true/>
+  <key>DidSeeCloudSetup</key><true/>
+  <key>DidSeeLockdownMode</key><true/>
+  <key>DidSeePrivacy</key><true/>
+  <key>DidSeeScreenTime</key><true/>
+  <key>DidSeeSetupSequence</key><true/>
+  <key>DidSeeSiriSetup</key><true/>
+  <key>DidSeeSyncSetup</key><true/>
+  <key>DidSeeSyncSetup2</key><true/>
+  <key>DidSeeTermsOfAddress</key><true/>
+  <key>DidSeeTouchIDSetup</key><true/>
+  <key>DidSeeiCloudLoginForStorageServices</key><true/>
+  <key>LastPreLoginTasksPerformedBuild</key><string>$build</string>
+  <key>LastPreLoginTasksPerformedVersion</key><string>$version</string>
+  <key>LastSeenAgeRangeSelectionProductVersion</key><string>$version</string>
+  <key>LastSeenBuddyBuildVersion</key><string>$build</string>
+  <key>LastSeenCloudProductVersion</key><string>$version</string>
+  <key>LastSeenDiagnosticsProductVersion</key><string>$version</string>
+  <key>MiniBuddyLaunchReason</key><integer>0</integer>
+  <key>MiniBuddyShouldLaunchToResumeSetup</key><false/>
+  <key>SkipExpressSettingsUpdating</key><true/>
+  <key>SkipFirstLoginOptimization</key><true/>
+</dict>
+</plist>
+EOF
+chown {USER}:staff $prefs/com.apple.SetupAssistant.plist
+
+printf '{kc}' > /etc/kcpassword
+chmod 600 /etc/kcpassword
+defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser {USER}
+shutdown -r now
+"#
+  )
+}
+
+/// `/etc/kcpassword`, the automatic login's password: NUL-terminated, padded with NULs to a
+/// multiple of 12 bytes, XORed with loginwindow's key, as `sysadminctl -autologin set` writes it
+/// (which fails at the first boot, `SACSetAutoLoginPassword error:22`).
+fn kcpassword(password: &str) -> Vec<u8> {
+  const KEY: [u8; 11] = [0x7d, 0x89, 0x52, 0x23, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f];
+  let mut b = password.as_bytes().to_vec();
+  b.push(0);
+  b.resize(b.len().div_ceil(12) * 12, 0);
+  b.iter().zip(KEY.iter().cycle()).map(|(x, k)| x ^ k).collect()
 }
 
 /// Run over the first SSH login with the password: trivm's key, sudo without a password, SSH
@@ -266,7 +510,7 @@ pub fn macos_setup(vm: &Vm) -> io::Result<()> {
 
 // MARK: Linux
 
-fn linux(vm: &Vm, qcow2: &Path) -> io::Result<()> {
+fn linux(vm: &Vm, sys: &System, qcow2: &Path) -> io::Result<()> {
   let image = qcow2.with_extension("raw");
   let _lock = lock(&image)?;
   if !image.exists() {
@@ -283,7 +527,7 @@ fn linux(vm: &Vm, qcow2: &Path) -> io::Result<()> {
 
   let seed = vm.path("seed");
   fs::create_dir_all(&seed)?;
-  fs::write(seed.join("user-data"), user_data(&ssh::public_key()?, &timezone()))?;
+  fs::write(seed.join("user-data"), user_data(sys, &ssh::public_key()?, &timezone()))?;
   fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.config.mac))?;
   fs::write(seed.join("network-config"), network_config(&vm.config.mac))?;
   let mut hdiutil = Command::new("hdiutil");
@@ -316,10 +560,21 @@ ethernets:
   )
 }
 
-/// cloud-init's config: the user with trivm's key, Xfce on X11 logged in automatically, the
-/// screen never blanked, the host's time zone, SSH sessions on the desktop's display (an app
-/// started over SSH shows on it); LightDM is started at the end, so no reboot.
-fn user_data(key: &str, tz: &str) -> String {
+/// cloud-init's config: the desktop on X11, logged in automatically, never blanked, locked or
+/// asleep; SSH sessions on its display, so an app started over SSH shows on it. The display
+/// manager starts at the end, so no reboot.
+fn user_data(sys: &System, key: &str, tz: &str) -> String {
+  let (dm, files, run) = match sys.desktop {
+    Desktop::Xfce => ("lightdm", XFCE.to_string(), String::new()),
+    Desktop::Plasma => ("sddm", PLASMA.to_string(), String::new()),
+    Desktop::Gnome => ("gdm3", [GNOME, NM].concat(), [GNOME_RUN, NM_RUN].concat()),
+    Desktop::Own => ("", String::new(), String::new()),
+  };
+
+  let (files, run) = (files.replace("{user}", USER), run.replace("{user}", USER));
+  let packages: Vec<_> =
+    sys.packages.iter().chain(&["xdotool"]).map(|x| format!("'{x}'")).collect();
+  let packages = packages.join(", ");
   format!(
     r#"#cloud-config
 users:
@@ -335,33 +590,141 @@ groups: [autologin]
 ssh_pwauth: false
 timezone: {tz}
 package_update: true
-packages: [xfce4, xfce4-terminal, lightdm, lightdm-gtk-greeter, xserver-xorg, dbus-x11, xdotool]
+packages: [{packages}]
 write_files:
-  - path: /etc/lightdm/lightdm.conf.d/50-trivm.conf
+  - path: /etc/ssh/sshd_config.d/50-trivm.conf
+    content: |
+      SetEnv DISPLAY=:0
+{files}runcmd:
+  - [sh, -c, "systemctl try-restart ssh || systemctl try-restart sshd"]
+  - [systemctl, mask, sleep.target, suspend.target, hibernate.target, hybrid-sleep.target]
+{run}  - [systemctl, set-default, graphical.target]
+  - [systemctl, enable, {dm}]
+  - [systemctl, start, --no-block, {dm}]
+"#
+  )
+}
+
+/// Fedora's Xfce comes with its screen saver, which locks, and its power manager, which blanks;
+/// their defaults for every user are written after the packages, which bring some of their own.
+const XFCE: &str = r#"  - path: /etc/lightdm/lightdm.conf.d/50-trivm.conf
     content: |
       [Seat:*]
-      autologin-user={USER}
+      autologin-user={user}
       autologin-user-timeout=0
       autologin-session=xfce
       user-session=xfce
       xserver-command=X -s 0 -dpms
-  - path: /etc/ssh/sshd_config.d/50-trivm.conf
+  - path: /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-screensaver.xml
+    defer: true
     content: |
-      SetEnv DISPLAY=:0
-runcmd:
-  - [systemctl, try-restart, ssh]
-  - [systemctl, set-default, graphical.target]
-  - [systemctl, start, --no-block, lightdm]
-"#
-  )
-}
+      <?xml version="1.0" encoding="UTF-8"?>
+      <channel name="xfce4-screensaver" version="1.0">
+        <property name="saver" type="empty">
+          <property name="enabled" type="bool" value="false"/>
+          <property name="idle-activation" type="empty">
+            <property name="enabled" type="bool" value="false"/>
+          </property>
+        </property>
+        <property name="lock" type="empty">
+          <property name="enabled" type="bool" value="false"/>
+        </property>
+      </channel>
+  - path: /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-power-manager.xml
+    defer: true
+    content: |
+      <?xml version="1.0" encoding="UTF-8"?>
+      <channel name="xfce4-power-manager" version="1.0">
+        <property name="xfce4-power-manager" type="empty">
+          <property name="dpms-enabled" type="bool" value="false"/>
+          <property name="blank-on-ac" type="int" value="0"/>
+        </property>
+      </channel>
+"#;
+
+/// Plasma's defaults for every user: no screen locker, and a power profile with no actions, so
+/// PowerDevil makes none of its own (it would dim and switch off the screen).
+const PLASMA: &str = r#"  - path: /etc/sddm.conf.d/50-trivm.conf
+    content: |
+      [Autologin]
+      User={user}
+      Session=plasma
+      [X11]
+      ServerArguments=-nolisten tcp -s 0 -dpms
+  - path: /etc/xdg/kscreenlockerrc
+    content: |
+      [Daemon]
+      Autolock=false
+      LockOnResume=false
+  - path: /etc/xdg/powermanagementprofilesrc
+    content: |
+      [AC]
+      icon=battery-charging
+"#;
+
+/// GDM's own config comes with its package, so it is written after the packages (`defer`).
+/// GNOME Shell starts on its overview, which the autostart entry closes.
+const GNOME: &str = r#"  - path: /etc/gdm3/daemon.conf
+    defer: true
+    content: |
+      [daemon]
+      AutomaticLoginEnable=true
+      AutomaticLogin={user}
+      WaylandEnable=false
+  - path: /etc/dconf/profile/user
+    content: |
+      user-db:user
+      system-db:local
+  - path: /etc/dconf/db/local.d/00-trivm
+    content: |
+      [org/gnome/desktop/session]
+      idle-delay=uint32 0
+      [org/gnome/desktop/screensaver]
+      lock-enabled=false
+      [org/gnome/settings-daemon/plugins/power]
+      sleep-inactive-ac-type='nothing'
+  - path: /etc/xdg/autostart/trivm-desktop.desktop
+    content: |
+      [Desktop Entry]
+      Type=Application
+      Name=Desktop
+      Exec=sh -c "for i in 1 2 3 4 5; do sleep 2; gdbus call -e -d org.gnome.Shell -o /org/gnome/Shell -m org.freedesktop.DBus.Properties.Set org.gnome.Shell OverviewActive '<false>'; done"
+      OnlyShowIn=GNOME;
+      NoDisplay=true
+"#;
+
+/// GNOME brings the user's D-Bus under systemd, which the user's systemd, up since trivm's first
+/// SSH login, gets when it starts again: GNOME and SSH sessions then share `/run/user/<uid>/bus`.
+const GNOME_RUN: &str = r#"  - [dconf, update]
+  - [su, {user}, -c, "mkdir -p ~/.config && echo yes > ~/.config/gnome-initial-setup-done"]
+  - [sh, -c, "systemctl restart user@$(id -u {user})"]
+"#;
+
+/// GNOME brings NetworkManager, which sees no network while netplan gives the NIC to networkd, so
+/// apps asking it think they are offline: once it is installed, netplan hands the NIC over, on the
+/// same lease. Plasma comes without it here, and netplan would then hand the NIC to nothing.
+const NM: &str = r#"  - path: /etc/netplan/90-trivm.yaml
+    defer: true
+    permissions: "0600"
+    content: |
+      network:
+        version: 2
+        renderer: NetworkManager
+"#;
+
+const NM_RUN: &str = "  - [netplan, apply]\n";
+
+/// Root's, as Fedora's `/run/cloud-init` is root's only. 2 is done with recoverable errors, such
+/// as Fedora's hostname, which cloud-init sets only on a later try.
+const CLOUD_INIT_WAIT: &str =
+  "sudo cloud-init status --wait >/dev/null; [ $? != 1 ] || sudo cloud-init status --long";
 
 /// The first boot of a new Linux VM: cloud-init done. The seed goes then, or the desktop would
 /// show it as a disk from the next boot on.
 pub fn linux_setup(vm: &Vm) -> io::Result<()> {
   eprintln!("waiting for cloud-init to install the desktop (several minutes)");
   ssh::wait(vm, Duration::from_secs(600))?;
-  ssh::output(vm, "cloud-init status --wait >/dev/null || cloud-init status --long")?;
+  ssh::output(vm, CLOUD_INIT_WAIT)?;
   match fs::remove_file(vm.path("seed.iso")) {
     Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
     _ => Ok(()),
@@ -434,10 +797,14 @@ pub fn windows_setup(vm: &Vm) -> io::Result<()> {
 /// Waits for the desktop: its processes running, then the screen lit, which takes macOS up to
 /// half a minute more while it is busy starting.
 pub fn desktop(vm: &Vm) -> io::Result<()> {
-  let names = match vm.config.os() {
-    Os::Macos => "Dock Finder WallpaperAgent",
-    Os::Linux => "xfce4-session xfce4-panel xfdesktop",
-    Os::Windows => "",
+  let names = match (vm.config.os(), find(&vm.config.system)?.desktop) {
+    // WallpaperAgent draws the desktop from macOS 14 on, the Dock before it.
+    (Os::Macos, _) if vm.config.macos().is_some_and(|x| x < 14) => "Dock Finder",
+    (Os::Macos, _) => "Dock Finder WallpaperAgent",
+    (_, Desktop::Xfce) => "xfce4-session xfce4-panel xfdesktop",
+    (_, Desktop::Plasma) => "ksmserver kwin_x11 plasmashell",
+    (_, Desktop::Gnome) => "gnome-shell",
+    _ => "",
   };
 
   let script = match vm.config.os() {
@@ -493,6 +860,7 @@ mod tests {
     assert_eq!(find("macos-27").unwrap().os, Os::Macos);
     assert_eq!(find("windows-11").unwrap().os, Os::Windows);
     assert!(find("windows-10").is_err());
+    assert!(SYSTEMS.iter().all(|x| crate::args::HELP.contains(x.name)));
     for x in SYSTEMS.iter().map(|x| (x.url, x.sha256)).chain([VIRTIO, OPENSSH]) {
       assert_eq!(x.1.len(), 64, "{}", x.0);
       assert!(x.1.chars().all(|x| x.is_ascii_hexdigit() && !x.is_ascii_uppercase()), "{}", x.0);
@@ -500,15 +868,55 @@ mod tests {
     }
   }
 
+  fn lint(cmd: &str, args: &[&str], text: &str) -> bool {
+    use std::io::Write;
+
+    let mut child = Command::new(cmd).args(args).stdin(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
+    child.wait().unwrap().success()
+  }
+
+  #[test]
+  fn mac_files() {
+    // The bytes that logged in on macOS 26.
+    let kc = [0x4c, 0xbb, 0x61, 0x17, 0xd2, 0xbc, 0xdd, 0xea, 0xa3, 0xb9, 0x1f, 0x7d];
+    assert_eq!(kcpassword("1234"), kc);
+    assert_eq!(kcpassword("12345678901").len(), 12);
+    assert_eq!(kcpassword("123456789012").len(), 24);
+
+    let script = mac_script();
+    assert!(script.contains(r"printf '\114\273\141\027\322\274\335\352\243\271\037\175' > /etc/k"));
+    assert!(script.contains("rm -f /Library/LaunchDaemons/trivm.setup.plist /private/var/db/"));
+    assert!(script.contains("shutdown -r now\n"));
+    assert!(lint("sh", &["-n"], &script));
+    assert!(lint("plutil", &["-lint", "-s", "-"], &mac_daemon()));
+    assert!(mac_daemon().contains("<string>/private/var/db/trivm-setup.sh</string>"));
+  }
+
   #[test]
   fn seed() {
-    let text = user_data("ssh-ed25519 AAAA trivm", "Europe/Sofia");
-    assert!(text.starts_with("#cloud-config\n"));
-    assert!(text.contains(r#"ssh_authorized_keys: ["ssh-ed25519 AAAA trivm"]"#));
-    assert!(text.contains("autologin-user=user\n"));
-    assert!(text.contains("timezone: Europe/Sofia\n"));
-    assert!(text.contains("SetEnv DISPLAY=:0\n"));
-    assert!(!text.contains('\t'));
+    let linux = SYSTEMS.iter().filter(|x| x.os == Os::Linux);
+    for sys in linux {
+      let text = user_data(sys, "ssh-ed25519 AAAA trivm", "Europe/Sofia");
+      assert!(text.starts_with("#cloud-config\n"));
+      assert!(text.contains(r#"ssh_authorized_keys: ["ssh-ed25519 AAAA trivm"]"#));
+      assert!(text.contains("timezone: Europe/Sofia\n"));
+      assert!(text.contains("SetEnv DISPLAY=:0\n"));
+      assert!(text.contains("'xdotool']\n"), "{}", sys.name);
+      assert!(!text.contains('\t') && !text.contains("{user}"), "{}", sys.name);
+
+      let (dm, login, nm) = match sys.desktop {
+        Desktop::Xfce => ("lightdm", "autologin-user=user\n", false),
+        Desktop::Plasma => ("sddm", "[Autologin]\n      User=user\n", false),
+        Desktop::Gnome => ("gdm3", "AutomaticLogin=user\n", true),
+        Desktop::Own => unreachable!(),
+      };
+
+      assert!(text.contains(&format!("[systemctl, enable, {dm}]\n")), "{}", sys.name);
+      assert!(text.contains(login), "{}", sys.name);
+      assert_eq!(text.contains("[netplan, apply]\n"), nm, "{}", sys.name);
+    }
+
     assert_eq!(
       meta_data("ubuntu-24.04", "02:aa:00:00:00:01"),
       "instance-id: ubuntu-24-04-02aa00000001\nlocal-hostname: ubuntu-24-04\n"

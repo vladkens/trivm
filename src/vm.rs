@@ -53,6 +53,18 @@ impl Config {
     }
   }
 
+  /// Whether VZ makes the guest's user on its first boot (`VZMacGuestProvisioningOptions`), as
+  /// for macOS 27 and later; an older macOS gets its user from files on its Data volume, or from
+  /// its Setup Assistant answered by hand when that volume is encrypted.
+  pub fn provisioned(&self) -> bool {
+    self.macos().is_some_and(|x| x >= 27)
+  }
+
+  /// The version of a `macos-<n>` system.
+  pub fn macos(&self) -> Option<u32> {
+    self.system.strip_prefix("macos-").and_then(|x| x.parse().ok())
+  }
+
   pub fn memory_bytes(&self) -> u64 {
     self.memory as u64 * GIB
   }
@@ -291,6 +303,10 @@ mod tests {
     };
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
+    assert!(c.provisioned());
+    assert!(
+      !Config { system: "macos-26".into(), ..Config::parse(&c.text()).unwrap() }.provisioned()
+    );
     assert!(!c.text().contains("port"));
     assert_eq!(c.memory_bytes(), 8 << 30);
     assert!(Config::parse("system = x\n").is_err());
@@ -335,6 +351,12 @@ mod tests {
     assert_eq!(vm.pid(), Some(std::process::id() as i32));
     assert!(vm.lock().is_err());
     drop(lock);
+    // A process another test forks meanwhile shares the lock until it execs: 8 ms here.
+    let t = std::time::Instant::now();
+    while vm.pid().is_some() && t.elapsed().as_secs() < 1 {
+      std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
     assert_eq!(vm.pid(), None);
     fs::remove_dir_all(&dir).unwrap();
   }

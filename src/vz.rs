@@ -390,7 +390,7 @@ pub fn serve(vm: Vm) -> io::Result<()> {
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
   match (vm.config.os(), vm.config.setup) {
-    (Os::Macos, true) => {
+    (Os::Macos, true) if vm.config.provisioned() => {
       let opts = provisioning()?;
       unsafe { machine.startWithOptions_completionHandler(&opts, &block) }
     }
