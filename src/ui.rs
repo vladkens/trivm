@@ -68,6 +68,12 @@ cat "$d/out"
 rm -rf "$d"
 "#;
 
+/// Prints the titles of the X clients from the bottom of the stacking order to the top.
+const STACK: &str = r#"for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
+  xprop -id "$id" -notype _NET_WM_NAME
+done
+"#;
+
 /// Puts agent-desktop, its archive on stdin, in the guest.
 const INSTALL: &str = "set -e
 sudo -n mkdir -p /usr/local/bin
@@ -80,7 +86,8 @@ const A11Y: &str = "gsettings set org.gnome.desktop.interface toolkit-accessibil
 
 /// `ui <vm> [--app <name>]`: the visible windows, all apps' or one's, and their elements.
 pub fn ui(name: &str, app: Option<&str>) -> io::Result<()> {
-  let nodes = tree(&running(name)?, app)?;
+  let vm = running(name)?;
+  let nodes = tree(&vm, &windows(&vm)?, app)?;
   if nodes.is_empty() {
     eprintln!("no windows on {name}'s desktop");
   }
@@ -93,7 +100,8 @@ pub fn ui(name: &str, app: Option<&str>) -> io::Result<()> {
 }
 
 /// `click <vm> --name <text>`: the element of that name clicked at its frame's middle, as
-/// `click <x> <y>` does.
+/// `click <x> <y>` does, its window raised first as a person brings it to the front; on Linux an
+/// error when a window X keeps above it (its dialog) covers that point.
 pub fn click(
   name: &str,
   text: &str,
@@ -102,7 +110,8 @@ pub fn click(
   double: bool,
 ) -> io::Result<()> {
   let vm = running(name)?;
-  let nodes = tree(&vm, app)?;
+  let all = windows(&vm)?;
+  let nodes = tree(&vm, &all, app)?;
   let node = match find(&nodes, text)[..] {
     [one] => one,
     [] => return Err(bad(format!("no element named {text:?} in {name}"))),
@@ -121,6 +130,27 @@ pub fn click(
     return Err(bad(format!("{} is off the screen", node.line())));
   }
 
+  // The menu bar, with no id, is in front of every window.
+  let window = window_of(&nodes, node);
+  let focused = |w: &Node| w.states.iter().any(|x| x == "focused");
+  if !window.id.is_empty() && !focused(window) {
+    // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
+    let raised = agent_desktop(&vm, &["focus-window", "--window-id", &window.id]);
+    if let Err(e) = raised
+      && !windows(&vm)?.iter().any(|w| w.id == window.id && focused(w))
+    {
+      return Err(e);
+    }
+  }
+
+  if vm.config.os() == Os::Linux && !window.id.is_empty() {
+    let above = above(&vm, &window.name)?;
+    let cover = |w: &&Node| w.id != window.id && above.contains(&w.name) && w.covers(x, y);
+    if let Some(w) = all.iter().find(cover) {
+      return Err(bad(format!("{} is under {}", node.line(), w.line())));
+    }
+  }
+
   let (button, clicks) = (if right { "right" } else { "left" }, if double { 2 } else { 1 });
   vz::ask(&vm, &format!("click {x} {y} {button} {clicks}"), "")?;
   eprintln!("clicked {} at {x},{y}", node.line());
@@ -135,24 +165,52 @@ fn running(name: &str) -> io::Result<Vm> {
   }
 }
 
-/// The visible windows, all apps' or one's, each followed by its elements, after the menu bar
-/// on macOS, the frontmost app's: agent-desktop lists the windows, then reads their trees in one
-/// batch.
-fn tree(vm: &Vm, app: Option<&str>) -> io::Result<Vec<Node>> {
-  let wanted = |x: &str| app.is_none_or(|a| x.eq_ignore_ascii_case(a));
+/// The visible windows, front to back, as agent-desktop lists them.
+fn windows(vm: &Vm) -> io::Result<Vec<Node>> {
   let all = agent_desktop(vm, &["list-windows"])?;
   let shown =
     |w: &&Json| w.get("visible").bool() && w.get("accessible").bool() && !w.get("minimized").bool();
-  let shown: Vec<&Json> = all.items().iter().filter(shown).collect();
-  let windows: Vec<&Json> =
-    shown.iter().copied().filter(|w| wanted(w.get("app_name").str())).collect();
+  let window = |w: &Json| Node {
+    id: w.get("id").str().into(),
+    app: w.get("app_name").str().into(),
+    role: "window".into(),
+    name: w.get("title").str().into(),
+    states: w.get("is_focused").bool().then(|| "focused".to_string()).into_iter().collect(),
+    frame: frame(w.get("bounds")).unwrap_or_default(),
+    ..Node::default()
+  };
+
+  Ok(all.items().iter().filter(shown).map(window).collect())
+}
+
+/// The titles of the windows above the one of that title on a Linux guest's screen, from X's
+/// stacking order: agent-desktop lists the focused window first, though X keeps its dialogs
+/// above it.
+fn above(vm: &Vm, title: &str) -> io::Result<Vec<String>> {
+  let titles = titles(&ssh::output(vm, &format!("sh -c {}", ssh::quote(STACK)))?);
+  let at = titles.iter().rposition(|x| x == title);
+  Ok(at.map_or(Vec::new(), |i| titles[i + 1..].to_vec()))
+}
+
+/// The titles in xprop's lines, `_NET_WM_NAME = "<title>"`.
+fn titles(out: &str) -> Vec<String> {
+  let title = |x: &str| Some(x.strip_prefix("_NET_WM_NAME = \"")?.strip_suffix('"')?.to_string());
+  let unescape = |x: String| x.replace("\\\"", "\"").replace("\\\\", "\\");
+  out.lines().filter_map(title).map(unescape).collect()
+}
+
+/// The windows, all apps' or one's, each followed by its elements, after the menu bar on macOS,
+/// the frontmost app's: agent-desktop reads their trees in one batch.
+fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
+  let wanted = |x: &str| app.is_none_or(|a| x.eq_ignore_ascii_case(a));
+  let windows: Vec<&Node> = all.iter().filter(|w| wanted(&w.app)).collect();
 
   let snapshot = |scope: String| {
     format!(
       r#"{{"command":"snapshot","args":{{{scope},"include_bounds":true,"compact":true,"max_depth":{DEPTH}}}}}"#
     )
   };
-  let window = |w: &&Json| snapshot(format!(r#""window_id":{}"#, json_str(w.get("id").str())));
+  let window = |w: &&Node| snapshot(format!(r#""window_id":{}"#, json_str(&w.id)));
   let mut batch: Vec<String> = windows.iter().map(window).collect();
   let menubar = vm.config.os() == Os::Macos;
   if menubar {
@@ -167,25 +225,14 @@ fn tree(vm: &Vm, app: Option<&str>) -> io::Result<Vec<Node>> {
     let front = bar.get("app").str();
     if !front.is_empty() && wanted(front) {
       let frame = frame(bar.get("tree").get("bounds")).unwrap_or_default();
-      let states = Vec::new();
-      let (app, role, name, value) = (front.into(), "menubar".into(), String::new(), String::new());
-      add(&mut out, Node { depth: 0, app, role, name, value, states, frame }, bar);
+      let head = Node { app: front.into(), role: "menubar".into(), frame, ..Node::default() };
+      add(&mut out, head, bar);
     }
 
     for (w, res) in windows.iter().zip(results) {
-      let window = Node {
-        depth: 0,
-        app: w.get("app_name").str().into(),
-        role: "window".into(),
-        name: w.get("title").str().into(),
-        value: String::new(),
-        states: w.get("is_focused").bool().then(|| "focused".to_string()).into_iter().collect(),
-        frame: frame(w.get("bounds")).unwrap_or_default(),
-      };
-
       match res.get("error").get("message").str() {
-        "" => add(&mut out, window, res.get("data")),
-        msg => eprintln!("trivm: {}: {msg}", window.line()),
+        "" => add(&mut out, (*w).clone(), res.get("data")),
+        msg => eprintln!("trivm: {}: {msg}", w.line()),
       }
     }
   }
@@ -193,7 +240,7 @@ fn tree(vm: &Vm, app: Option<&str>) -> io::Result<Vec<Node>> {
   if let Some(app) = app
     && out.is_empty()
   {
-    let mut apps: Vec<&str> = shown.iter().map(|w| w.get("app_name").str()).collect();
+    let mut apps: Vec<&str> = all.iter().map(|w| w.app.as_str()).collect();
     apps.sort();
     apps.dedup();
     return Err(bad(format!(
@@ -301,9 +348,11 @@ fn plist_strings(args: &[&str]) -> String {
 // MARK: Tree
 
 /// An element as `ui` prints it: a window at depth 0, its elements under it.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct Node {
   depth: usize,
+  /// agent-desktop's id of a window; none for the menu bar and an element.
+  id: String,
   /// The app, a window's.
   app: String,
   role: String,
@@ -319,6 +368,12 @@ impl Node {
   fn middle(&self) -> (f64, f64) {
     let [x, y, w, h] = self.frame;
     ((x + w / 2.0).round(), (y + h / 2.0).round())
+  }
+
+  /// Whether the point is in its frame.
+  fn covers(&self, x: f64, y: f64) -> bool {
+    let [left, top, w, h] = self.frame;
+    (left..left + w).contains(&x) && (top..top + h).contains(&y)
   }
 
   /// Its line without the indent.
@@ -393,7 +448,7 @@ fn flatten(node: &Json, depth: usize, out: &mut Vec<Node>) {
   let at = out.len();
   let (role, name, value) = (role.into(), name.to_string(), value.to_string());
   let nameless = name.is_empty() && value.is_empty();
-  out.push(Node { depth, app: String::new(), role, name, value, states, frame });
+  out.push(Node { depth, role, name, value, states, frame, ..Node::default() });
   for x in children {
     flatten(x, depth + 1, out);
   }
@@ -421,6 +476,12 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
 
   let low = text.to_lowercase();
   elements().filter(|x| x.name.to_lowercase().contains(&low)).collect()
+}
+
+/// The window or menu bar an element is in: the last line at depth 0 up to it.
+fn window_of<'a>(nodes: &'a [Node], node: &'a Node) -> &'a Node {
+  let at = nodes.iter().position(|x| std::ptr::eq(x, node)).unwrap_or(0);
+  nodes[..=at].iter().rev().find(|x| x.depth == 0).unwrap_or(node)
 }
 
 // MARK: JSON
@@ -699,6 +760,7 @@ mod tests {
 
     let window = Node {
       depth: 0,
+      id: "w-1".into(),
       app: "Wavo".into(),
       role: "window".into(),
       name: "a \"b\"\n".into(),
@@ -707,6 +769,8 @@ mod tests {
       frame: [520.0, 100.0, 560.0, 593.0],
     };
     assert_eq!(window.to_string(), r#"Wavo: window "a \"b\"\n" [focused] 520,100 560x593"#);
+    assert!(window.covers(520.0, 100.0) && window.covers(1079.0, 692.0));
+    assert!(!window.covers(1080.0, 300.0) && !window.covers(600.0, 99.0));
     assert_eq!(cut(&"é".repeat(101)), format!("{}…", "é".repeat(100)));
     assert_eq!(cut("short"), "short");
   }
@@ -722,6 +786,22 @@ mod tests {
     assert_eq!(names("Wavo"), [r#"statictext "Wavo" 783,108 34x16"#]);
     assert!(names("Hidden").is_empty());
     assert_eq!(names("e").len(), 4);
+
+    // Two windows: the first's elements, then the second's.
+    let mut nodes = nodes;
+    let window =
+      |id: &str| Node { depth: 0, id: id.into(), role: "window".into(), ..Node::default() };
+    nodes.insert(4, window("w-2"));
+    nodes.insert(0, window("w-1"));
+    let of = |x: &str| window_of(&nodes, find(&nodes, x)[0]).id.clone();
+    assert_eq!((of("General"), of("Microphone")), ("w-1".into(), "w-2".into()));
+  }
+
+  #[test]
+  fn stack() {
+    let out =
+      "_NET_WM_NAME = \"Desktop\"\n_NET_WM_NAME:  not found.\n_NET_WM_NAME = \"a \\\"b\\\" \\\\\"";
+    assert_eq!(titles(out), ["Desktop", r#"a "b" \"#]);
   }
 
   #[test]

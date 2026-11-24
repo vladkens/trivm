@@ -91,7 +91,7 @@ trivm ui macos-27 --app Wavo
 #     radiobutton "General" [checked selected] 654,110 56x48
 #     radiobutton "Models" 710,110 56x48
 #   combobox "Microphone" = "Automatic" 939,211 111x24
-trivm click macos-27 --name Models
+trivm click macos-27 --name Models   # raises Wavo's window first if another is in front
 ```
 
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
