@@ -117,6 +117,8 @@ pub fn create(
   };
 
   let vm = Vm::new(&name, config)?;
+  // Held while installing, so the VM isn't deleted or started in the middle.
+  let hold = vm.hold()?;
   let made = match sys.os {
     Os::Macos => macos(&vm, &file),
     Os::Linux => linux(&vm, &file),
@@ -128,6 +130,7 @@ pub fn create(
     return Err(e);
   }
 
+  drop(hold);
   crate::start(&vm.name)
 }
 

@@ -177,7 +177,9 @@ impl Vm {
       fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.path("pid"))?;
     match f.try_lock() {
       Ok(()) => {}
-      Err(fs::TryLockError::WouldBlock) => return Err(bad(format!("{} is running", self.name))),
+      Err(fs::TryLockError::WouldBlock) => {
+        return Err(bad(format!("{} is in use: running, being made or cloned", self.name)));
+      }
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
