@@ -68,15 +68,22 @@ cat "$d/out"
 rm -rf "$d"
 "#;
 
-/// Prints the X clients from the bottom of the stacking order to the top, a line each: its
-/// window's x, y, width, height and map state, the window manager's frame around it and GTK's
-/// shadow inside it (left, right, top, bottom each), and `_NET_WM_NAME = "<title>"`.
-const STACK: &str = r#"extents() { xprop -id "$1" -notype "$2" | sed -n 's/.*= //p' | tr -d , | grep . || echo 0 0 0 0; }
-for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
+/// Prints X's active window, then the windows shown on the screen, top to bottom, popups too:
+/// `window <id> <x> <y> <width> <height>`, a client's in a window manager's frame, then the frame
+/// around it, GTK's shadow inside it, the window it's for and its title, as `xprop` prints them.
+const STACK: &str = r#"set -e
+xprop -root -notype _NET_ACTIVE_WINDOW
+frames=$(for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
+  echo "$(xwininfo -id "$id" -tree | awk '/Parent window id/ { print $4 }') $id"
+done)
+for top in $(xwininfo -root -children | awk '$1 ~ /^0x/ { print $1 }'); do
+  id=$(echo "$frames" | awk -v top="$top" '$1 == top { print $2 }')
+  id=${id:-$top}
   g=$(xwininfo -id "$id" | awk '/Absolute upper-left X/ { x = $NF } /Absolute upper-left Y/ { y = $NF }
-    /Width:/ { w = $NF } /Height:/ { h = $NF } /Map State/ { m = $NF } END { print x, y, w, h, m }')
-  echo "$g $(extents "$id" _NET_FRAME_EXTENTS) $(extents "$id" _GTK_FRAME_EXTENTS)" \
-    "$(xprop -id "$id" -notype _NET_WM_NAME)"
+    /Width:/ { w = $NF } /Height:/ { h = $NF } /IsViewable/ { print x, y, w, h }')
+  [ -n "$g" ] || continue
+  echo "window $id $g"
+  xprop -id "$id" -notype _NET_FRAME_EXTENTS _GTK_FRAME_EXTENTS WM_TRANSIENT_FOR _NET_WM_NAME || true
 done
 "#;
 
@@ -107,7 +114,7 @@ pub fn ui(name: &str, app: Option<&str>) -> io::Result<()> {
 
 /// `click <vm> --name <text>`: the element of that name clicked at its frame's middle, as
 /// `click <x> <y>` does, its window raised first as a person brings it to the front; on Linux an
-/// error when a window X keeps above it (its dialog) covers that point.
+/// error when another window X shows covers that point: a dialog, an always-on-top one, a popup.
 pub fn click(
   name: &str,
   text: &str,
@@ -149,18 +156,29 @@ pub fn click(
     }
   }
 
-  // agent-desktop lists the focused window first, but X keeps a dialog above its window, and
-  // lists windows with no accessibility too. The window's client is the lowest of its title and
-  // frame, else of its title, so a twin of it above counts.
+  // agent-desktop lists the focused window first, but X keeps a dialog or an always-on-top window
+  // above it and doesn't list popups. X's window at the point must be the window, told from a
+  // twin of its title and frame by X's focus, or the popup of the menu the element is in.
   if vm.config.os() == Os::Linux && !window.id.is_empty() {
-    let clients = clients(&ssh::output(&vm, &format!("sh -c {}", ssh::quote(STACK)))?);
-    let own = clients.iter().position(|c| c.name == window.name && c.frame == window.frame);
-    let Some(own) = own.or_else(|| clients.iter().position(|c| c.name == window.name)) else {
-      return Err(bad(format!("{} isn't among X's windows; click by its frame", window.line())));
-    };
+    let (active, all) = stack(&ssh::output(&vm, &format!("sh -c {}", ssh::quote(STACK)))?);
+    let like = |c: &&Client| c.window.name == window.name && c.window.frame == window.frame;
+    let mut twins: Vec<&Client> = all.iter().filter(like).collect();
+    if twins.is_empty() {
+      twins = all.iter().filter(|c| c.window.name == window.name).collect();
+    }
 
-    if let Some(c) = clients[own + 1..].iter().find(|c| c.covers(x, y)) {
-      return Err(bad(format!("{} is under {}", node.line(), c.line())));
+    let own = |id: &str| twins.iter().any(|c| c.id == id) && (twins.len() == 1 || id == active);
+    match all.iter().find(|c| c.window.covers(x, y)) {
+      Some(c) if own(&c.id) => {}
+      Some(c) if own(&c.owner) && in_menu(&nodes, node, c.window.frame) => {}
+      Some(c) if twins.len() > 1 && twins.iter().any(|t| t.id == c.id) => {
+        let line = window.line();
+        return Err(bad(format!(
+          "{line} has a twin of its title and frame, and X's focus is on neither"
+        )));
+      }
+      Some(c) => return Err(bad(format!("{} is under {}", node.line(), c.window.line()))),
+      None => return Err(bad(format!("{} is on none of X's windows", node.line()))),
     }
   }
 
@@ -196,24 +214,56 @@ fn windows(vm: &Vm) -> io::Result<Vec<Node>> {
   Ok(all.items().iter().filter(shown).map(window).collect())
 }
 
-/// The X clients shown on a Linux guest's screen, bottom to top, as windows with their frames
-/// and titles, from `STACK`'s lines: every one, with no accessibility too. A frame is as
-/// agent-desktop gives a window's: the window manager's frame in, GTK's shadow out.
-fn clients(out: &str) -> Vec<Node> {
-  let client = |line: &str| {
-    let (head, title) = line.split_once(" _NET_WM_NAME")?;
-    let parts: Vec<&str> = head.split_whitespace().collect();
-    let [x, y, w, h, "IsViewable", ref ext @ ..] = parts[..] else { return None };
-    let n: Vec<f64> =
-      [x, y, w, h].iter().chain(ext).map(|x| x.parse().ok()).collect::<Option<_>>()?;
-    let [x, y, w, h, l, r, t, b, gl, gr, gt, gb] = n[..] else { return None };
-    let frame = [x - l + gl, y - t + gt, w + l + r - gl - gr, h + t + b - gt - gb];
-    let name = title.strip_prefix(" = \"").and_then(|x| x.strip_suffix('"')).unwrap_or_default();
-    let name = name.replace("\\\"", "\"").replace("\\\\", "\\");
-    Some(Node { role: "window".into(), name, frame, ..Node::default() })
+/// A window X shows on a Linux guest's screen: a client, a popup, one with no accessibility.
+struct Client {
+  id: String,
+  /// The window it's for: a dialog's or popup's.
+  owner: String,
+  window: Node,
+}
+
+/// X's active window and the windows it shows, top to bottom, from `STACK`'s lines. A frame is
+/// as agent-desktop gives a window's: the window manager's frame in, GTK's shadow out.
+fn stack(out: &str) -> (String, Vec<Client>) {
+  let id = |x: &str| -> String {
+    let id = x.strip_prefix("window id # ").and_then(|x| x.split(',').next());
+    id.unwrap_or_default().into()
+  };
+  let sides = |x: &str| -> [f64; 4] {
+    let n: Option<Vec<f64>> =
+      x.split([' ', ',']).filter(|x| !x.is_empty()).map(|x| x.parse().ok()).collect();
+    n.and_then(|n| n.try_into().ok()).unwrap_or_default()
   };
 
-  out.lines().filter_map(client).collect()
+  let (mut active, mut all) = (String::new(), Vec::<Client>::new());
+  for line in out.lines() {
+    if let Some((x, rest)) = line.strip_prefix("window ").and_then(|x| x.split_once(' ')) {
+      let window = Node { role: "window".into(), frame: sides(rest), ..Node::default() };
+      all.push(Client { id: x.into(), owner: String::new(), window });
+      continue;
+    }
+
+    let Some((key, value)) = line.split_once([':', '=']) else { continue };
+    let (key, value) = (key.trim(), value.trim());
+    if key == "_NET_ACTIVE_WINDOW" {
+      active = id(value);
+    }
+
+    let Some(c) = all.last_mut() else { continue };
+    let ([l, r, t, b], [x, y, w, h]) = (sides(value), c.window.frame);
+    match key {
+      "_NET_FRAME_EXTENTS" => c.window.frame = [x - l, y - t, w + l + r, h + t + b],
+      "_GTK_FRAME_EXTENTS" => c.window.frame = [x + l, y + t, w - l - r, h - t - b],
+      "WM_TRANSIENT_FOR" => c.owner = id(value),
+      "_NET_WM_NAME" => {
+        let name = value.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or_default();
+        c.window.name = name.replace("\\\"", "\"").replace("\\\\", "\\");
+      }
+      _ => {}
+    }
+  }
+
+  (active, all)
 }
 
 /// The windows, all apps' or one's, each followed by its elements, after the menu bar on macOS,
@@ -493,6 +543,22 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
 
   let low = text.to_lowercase();
   elements().filter(|x| x.name.to_lowercase().contains(&low)).collect()
+}
+
+/// Whether the element is an item of an open menu whose items all lie in `frame`: the popup the
+/// menu shows them in.
+fn in_menu(nodes: &[Node], node: &Node, frame: [f64; 4]) -> bool {
+  let at = nodes.iter().position(|x| std::ptr::eq(x, node)).unwrap_or(0);
+  let Some(menu) = nodes[..at].iter().rposition(|x| x.depth < node.depth) else { return false };
+  let depth = nodes[menu].depth;
+  let mut items = nodes[menu + 1..].iter().take_while(|x| x.depth > depth);
+  let [left, top, w, h] = frame;
+  let inside = |x: &Node| {
+    let [l, t, iw, ih] = x.frame;
+    l >= left && t >= top && l + iw <= left + w && t + ih <= top + h
+  };
+
+  nodes[menu].role == "menu" && items.all(|x| x.depth > depth + 1 || inside(x))
 }
 
 /// The window or menu bar an element is in: the last line at depth 0 up to it.
@@ -815,22 +881,55 @@ mod tests {
   }
 
   #[test]
-  fn stack() {
-    let out = r#"0 0 1920 1080 IsViewable 0 0 0 0 0 0 0 0 _NET_WM_NAME = "Desktop"
-5 56 818 483 IsViewable 5 5 29 5 0 0 0 0 _NET_WM_NAME = "a \"b\" \\"
-100 100 452 387 IsViewable 0 0 0 0 26 26 23 29 _NET_WM_NAME = "Shadowed"
-5 56 818 483 IsUnMapped 5 5 29 5 0 0 0 0 _NET_WM_NAME = "Minimized"
-807 1031 306 49 IsViewable 0 0 0 0 0 0 0 0 _NET_WM_NAME:  not found."#;
-    let lines: Vec<String> = clients(out).iter().map(|x| x.line()).collect();
+  fn stacking() {
+    let out = r#"_NET_ACTIVE_WINDOW: window id # 0x1200007, 0x0
+window 0x120029a 634 345 296 270
+_NET_FRAME_EXTENTS:  not found.
+_GTK_FRAME_EXTENTS = 6, 6, 5, 7
+WM_TRANSIENT_FOR: window id # 0x1200007
+_NET_WM_NAME = "Thunar"
+window 0x1200007 636 320 648 489
+_NET_FRAME_EXTENTS = 1, 1, 24, 1
+_GTK_FRAME_EXTENTS:  not found.
+WM_TRANSIENT_FOR:  not found.
+_NET_WM_NAME = "a \"b\" \\"
+window 0x2a00004 -26 7 870 568
+_NET_FRAME_EXTENTS = 0, 0, 0, 0
+_GTK_FRAME_EXTENTS = 26, 26, 23, 29
+_NET_WM_NAME = "Shadow"
+window 0x800036 -1 0 1 1080
+_NET_WM_NAME:  not found."#;
+    let (active, all) = stack(out);
+    assert_eq!(active, "0x1200007");
+    let lines: Vec<String> =
+      all.iter().map(|c| format!("{} {} {}", c.id, c.owner, c.window.line())).collect();
     assert_eq!(
       lines,
       [
-        r#"window "Desktop" 0,0 1920x1080"#,
-        r#"window "a \"b\" \\" 0,27 828x517"#,
-        r#"window "Shadowed" 126,123 400x335"#,
-        "window 807,1031 306x49"
+        r#"0x120029a 0x1200007 window "Thunar" 640,350 284x258"#,
+        r#"0x1200007  window "a \"b\" \\" 635,296 650x514"#,
+        r#"0x2a00004  window "Shadow" 0,30 818x516"#,
+        "0x800036  window -1,0 1x1080"
       ]
     );
+  }
+
+  #[test]
+  fn menus() {
+    let item =
+      |depth, role: &str, frame| Node { depth, role: role.into(), frame, ..Node::default() };
+    let nodes = [
+      item(0, "window", [635.0, 296.0, 650.0, 514.0]),
+      item(1, "menu", [640.0, 325.0, 41.0, 25.0]),
+      item(2, "menuitem", [640.0, 352.0, 284.0, 25.0]),
+      item(3, "statictext", [0.0, 0.0, 1.0, 1.0]),
+      item(2, "menuitem", [640.0, 581.0, 284.0, 25.0]),
+      item(1, "button", [644.0, 354.0, 31.0, 31.0]),
+    ];
+    let popup = [640.0, 350.0, 284.0, 258.0];
+    assert!(in_menu(&nodes, &nodes[2], popup) && in_menu(&nodes, &nodes[4], popup));
+    assert!(!in_menu(&nodes, &nodes[4], [640.0, 350.0, 284.0, 200.0]));
+    assert!(!in_menu(&nodes, &nodes[5], popup) && !in_menu(&nodes, &nodes[0], popup));
   }
 
   #[test]
