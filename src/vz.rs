@@ -372,8 +372,9 @@ fn provisioning() -> io::Result<Retained<VZMacOSVirtualMachineStartOptions>> {
   }
 }
 
-/// `trivm _run <vm>`: starts the VM and serves `ctl.sock` until the VM stops.
-pub fn serve(vm: Vm) -> io::Result<()> {
+/// `trivm _run <vm>`: starts the VM, macOS's from recoveryOS with `recovery`, and serves
+/// `ctl.sock` until the VM stops.
+pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   let _lock = vm.lock()?;
   let mtm = MainThreadMarker::new().ok_or_else(|| bad("not on the main thread"))?;
   let app = NSApplication::sharedApplication(mtm);
@@ -391,8 +392,14 @@ pub fn serve(vm: Vm) -> io::Result<()> {
   // SAFETY: the VM runs on the main queue, which `app.run()` runs.
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
-  match (vm.config.os(), vm.config.setup) {
-    (Os::Macos, true) => {
+  match (vm.config.os(), vm.config.setup, recovery) {
+    (Os::Linux, _, true) => return Err(bad(format!("{} runs Linux: no recoveryOS", vm.name))),
+    (Os::Macos, _, true) => unsafe {
+      let opts = VZMacOSVirtualMachineStartOptions::new();
+      opts.setStartUpFromMacOSRecovery(true);
+      machine.startWithOptions_completionHandler(&opts, &block)
+    },
+    (Os::Macos, true, false) => {
       let opts = provisioning()?;
       unsafe { machine.startWithOptions_completionHandler(&opts, &block) }
     }

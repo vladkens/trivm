@@ -25,6 +25,10 @@ Clones of a stopped VM, made in a second with APFS and sharing its disk until wr
                           TRIVM_VM, then delete the clone; exit with the command's code. One
                           argument is a shell line, more are run as they are
 
+macOS permissions for the app under test:
+  sip <vm> on|off         turn System Integrity Protection on or off from recoveryOS, which trivm
+                          drives (about a minute); the VM is up after
+
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
                           are passed as they are
@@ -115,9 +119,14 @@ pub enum Cmd {
     vm: String,
     cmd: Vec<String>,
   },
-  /// The process that runs a VM, started by `start`.
+  Sip {
+    vm: String,
+    on: bool,
+  },
+  /// The process that runs a VM, started by `start`; macOS's from recoveryOS for `sip`.
   Serve {
     vm: String,
+    recovery: bool,
   },
   /// The process that deletes a `run`'s clone if `run` ends without doing it.
   Reap,
@@ -157,7 +166,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         let value = it.next().ok_or_else(|| bad(format!("{x}: no value given")))?;
         flags.push((x, Some(value)));
       }
-      "--force" | "--right" | "--double" | "-h" | "--help" => flags.push((x, None)),
+      "--force" | "--right" | "--double" | "--recovery" | "-h" | "--help" => flags.push((x, None)),
       _ if x.starts_with("--") => return Err(bad(format!("unknown flag {x}"))),
       _ => pos.push(x),
     }
@@ -207,7 +216,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         "open" => Cmd::Open { vm },
         "ssh" => Cmd::Ssh { vm },
         "ip" => Cmd::Ip { vm },
-        _ => Cmd::Serve { vm },
+        _ => Cmd::Serve { vm, recovery: flag("--recovery") },
       }
     }
 
@@ -216,6 +225,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     "clone" => {
       want(2, "<vm> <name>")?;
       Cmd::Clone { vm: pos[0].clone(), name: pos[1].clone() }
+    }
+    "sip" => {
+      want(2, "<vm> on|off")?;
+      let on = match pos[1].as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return Err(bad("usage: trivm sip <vm> on|off")),
+      };
+
+      Cmd::Sip { vm: pos[0].clone(), on }
     }
     "cp" => {
       want(2, "<src> <dst>")?;
@@ -284,7 +303,11 @@ mod tests {
     assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None });
     assert_eq!(args("cp a:/x .").unwrap(), Cmd::Cp { src: "a:/x".into(), dst: ".".into() });
     assert_eq!(args("clone a b").unwrap(), Cmd::Clone { vm: "a".into(), name: "b".into() });
-    assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into() });
+
+    assert_eq!(args("sip a off").unwrap(), Cmd::Sip { vm: "a".into(), on: false });
+    assert_eq!(args("sip a on").unwrap(), Cmd::Sip { vm: "a".into(), on: true });
+    assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into(), recovery: false });
+    assert_eq!(args("_run a --recovery").unwrap(), Cmd::Serve { vm: "a".into(), recovery: true });
     assert_eq!(args("type a --x").unwrap(), Cmd::Type { vm: "a".into(), text: "--x".into() });
     assert_eq!(args("type a --help").unwrap(), Cmd::Type { vm: "a".into(), text: "--help".into() });
   }
@@ -317,6 +340,8 @@ mod tests {
     assert!(args("start").is_err());
     assert!(args("start a b").is_err());
     assert!(args("clone a").is_err());
+    assert!(args("sip a").is_err());
+    assert!(args("sip a no").is_err());
     assert!(args("create x --cpus many").is_err());
     assert!(args("click a -1 2").is_err());
     assert!(args("start a --what").is_err());

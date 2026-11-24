@@ -62,6 +62,14 @@ trivm run ubuntu-24.04 'trivm exec "$TRIVM_VM" -- uname -a'
 trivm clone macos-27 macos-27-clean   # a clone to keep, with its own address
 ```
 
+An app that needs macOS's permissions gets them with no one clicking Allow: trivm turns System
+Integrity Protection off from recoveryOS, which it drives itself (about a minute, once per VM):
+
+```sh
+trivm sip macos-27 off
+trivm exec macos-27 -- csrutil status   # disabled
+```
+
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
 shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
 (`TRIVM_HOME`), downloads in `~/.trivm/cache`.
