@@ -118,6 +118,7 @@ impl Vm {
 
     // The config made only if there is none, so of two creates of a name one fails.
     let dir = home().join(name);
+    socket_fits(&dir)?;
     fs::create_dir_all(&dir)?;
     match fs::OpenOptions::new().write(true).create_new(true).open(dir.join("config")) {
       Ok(_) => {}
@@ -215,6 +216,15 @@ impl Vm {
 pub fn valid(name: &str) -> bool {
   let chars = name.chars().all(|x| x.is_ascii_alphanumeric() || "-_.".contains(x));
   chars && !name.is_empty() && !name.starts_with('.') && name != "cache"
+}
+
+/// Checks that the VM's `ctl.sock` fits a Unix socket's path, which macOS caps at 104 bytes with
+/// the NUL: a VM whose doesn't can't start.
+pub fn socket_fits(dir: &Path) -> io::Result<()> {
+  match dir.join("ctl.sock").as_os_str().len() < 104 {
+    true => Ok(()),
+    false => Err(bad(format!("{}: too long a path for a socket; a shorter name", dir.display()))),
+  }
 }
 
 /// A random locally administered unicast MAC address.
@@ -325,6 +335,9 @@ mod tests {
     for x in ["macos-27", "ubuntu-24.04", "a_b"] {
       assert!(valid(x), "{x}");
     }
+
+    assert!(socket_fits(Path::new("/Users/user/.trivm/macos-27-run-1")).is_ok());
+    assert!(socket_fits(&Path::new("/Users/user/.trivm").join("x".repeat(80))).is_err());
 
     for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "cache"] {
       assert!(!valid(x), "{x}");

@@ -38,6 +38,7 @@ pub fn clone(
   }
 
   let dst = vm::home().join(name);
+  vm::socket_fits(&dst)?;
   let taken = || {
     let msg = format!("{name} exists; trivm delete {name} first");
     io::Error::new(io::ErrorKind::AlreadyExists, msg)
