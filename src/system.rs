@@ -2,14 +2,14 @@
 //! The systems trivm installs, each from its own source pinned by SHA-256, and `create`: the
 //! download, the VM's files, the install, and the first boot that makes the user.
 
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::{fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
-use crate::{bad, qcow2, run, ssh, vz};
+use crate::{bad, qcow2, qemu, run, ssh, vz, windows};
 
 pub struct System {
   pub name: &'static str,
@@ -42,7 +42,32 @@ pub const SYSTEMS: &[System] = &[
     memory: 4,
     disk: 32,
   },
+  System {
+    name: "windows-11",
+    os: Os::Windows,
+    // Its page's flow gives a link only to a browser: the person downloads the ISO, `--iso`.
+    url: "https://www.microsoft.com/en-us/software-download/windows11arm64",
+    // The page's list, English: Windows 11 26H2 (26300.9457) Arm64.
+    sha256: "8992f2d2cfd2fa647e579e9eb31fc21f34da8333c29b6170fde17d2ed6623e9c",
+    cpus: 4,
+    memory: 6,
+    disk: 64,
+  },
 ];
+
+/// Windows' ISO in the cache, cloned there from `--iso`.
+const WINDOWS_ISO: &str = "Win11_26H2_English_Arm64.iso";
+
+/// Fedora's virtio-win, for NetKVM, the driver of the VM's virtio-net.
+const VIRTIO: (&str, &str) = (
+  "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso",
+  "303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d",
+);
+
+const OPENSSH: (&str, &str) = (
+  "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.4.0.0p1-Preview/OpenSSH-ARM64-v10.4.0.0.msi",
+  "75fa139d8975eedb706d9180f454e2148af09d417692825f383fe00610b00e21",
+);
 
 pub fn find(name: &str) -> io::Result<&'static System> {
   let names: Vec<_> = SYSTEMS.iter().map(|x| x.name).collect();
@@ -54,9 +79,9 @@ fn cache() -> PathBuf {
   vm::home().join("cache")
 }
 
-/// The system's file in the cache, downloaded (resumed after a break) and checked first.
-fn download(sys: &System) -> io::Result<PathBuf> {
-  let name = sys.url.rsplit('/').next().unwrap_or(sys.name);
+/// A file in the cache, downloaded (resumed after a break) and checked first.
+fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
+  let name = url.rsplit('/').next().unwrap_or(url);
   let path = cache().join(name);
   fs::create_dir_all(cache())?;
   let _lock = lock(&path)?;
@@ -65,20 +90,64 @@ fn download(sys: &System) -> io::Result<PathBuf> {
   }
 
   let part = path.with_extension("part");
-  eprintln!("downloading {}", sys.url);
+  eprintln!("downloading {url}");
   let mut curl = Command::new("curl");
-  curl.args(["-fL", "--retry", "5", "-C", "-", "-o"]).arg(&part).arg(sys.url);
+  curl.args(["-fL", "--retry", "5", "-C", "-", "-o"]).arg(&part).arg(url);
   curl.arg(if io::stderr().is_terminal() { "--progress-bar" } else { "-sS" });
   if !curl.status()?.success() {
-    return Err(bad(format!("downloading {} failed; run again to resume", sys.url)));
+    return Err(bad(format!("downloading {url} failed; run again to resume")));
   }
 
-  eprintln!("checking {name}");
-  let out = run(Command::new("shasum").args(["-a", "256"]).arg(&part))?;
-  let sum = String::from_utf8_lossy(&out);
-  if sum.split_whitespace().next() != Some(sys.sha256) {
+  if let Err(e) = check(&part, sha256) {
     fs::remove_file(&part)?;
-    return Err(bad(format!("{name}: SHA-256 isn't {}; removed, run again", sys.sha256)));
+    return Err(bad(format!("{e}; removed, run again")));
+  }
+
+  fs::rename(&part, &path)?;
+  Ok(path)
+}
+
+fn check(path: &Path, sha256: &str) -> io::Result<()> {
+  let name = path.file_name().unwrap_or_default().to_string_lossy();
+  eprintln!("checking {name}");
+  let out = run(Command::new("shasum").args(["-a", "256"]).arg(path))?;
+  match String::from_utf8_lossy(&out).split_whitespace().next() == Some(sha256) {
+    true => Ok(()),
+    false => Err(bad(format!("{name}: SHA-256 isn't {sha256}"))),
+  }
+}
+
+/// The CDs of a Windows VM being set up: Microsoft's ISO and the seed.
+pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
+  let cds = [cache().join(WINDOWS_ISO), vm.path("seed.iso")];
+  match vm.config.setup {
+    true => cds.into_iter().filter(|x| x.exists()).collect(),
+    false => Vec::new(),
+  }
+}
+
+/// Windows' ISO in the cache, cloned there from `iso` once its SHA-256 is Microsoft's.
+fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
+  let path = cache().join(WINDOWS_ISO);
+  fs::create_dir_all(cache())?;
+  let _lock = lock(&path)?;
+  if path.exists() {
+    return Ok(path);
+  }
+
+  let Some(iso) = iso else {
+    return Err(bad(format!(
+      "Microsoft gives its ISO only to a browser: download Windows 11 (multi-edition ISO for \
+      Arm64), English, from {}, then: trivm create {} --iso <path>",
+      sys.url, sys.name
+    )));
+  };
+
+  check(Path::new(iso), sys.sha256)
+    .map_err(|e| bad(format!("{e}: not Microsoft's English Arm64 ISO of 26H2")))?;
+  let part = path.with_extension("part");
+  if run(Command::new("cp").arg("-c").arg(iso).arg(&part)).is_err() {
+    run(Command::new("cp").arg(iso).arg(&part))?;
   }
 
   fs::rename(&part, &path)?;
@@ -99,6 +168,7 @@ pub fn create(
   cpus: Option<u32>,
   memory: Option<u32>,
   disk: Option<u32>,
+  iso: Option<String>,
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
@@ -106,7 +176,14 @@ pub fn create(
     return Err(bad(format!("{name} exists; trivm delete {name} first")));
   }
 
-  let file = download(sys)?;
+  let file = match sys.os {
+    Os::Windows => windows_download(sys, iso.as_deref())?,
+    _ if iso.is_some() => {
+      return Err(bad(format!("--iso: {} installs from its own image", sys.name)));
+    }
+    _ => download(sys.url, sys.sha256)?,
+  };
+
   let config = Config {
     system: sys.name.into(),
     cpus: cpus.unwrap_or(sys.cpus),
@@ -114,12 +191,14 @@ pub fn create(
     disk: disk.unwrap_or(sys.disk),
     mac: vm::random_mac()?,
     setup: true,
+    port: None,
   };
 
   let vm = Vm::new(&name, config)?;
   let made = match sys.os {
     Os::Macos => macos(&vm, &file),
     Os::Linux => linux(&vm, &file),
+    Os::Windows => windows(&vm),
   };
 
   // A VM whose install failed is no use: it goes, its downloads stay.
@@ -289,7 +368,68 @@ pub fn linux_setup(vm: &Vm) -> io::Result<()> {
   }
 }
 
-// MARK: Both
+// MARK: Windows
+
+/// The disk, the firmware's variables and the seed: `autounattend.xml`, the setup script its first
+/// logon runs, trivm's key, Win32-OpenSSH's MSI and virtio-net's driver from virtio-win.
+fn windows(vm: &Vm) -> io::Result<()> {
+  let virtio = download(VIRTIO.0, VIRTIO.1)?;
+  let msi = download(OPENSSH.0, OPENSSH.1)?;
+  sparse(&vm.path("disk.img"), vm.config.disk_bytes())?;
+  qemu::platform(vm)?;
+
+  let seed = vm.path("seed");
+  fs::create_dir_all(&seed)?;
+  // Windows' computer names are 15 characters at most.
+  let host: String = hostname(&vm.name).chars().take(15).collect();
+  fs::write(seed.join("autounattend.xml"), windows::autounattend(host.trim_end_matches('-')))?;
+  fs::write(seed.join(windows::SETUP), windows::setup_script())?;
+  fs::write(seed.join("key.pub"), ssh::public_key()? + "\n")?;
+  fs::copy(&msi, seed.join("openssh.msi"))?;
+
+  // The ISO's files are hard links across NetKVM's folders, read-only once extracted.
+  let tmp = vm.path("virtio");
+  fs::create_dir_all(&tmp)?;
+  run(Command::new("tar").arg("-xf").arg(&virtio).arg("-C").arg(&tmp).arg("NetKVM"))?;
+  run(Command::new("chmod").arg("-R").arg("u+w").arg(&tmp))?;
+  fs::rename(tmp.join("NetKVM/w11/ARM64"), seed.join("netkvm"))?;
+  fs::remove_dir_all(&tmp)?;
+
+  let mut hdiutil = Command::new("hdiutil");
+  hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "TRIVM", "-o"]);
+  run(hdiutil.arg(vm.path("seed.iso")).arg(&seed).stdin(Stdio::null()))?;
+  fs::remove_dir_all(&seed)
+}
+
+/// Whether a disk has a GPT, the first thing Windows Setup writes.
+fn partitioned(disk: &Path) -> io::Result<bool> {
+  let mut head = [0u8; 520];
+  fs::File::open(disk)?.read_exact(&mut head)?;
+  Ok(&head[512..] == b"EFI PART")
+}
+
+/// The first boot of a new Windows VM: the ISO's boot asks for a key first, then Setup installs
+/// unattended, and the first logon's script starts sshd last. The CDs go then.
+pub fn windows_setup(vm: &Vm) -> io::Result<()> {
+  // Once Setup has partitioned the disk, no key: the prompt times out and the disk boots, so a
+  // setup cut short goes on instead of wiping the disk again.
+  if !partitioned(&vm.path("disk.img"))? {
+    for _ in 0..40 {
+      let _ = qemu::ask(vm, "key enter", "");
+      thread::sleep(Duration::from_secs(1));
+    }
+  }
+
+  eprintln!("installing Windows on {}, unattended", vm.name);
+  ssh::wait(vm, Duration::from_secs(5400))?;
+  qemu::ask(vm, "eject", "")?;
+  match fs::remove_file(vm.path("seed.iso")) {
+    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+    _ => Ok(()),
+  }
+}
+
+// MARK: All
 
 /// Waits for the desktop: its processes running, then the screen lit, which takes macOS up to
 /// half a minute more while it is busy starting.
@@ -297,17 +437,22 @@ pub fn desktop(vm: &Vm) -> io::Result<()> {
   let names = match vm.config.os() {
     Os::Macos => "Dock Finder WallpaperAgent",
     Os::Linux => "xfce4-session xfce4-panel xfdesktop",
+    Os::Windows => "",
   };
 
-  let script = format!(
-    "for i in $(seq 150); do up=1; for x in {names}; do pgrep -u {USER} -x $x >/dev/null || up=; \
-    done; [ $up ] && exit 0; sleep 2; done; echo 'no desktop in 5 minutes'; exit 1"
-  );
+  let script = match vm.config.os() {
+    Os::Windows => windows::DESKTOP.to_string(),
+    _ => format!(
+      "for i in $(seq 150); do up=1; for x in {names}; do pgrep -u {USER} -x $x >/dev/null || up=; \
+      done; [ $up ] && exit 0; sleep 2; done; echo 'no desktop in 5 minutes'; exit 1"
+    ),
+  };
+
   ssh::output(vm, &script)?;
 
   // A dark wallpaper would never count as lit, hence no error.
   for _ in 0..60 {
-    let lit = vz::ask(vm, "lit", "").ok().and_then(|x| x.parse::<f64>().ok());
+    let lit = crate::ask(vm, "lit", "").ok().and_then(|x| x.parse::<f64>().ok());
     if lit.is_some_and(|x| x > 0.5) {
       break;
     }
@@ -331,12 +476,27 @@ mod tests {
   use super::*;
 
   #[test]
+  fn disks() {
+    let path = std::env::temp_dir().join(format!("trivm-disk-{}", std::process::id()));
+    let mut data = vec![0u8; 1024];
+    fs::write(&path, &data).unwrap();
+    assert!(!partitioned(&path).unwrap());
+
+    data[512..520].copy_from_slice(b"EFI PART");
+    fs::write(&path, &data).unwrap();
+    assert!(partitioned(&path).unwrap());
+    fs::remove_file(&path).unwrap();
+  }
+
+  #[test]
   fn systems() {
     assert_eq!(find("macos-27").unwrap().os, Os::Macos);
-    assert!(find("windows-11").is_err());
-    for x in SYSTEMS {
-      assert_eq!(x.sha256.len(), 64, "{}", x.name);
-      assert!(x.url.starts_with("https://"), "{}", x.name);
+    assert_eq!(find("windows-11").unwrap().os, Os::Windows);
+    assert!(find("windows-10").is_err());
+    for x in SYSTEMS.iter().map(|x| (x.url, x.sha256)).chain([VIRTIO, OPENSSH]) {
+      assert_eq!(x.1.len(), 64, "{}", x.0);
+      assert!(x.1.chars().all(|x| x.is_ascii_hexdigit() && !x.is_ascii_uppercase()), "{}", x.0);
+      assert!(x.0.starts_with("https://"), "{}", x.0);
     }
   }
 

@@ -26,6 +26,7 @@ pub fn home() -> PathBuf {
 pub enum Os {
   Macos,
   Linux,
+  Windows,
 }
 
 #[derive(Debug, PartialEq)]
@@ -39,13 +40,16 @@ pub struct Config {
   pub mac: String,
   /// Set until the first boot has made the user and the guest answers SSH with trivm's key.
   pub setup: bool,
+  /// The host's port forwarded to the guest's SSH, for a VM on QEMU's user network.
+  pub port: Option<u16>,
 }
 
 impl Config {
   pub fn os(&self) -> Os {
-    match self.system.starts_with("macos") {
-      true => Os::Macos,
-      false => Os::Linux,
+    match self.system.split('-').next() {
+      Some("macos") => Os::Macos,
+      Some("windows") => Os::Windows,
+      _ => Os::Linux,
     }
   }
 
@@ -76,14 +80,20 @@ impl Config {
       disk: number("disk")?,
       mac: get("mac")?,
       setup: get("setup").is_ok_and(|x| x == "true"),
+      port: get("port").ok().and_then(|x| x.parse().ok()),
     })
   }
 
   fn text(&self) -> String {
-    let Self { system, cpus, memory, disk, mac, setup } = self;
-    format!(
+    let Self { system, cpus, memory, disk, mac, setup, port } = self;
+    let mut text = format!(
       "system = {system}\ncpus = {cpus}\nmemory = {memory}\ndisk = {disk}\nmac = {mac}\nsetup = {setup}\n"
-    )
+    );
+    if let Some(port) = port {
+      text += &format!("port = {port}\n");
+    }
+
+    text
   }
 }
 
@@ -150,7 +160,7 @@ impl Vm {
   }
 
   pub fn save(&self) -> io::Result<()> {
-    let tmp = self.dir.join("config.tmp");
+    let tmp = self.dir.join(format!("config.{}.tmp", std::process::id()));
     fs::write(&tmp, self.config.text())?;
     fs::rename(tmp, self.dir.join("config"))
   }
@@ -185,8 +195,13 @@ impl Vm {
     Ok(f)
   }
 
-  /// The guest's address from its newest DHCP lease.
+  /// The guest's address: from its newest DHCP lease, or the host's own for a VM on QEMU's user
+  /// network, whose SSH is forwarded from `port`.
   pub fn ip(&self) -> Option<String> {
+    if self.config.port.is_some() {
+      return Some("127.0.0.1".into());
+    }
+
     let mut text = String::new();
     fs::File::open(LEASES).ok()?.read_to_string(&mut text).ok()?;
     lease(&text, &self.config.mac)
@@ -272,12 +287,18 @@ mod tests {
       disk: 64,
       mac: "02:00:00:00:00:01".into(),
       setup: true,
+      port: None,
     };
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
+    assert!(!c.text().contains("port"));
     assert_eq!(c.memory_bytes(), 8 << 30);
     assert!(Config::parse("system = x\n").is_err());
     assert!(!Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\n").unwrap().setup);
+
+    let w = Config { system: "windows-11".into(), port: Some(50022), ..c };
+    assert_eq!(Config::parse(&w.text()).unwrap(), w);
+    assert_eq!(w.os(), Os::Windows);
   }
 
   #[test]

@@ -61,7 +61,7 @@ pub fn screen(os: Os) -> Screen {
   match os {
     // Twice 1600×900 points at a Retina density: macOS draws it HiDPI.
     Os::Macos => Screen { width: 1600.0, height: 900.0, scale: 2.0 },
-    Os::Linux => Screen { width: 1920.0, height: 1080.0, scale: 1.0 },
+    Os::Linux | Os::Windows => Screen { width: 1920.0, height: 1080.0, scale: 1.0 },
   }
 }
 
@@ -69,6 +69,10 @@ pub fn screen(os: Os) -> Screen {
 
 pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
   let os = vm.config.os();
+  if os == Os::Windows {
+    return Err(bad(format!("{} runs on QEMU", vm.name)));
+  }
+
   let screen = screen(os);
   let (w, h) = ((screen.width * screen.scale) as isize, (screen.height * screen.scale) as isize);
 
@@ -137,7 +141,7 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
         let trackpad = Retained::into_super(VZMacTrackpadConfiguration::new());
         c.setPointingDevices(&NSArray::from_retained_slice(&[pointer, trackpad]));
       }
-      Os::Linux => {
+      Os::Linux | Os::Windows => {
         let id = VZGenericMachineIdentifier::initWithDataRepresentation(
           VZGenericMachineIdentifier::alloc(),
           &NSData::with_bytes(&fs::read(vm.path("machine.bin"))?),
@@ -197,7 +201,9 @@ fn disk(
 ) -> io::Result<Retained<VZStorageDeviceConfiguration>> {
   let (cache, sync) = match os {
     Os::Macos => (VZDiskImageCachingMode::Automatic, VZDiskImageSynchronizationMode::Full),
-    Os::Linux => (VZDiskImageCachingMode::Cached, VZDiskImageSynchronizationMode::Fsync),
+    Os::Linux | Os::Windows => {
+      (VZDiskImageCachingMode::Cached, VZDiskImageSynchronizationMode::Fsync)
+    }
   };
 
   // SAFETY: a configuration object for a file that exists.
