@@ -251,10 +251,11 @@ unsafe extern "C" {
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
+  // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.
   let gone = |secs: u64| {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
-      if vm.pid().is_none() {
+      if vm.pid() != Some(pid) {
         return true;
       }
 
