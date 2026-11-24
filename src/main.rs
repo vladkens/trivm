@@ -131,9 +131,10 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// VZ runs only in a binary signed with the virtualization entitlement: trivm signs itself ad hoc
-/// the first time (a copy signed, then renamed over the running binary) and runs again.
+/// the first time (a copy signed, then renamed over the running binary) and runs again. The binary
+/// is the file a symlink to it names: `current_exe` is the path trivm was run by.
 fn signed() -> io::Result<()> {
-  let exe = env::current_exe()?;
+  let exe = env::current_exe()?.canonicalize()?;
   let out =
     Command::new("codesign").args(["-d", "--entitlements", "-", "--xml"]).arg(&exe).output()?;
   if String::from_utf8_lossy(&out.stdout).contains("com.apple.security.virtualization") {
