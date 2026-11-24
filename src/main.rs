@@ -173,19 +173,19 @@ pub fn start(name: &str) -> io::Result<()> {
     spawn(&vm)?;
   }
 
-  if vm.config.setup {
-    match vm.config.os() {
-      Os::Macos => system::macos_setup(&vm)?,
-      Os::Linux => system::linux_setup(&vm)?,
-    }
-
-    vm.config.setup = false;
-    vm.save()?;
-  } else {
-    ssh::wait(&vm, Duration::from_secs(300))?;
+  match (vm.config.setup, vm.config.os()) {
+    (true, Os::Macos) => system::macos_setup(&vm)?,
+    (true, Os::Linux) => system::linux_setup(&vm)?,
+    (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
   system::desktop(&vm)?;
+  // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
+  if vm.config.setup {
+    vm.config.setup = false;
+    vm.save()?;
+  }
+
   eprintln!("{name} is up at {}", ssh::ip(&vm)?);
   Ok(())
 }
