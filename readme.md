@@ -84,10 +84,13 @@ accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the
 
 ```sh
 trivm ui macos-27 --app Wavo
-# Wavo: window "Wavo" [focused] 520,100 560x593
-#   radiobutton "General" [checked selected] 654,132 56x48
-#   radiobutton "Models" 710,132 56x48
-#   combobox "Microphone" = "Automatic" 939,233 111x24
+# Wavo: menubar 0,0 1600x30
+#   menuitem "Wavo" 43,0 56x30
+# Wavo: window "Wavo" [focused] 520,78 560x593
+#   tablist 520,110 560x48
+#     radiobutton "General" [checked selected] 654,110 56x48
+#     radiobutton "Models" 710,110 56x48
+#   combobox "Microphone" = "Automatic" 939,211 111x24
 trivm click macos-27 --name Models
 ```
 
