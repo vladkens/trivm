@@ -451,6 +451,8 @@ fn quit(dir: &Path, code: i32, why: &str) -> ! {
 /// A request is its first line and, for `type` and `shot`, the text after it (the text, the
 /// shot's path); the reply is `ok [info]` or `err <message>`.
 fn reply(mut conn: UnixStream) {
+  // Requests are served one at a time: one that never ends mustn't hold up the rest.
+  let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
   let mut req = String::new();
   if conn.read_to_string(&mut req).is_err() {
     return;
