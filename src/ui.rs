@@ -68,9 +68,14 @@ cat "$d/out"
 rm -rf "$d"
 "#;
 
-/// Prints the titles of the X clients from the bottom of the stacking order to the top.
+/// Prints the X clients from the bottom of the stacking order to the top, a line each: its
+/// window's x, y, width, height and map state, the frame's extents around it (left, right, top,
+/// bottom) and `_NET_WM_NAME = "<title>"`.
 const STACK: &str = r#"for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
-  xprop -id "$id" -notype _NET_WM_NAME
+  g=$(xwininfo -id "$id" | awk '/Absolute upper-left X/ { x = $NF } /Absolute upper-left Y/ { y = $NF }
+    /Width:/ { w = $NF } /Height:/ { h = $NF } /Map State/ { m = $NF } END { print x, y, w, h, m }')
+  e=$(xprop -id "$id" -notype _NET_FRAME_EXTENTS | sed -n 's/.*= //p' | tr -d ,)
+  echo "$g ${e:-0 0 0 0} $(xprop -id "$id" -notype _NET_WM_NAME)"
 done
 "#;
 
@@ -143,11 +148,15 @@ pub fn click(
     }
   }
 
+  // agent-desktop lists the focused window first, but X keeps a dialog above its window, and
+  // a window with no accessibility is in no list but X's: what covers the point is read there.
+  // The window's client is the lowest of its title and frame, so a twin of it above counts.
   if vm.config.os() == Os::Linux && !window.id.is_empty() {
-    let above = above(&vm, &window.name)?;
-    let cover = |w: &&Node| w.id != window.id && above.contains(&w.name) && w.covers(x, y);
-    if let Some(w) = all.iter().find(cover) {
-      return Err(bad(format!("{} is under {}", node.line(), w.line())));
+    let clients = clients(&ssh::output(&vm, &format!("sh -c {}", ssh::quote(STACK)))?);
+    let own = |c: &Node| c.name == window.name && c.frame == window.frame;
+    let above = clients.iter().position(own).map_or(&[][..], |i| &clients[i + 1..]);
+    if let Some(c) = above.iter().find(|c| c.covers(x, y)) {
+      return Err(bad(format!("{} is under {}", node.line(), c.line())));
     }
   }
 
@@ -183,20 +192,22 @@ fn windows(vm: &Vm) -> io::Result<Vec<Node>> {
   Ok(all.items().iter().filter(shown).map(window).collect())
 }
 
-/// The titles of the windows above the one of that title on a Linux guest's screen, from X's
-/// stacking order: agent-desktop lists the focused window first, though X keeps its dialogs
-/// above it.
-fn above(vm: &Vm, title: &str) -> io::Result<Vec<String>> {
-  let titles = titles(&ssh::output(vm, &format!("sh -c {}", ssh::quote(STACK)))?);
-  let at = titles.iter().rposition(|x| x == title);
-  Ok(at.map_or(Vec::new(), |i| titles[i + 1..].to_vec()))
-}
+/// The X clients shown on a Linux guest's screen, bottom to top, as windows with their frames
+/// and titles, from `STACK`'s lines: every one, with no accessibility too.
+fn clients(out: &str) -> Vec<Node> {
+  let client = |line: &str| {
+    let (head, title) = line.split_once(" _NET_WM_NAME")?;
+    let parts: Vec<&str> = head.split_whitespace().collect();
+    let [x, y, w, h, "IsViewable", l, r, t, b] = parts[..] else { return None };
+    let n: Vec<f64> =
+      [x, y, w, h, l, r, t, b].iter().map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let frame = [n[0] - n[4], n[1] - n[6], n[2] + n[4] + n[5], n[3] + n[6] + n[7]];
+    let name = title.strip_prefix(" = \"").and_then(|x| x.strip_suffix('"')).unwrap_or_default();
+    let name = name.replace("\\\"", "\"").replace("\\\\", "\\");
+    Some(Node { role: "window".into(), name, frame, ..Node::default() })
+  };
 
-/// The titles in xprop's lines, `_NET_WM_NAME = "<title>"`.
-fn titles(out: &str) -> Vec<String> {
-  let title = |x: &str| Some(x.strip_prefix("_NET_WM_NAME = \"")?.strip_suffix('"')?.to_string());
-  let unescape = |x: String| x.replace("\\\"", "\"").replace("\\\\", "\\");
-  out.lines().filter_map(title).map(unescape).collect()
+  out.lines().filter_map(client).collect()
 }
 
 /// The windows, all apps' or one's, each followed by its elements, after the menu bar on macOS,
@@ -799,9 +810,19 @@ mod tests {
 
   #[test]
   fn stack() {
-    let out =
-      "_NET_WM_NAME = \"Desktop\"\n_NET_WM_NAME:  not found.\n_NET_WM_NAME = \"a \\\"b\\\" \\\\\"";
-    assert_eq!(titles(out), ["Desktop", r#"a "b" \"#]);
+    let out = r#"0 0 1920 1080 IsViewable 0 0 0 0 _NET_WM_NAME = "Desktop"
+5 56 818 483 IsViewable 5 5 29 5 _NET_WM_NAME = "a \"b\" \\"
+5 56 818 483 IsUnMapped 5 5 29 5 _NET_WM_NAME = "Minimized"
+807 1031 306 49 IsViewable 0 0 0 0 _NET_WM_NAME:  not found."#;
+    let lines: Vec<String> = clients(out).iter().map(|x| x.line()).collect();
+    assert_eq!(
+      lines,
+      [
+        r#"window "Desktop" 0,0 1920x1080"#,
+        r#"window "a \"b\" \\" 0,27 828x517"#,
+        "window 807,1031 306x49"
+      ]
+    );
   }
 
   #[test]
