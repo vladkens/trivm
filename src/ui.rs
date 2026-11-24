@@ -69,13 +69,14 @@ rm -rf "$d"
 "#;
 
 /// Prints the X clients from the bottom of the stacking order to the top, a line each: its
-/// window's x, y, width, height and map state, the frame's extents around it (left, right, top,
-/// bottom) and `_NET_WM_NAME = "<title>"`.
-const STACK: &str = r#"for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
+/// window's x, y, width, height and map state, the window manager's frame around it and GTK's
+/// shadow inside it (left, right, top, bottom each), and `_NET_WM_NAME = "<title>"`.
+const STACK: &str = r#"extents() { xprop -id "$1" -notype "$2" | sed -n 's/.*= //p' | tr -d , | grep . || echo 0 0 0 0; }
+for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
   g=$(xwininfo -id "$id" | awk '/Absolute upper-left X/ { x = $NF } /Absolute upper-left Y/ { y = $NF }
     /Width:/ { w = $NF } /Height:/ { h = $NF } /Map State/ { m = $NF } END { print x, y, w, h, m }')
-  e=$(xprop -id "$id" -notype _NET_FRAME_EXTENTS | sed -n 's/.*= //p' | tr -d ,)
-  echo "$g ${e:-0 0 0 0} $(xprop -id "$id" -notype _NET_WM_NAME)"
+  echo "$g $(extents "$id" _NET_FRAME_EXTENTS) $(extents "$id" _GTK_FRAME_EXTENTS)" \
+    "$(xprop -id "$id" -notype _NET_WM_NAME)"
 done
 "#;
 
@@ -149,13 +150,16 @@ pub fn click(
   }
 
   // agent-desktop lists the focused window first, but X keeps a dialog above its window, and
-  // a window with no accessibility is in no list but X's: what covers the point is read there.
-  // The window's client is the lowest of its title and frame, so a twin of it above counts.
+  // lists windows with no accessibility too. The window's client is the lowest of its title and
+  // frame, else of its title, so a twin of it above counts.
   if vm.config.os() == Os::Linux && !window.id.is_empty() {
     let clients = clients(&ssh::output(&vm, &format!("sh -c {}", ssh::quote(STACK)))?);
-    let own = |c: &Node| c.name == window.name && c.frame == window.frame;
-    let above = clients.iter().position(own).map_or(&[][..], |i| &clients[i + 1..]);
-    if let Some(c) = above.iter().find(|c| c.covers(x, y)) {
+    let own = clients.iter().position(|c| c.name == window.name && c.frame == window.frame);
+    let Some(own) = own.or_else(|| clients.iter().position(|c| c.name == window.name)) else {
+      return Err(bad(format!("{} isn't among X's windows; click by its frame", window.line())));
+    };
+
+    if let Some(c) = clients[own + 1..].iter().find(|c| c.covers(x, y)) {
       return Err(bad(format!("{} is under {}", node.line(), c.line())));
     }
   }
@@ -193,15 +197,17 @@ fn windows(vm: &Vm) -> io::Result<Vec<Node>> {
 }
 
 /// The X clients shown on a Linux guest's screen, bottom to top, as windows with their frames
-/// and titles, from `STACK`'s lines: every one, with no accessibility too.
+/// and titles, from `STACK`'s lines: every one, with no accessibility too. A frame is as
+/// agent-desktop gives a window's: the window manager's frame in, GTK's shadow out.
 fn clients(out: &str) -> Vec<Node> {
   let client = |line: &str| {
     let (head, title) = line.split_once(" _NET_WM_NAME")?;
     let parts: Vec<&str> = head.split_whitespace().collect();
-    let [x, y, w, h, "IsViewable", l, r, t, b] = parts[..] else { return None };
+    let [x, y, w, h, "IsViewable", ref ext @ ..] = parts[..] else { return None };
     let n: Vec<f64> =
-      [x, y, w, h, l, r, t, b].iter().map(|x| x.parse().ok()).collect::<Option<_>>()?;
-    let frame = [n[0] - n[4], n[1] - n[6], n[2] + n[4] + n[5], n[3] + n[6] + n[7]];
+      [x, y, w, h].iter().chain(ext).map(|x| x.parse().ok()).collect::<Option<_>>()?;
+    let [x, y, w, h, l, r, t, b, gl, gr, gt, gb] = n[..] else { return None };
+    let frame = [x - l + gl, y - t + gt, w + l + r - gl - gr, h + t + b - gt - gb];
     let name = title.strip_prefix(" = \"").and_then(|x| x.strip_suffix('"')).unwrap_or_default();
     let name = name.replace("\\\"", "\"").replace("\\\\", "\\");
     Some(Node { role: "window".into(), name, frame, ..Node::default() })
@@ -810,16 +816,18 @@ mod tests {
 
   #[test]
   fn stack() {
-    let out = r#"0 0 1920 1080 IsViewable 0 0 0 0 _NET_WM_NAME = "Desktop"
-5 56 818 483 IsViewable 5 5 29 5 _NET_WM_NAME = "a \"b\" \\"
-5 56 818 483 IsUnMapped 5 5 29 5 _NET_WM_NAME = "Minimized"
-807 1031 306 49 IsViewable 0 0 0 0 _NET_WM_NAME:  not found."#;
+    let out = r#"0 0 1920 1080 IsViewable 0 0 0 0 0 0 0 0 _NET_WM_NAME = "Desktop"
+5 56 818 483 IsViewable 5 5 29 5 0 0 0 0 _NET_WM_NAME = "a \"b\" \\"
+100 100 452 387 IsViewable 0 0 0 0 26 26 23 29 _NET_WM_NAME = "Shadowed"
+5 56 818 483 IsUnMapped 5 5 29 5 0 0 0 0 _NET_WM_NAME = "Minimized"
+807 1031 306 49 IsViewable 0 0 0 0 0 0 0 0 _NET_WM_NAME:  not found."#;
     let lines: Vec<String> = clients(out).iter().map(|x| x.line()).collect();
     assert_eq!(
       lines,
       [
         r#"window "Desktop" 0,0 1920x1080"#,
         r#"window "a \"b\" \\" 0,27 828x517"#,
+        r#"window "Shadowed" 126,123 400x335"#,
         "window 807,1031 306x49"
       ]
     );
