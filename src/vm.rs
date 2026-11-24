@@ -4,7 +4,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::bad;
@@ -120,7 +120,8 @@ impl Vm {
     // The config made only if there is none, so of two creates of a name one fails.
     let dir = home().join(name);
     socket_fits(&dir)?;
-    make_dir(&dir)?;
+    fs::create_dir_all(&dir)?;
+    private(&dir)?;
     match fs::OpenOptions::new().write(true).create_new(true).open(dir.join("config")) {
       Ok(_) => {}
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -223,10 +224,10 @@ pub fn valid(name: &str) -> bool {
   chars && !name.is_empty() && !name.starts_with('.') && !OWN.contains(&name)
 }
 
-/// A VM's folder, for its owner only: the guest's disk holds its user's files, and the Mac's other
-/// users share the home folder's group.
-pub fn make_dir(dir: &Path) -> io::Result<()> {
-  fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+/// Makes a VM's folder its owner's only: the guest's disk holds its user's files, and the Mac's
+/// other users share the home folder's group.
+pub fn private(dir: &Path) -> io::Result<()> {
+  fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 /// Checks that the VM's `ctl.sock` fits a Unix socket's path, which macOS caps at 104 bytes with
@@ -357,13 +358,14 @@ mod tests {
   }
 
   #[test]
-  fn private() {
-    use std::os::unix::fs::PermissionsExt;
+  fn owner_only() {
     let dir = std::env::temp_dir().join(format!("trivm-private-{}", std::process::id()));
-    make_dir(&dir.join("a")).unwrap();
-    let mode = fs::metadata(dir.join("a")).unwrap().permissions().mode();
+    fs::create_dir(&dir).unwrap();
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+    private(&dir).unwrap();
+    let mode = fs::metadata(&dir).unwrap().permissions().mode();
+    fs::remove_dir(&dir).unwrap();
     assert_eq!(mode & 0o777, 0o700);
-    fs::remove_dir_all(&dir).unwrap();
   }
 
   #[test]
