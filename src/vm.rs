@@ -249,11 +249,17 @@ pub fn random_mac() -> io::Result<String> {
   Ok(mac_text(&b))
 }
 
-/// The MAC address of `run`'s `n`th clone of a VM: the VM's own with the last byte XORed with
-/// `n`, the same each time, so the clone gets the same lease and address each time.
-pub fn clone_mac(mac: &str, n: u8) -> io::Result<String> {
+/// The MAC address of `run`'s clone of a VM: the VM's own with the last three bytes XORed with a
+/// hash (FNV-1a) of the clone's name, the same each time, so the clone gets the same lease and
+/// address each time, and a clone of a clone none of its ancestors'.
+pub fn clone_mac(mac: &str, name: &str) -> io::Result<String> {
   let mut b = parse_mac(mac).ok_or_else(|| bad(format!("config: not a MAC address: {mac}")))?;
-  b[5] ^= n;
+  let hash = name.bytes().fold(0x811c9dc5u32, |h, x| (h ^ x as u32).wrapping_mul(0x01000193));
+  let [_, h @ ..] = (hash & 0xff_ffff).max(1).to_be_bytes();
+  for (x, h) in b[3..].iter_mut().zip(h) {
+    *x ^= h;
+  }
+
   Ok(mac_text(&b))
 }
 
@@ -401,8 +407,13 @@ mod tests {
     let b = parse_mac(&m).unwrap();
     assert_eq!(b[0] & 0x03, 0x02);
 
-    assert_eq!(clone_mac("02:0a:00:0b:0c:0d", 1).unwrap(), "02:0a:00:0b:0c:0c");
-    assert_eq!(clone_mac("02:0a:00:0b:0c:0d", 2).unwrap(), "02:0a:00:0b:0c:0f");
-    assert!(clone_mac("02:0a", 1).is_err());
+    // The same each time, another for each clone, a clone of a clone's not its original's.
+    let m = "02:0a:00:0b:0c:0d";
+    let (one, two) = (clone_mac(m, "a-run-1").unwrap(), clone_mac(m, "a-run-2").unwrap());
+    assert_eq!(one, clone_mac(m, "a-run-1").unwrap());
+    assert!(one.starts_with("02:0a:00:") && one != m && one != two);
+    let nested = clone_mac(&one, "a-run-1-run-1").unwrap();
+    assert!(nested != m && nested != one && nested != two);
+    assert!(clone_mac("02:0a", "a").is_err());
   }
 }

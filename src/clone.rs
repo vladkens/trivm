@@ -123,7 +123,7 @@ pub fn run(src: &str, cmd: &[String]) -> io::Result<ExitStatus> {
 }
 
 /// `run`'s clone of `src`: `<src>-run-<n>`, the lowest `n` free, with a MAC address of its own
-/// for each `n`. The reaper is told of each try before its files are copied.
+/// for each name. The reaper is told of each try before its files are copied.
 fn slot(src: &str, reaper: &mut io::PipeWriter) -> io::Result<Vm> {
   let mac = Vm::open(src)?.config.mac;
   let mut n = 1;
@@ -132,7 +132,7 @@ fn slot(src: &str, reaper: &mut io::PipeWriter) -> io::Result<Vm> {
     let tell =
       |tmp: &Path| writeln!(reaper, "{} {name} {}", fs::metadata(tmp)?.ino(), tmp.display());
 
-    match clone(src, &name, vm::clone_mac(&mac, n)?, tell) {
+    match clone(src, &name, vm::clone_mac(&mac, &name)?, tell) {
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < u8::MAX => n += 1,
       x => return x,
     }
