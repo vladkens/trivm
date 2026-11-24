@@ -185,6 +185,21 @@ impl Vm {
     Ok(f)
   }
 
+  /// Keeps the VM from starting for as long as the file returned is open: a shared lock on `pid`,
+  /// which the VM's process takes exclusive, so clones of a VM made at once don't wait for each
+  /// other.
+  pub fn hold(&self) -> io::Result<fs::File> {
+    let f =
+      fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.path("pid"))?;
+    match f.try_lock_shared() {
+      Ok(()) => Ok(f),
+      Err(fs::TryLockError::WouldBlock) => {
+        Err(bad(format!("{} is running; trivm stop {} first", self.name, self.name)))
+      }
+      Err(fs::TryLockError::Error(e)) => Err(e),
+    }
+  }
+
   /// The guest's address from its newest DHCP lease.
   pub fn ip(&self) -> Option<String> {
     let mut text = String::new();
@@ -194,7 +209,7 @@ impl Vm {
 }
 
 /// A VM's name: a folder in trivm's, not a path out of it or the cache.
-fn valid(name: &str) -> bool {
+pub fn valid(name: &str) -> bool {
   let chars = name.chars().all(|x| x.is_ascii_alphanumeric() || "-_.".contains(x));
   chars && !name.is_empty() && !name.starts_with('.') && name != "cache"
 }
@@ -204,7 +219,19 @@ pub fn random_mac() -> io::Result<String> {
   let mut b = [0u8; 6];
   fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
   b[0] = (b[0] & 0xfe) | 0x02;
-  Ok(b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":"))
+  Ok(mac_text(&b))
+}
+
+/// The MAC address of `run`'s `n`th clone of a VM: the VM's own with the last byte XORed with
+/// `n`, the same each time, so the clone gets the same lease and address each time.
+pub fn clone_mac(mac: &str, n: u8) -> io::Result<String> {
+  let mut b = parse_mac(mac).ok_or_else(|| bad(format!("config: not a MAC address: {mac}")))?;
+  b[5] ^= n;
+  Ok(mac_text(&b))
+}
+
+fn mac_text(b: &[u8; 6]) -> String {
+  b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
 }
 
 unsafe extern "C" {
@@ -313,8 +340,16 @@ mod tests {
     let lock = vm.lock().unwrap();
     assert_eq!(vm.pid(), Some(std::process::id() as i32));
     assert!(vm.lock().is_err());
+    assert!(vm.hold().is_err());
     drop(lock);
     assert_eq!(vm.pid(), None);
+
+    // Two holds at once, which keep the VM from running and don't count as it running.
+    let (a, b) = (vm.hold().unwrap(), vm.hold().unwrap());
+    assert_eq!(vm.pid(), None);
+    assert!(vm.lock().is_err());
+    drop((a, b));
+    assert!(vm.lock().is_ok());
     fs::remove_dir_all(&dir).unwrap();
   }
 
@@ -323,5 +358,9 @@ mod tests {
     let m = random_mac().unwrap();
     let b = parse_mac(&m).unwrap();
     assert_eq!(b[0] & 0x03, 0x02);
+
+    assert_eq!(clone_mac("02:0a:00:0b:0c:0d", 1).unwrap(), "02:0a:00:0b:0c:0c");
+    assert_eq!(clone_mac("02:0a:00:0b:0c:0d", 2).unwrap(), "02:0a:00:0b:0c:0f");
+    assert!(clone_mac("02:0a", 1).is_err());
   }
 }

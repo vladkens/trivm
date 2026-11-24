@@ -255,20 +255,17 @@ pub fn mac_platform(vm: &Vm, ipsw: &Path) -> io::Result<()> {
       VZMacAuxiliaryStorageInitializationOptions::AllowOverwrite,
     )
     .map_err(ns)?;
-    fs::write(vm.path("machine.bin"), VZMacMachineIdentifier::new().dataRepresentation().to_vec())?;
   }
 
+  fs::write(vm.path("machine.bin"), machine_id(Os::Macos))?;
   fs::write(vm.path("hardware.bin"), hw)
 }
 
 /// Linux's `machine.bin` and `efi.bin`.
 pub fn linux_platform(vm: &Vm) -> io::Result<()> {
-  // SAFETY: plain objects; the store is made at a path in the VM's folder.
+  fs::write(vm.path("machine.bin"), machine_id(Os::Linux))?;
+  // SAFETY: a plain object, made at a path in the VM's folder.
   unsafe {
-    fs::write(
-      vm.path("machine.bin"),
-      VZGenericMachineIdentifier::new().dataRepresentation().to_vec(),
-    )?;
     VZEFIVariableStore::initCreatingVariableStoreAtURL_options_error(
       VZEFIVariableStore::alloc(),
       &url(&vm.path("efi.bin")),
@@ -278,6 +275,17 @@ pub fn linux_platform(vm: &Vm) -> io::Result<()> {
   }
 
   Ok(())
+}
+
+/// A new machine identifier, `machine.bin`: Apple asks VMs that run at once to have their own.
+pub fn machine_id(os: Os) -> Vec<u8> {
+  // SAFETY: plain objects.
+  unsafe {
+    match os {
+      Os::Macos => VZMacMachineIdentifier::new().dataRepresentation().to_vec(),
+      Os::Linux => VZGenericMachineIdentifier::new().dataRepresentation().to_vec(),
+    }
+  }
 }
 
 /// Installs macOS from the IPSW on the VM's disk, printing the progress.

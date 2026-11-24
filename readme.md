@@ -43,6 +43,25 @@ trivm open macos-27            # a window onto the VM, to look or use the mouse
 trivm stop macos-27
 ```
 
+A test that needs a clean system each time runs against a throwaway clone of a stopped VM: an
+APFS copy made in a second that shares the VM's disk until written. `run` starts one, runs the
+command on the host with the clone's name in `TRIVM_VM`, deletes the clone however the command
+ends (Ctrl+C too), and exits with the command's code:
+
+```sh
+cat > test.sh <<'EOF'
+set -e
+trivm cp ./MyApp.dmg "$TRIVM_VM":/tmp/
+trivm exec "$TRIVM_VM" 'hdiutil attach /tmp/MyApp.dmg && cp -R /Volumes/MyApp/MyApp.app /Applications/'
+trivm exec "$TRIVM_VM" -- open -a MyApp
+trivm shot "$TRIVM_VM" myapp.png
+EOF
+trivm run macos-27 -- sh test.sh
+trivm run ubuntu-24.04 'trivm exec "$TRIVM_VM" -- uname -a'
+
+trivm clone macos-27 macos-27-clean   # a clone to keep, with its own address
+```
+
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
 shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
 (`TRIVM_HOME`), downloads in `~/.trivm/cache`.
