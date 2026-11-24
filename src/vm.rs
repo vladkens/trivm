@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use crate::bad;
@@ -119,7 +120,7 @@ impl Vm {
     // The config made only if there is none, so of two creates of a name one fails.
     let dir = home().join(name);
     socket_fits(&dir)?;
-    fs::create_dir_all(&dir)?;
+    make_dir(&dir)?;
     match fs::OpenOptions::new().write(true).create_new(true).open(dir.join("config")) {
       Ok(_) => {}
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -216,6 +217,12 @@ impl Vm {
 pub fn valid(name: &str) -> bool {
   let chars = name.chars().all(|x| x.is_ascii_alphanumeric() || "-_.".contains(x));
   chars && !name.is_empty() && !name.starts_with('.') && name != "cache"
+}
+
+/// A VM's folder, for its owner only: the guest's disk holds its user's files, and the Mac's other
+/// users share the home folder's group.
+pub fn make_dir(dir: &Path) -> io::Result<()> {
+  fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
 /// Checks that the VM's `ctl.sock` fits a Unix socket's path, which macOS caps at 104 bytes with
@@ -343,6 +350,16 @@ mod tests {
       assert!(!valid(x), "{x}");
       assert!(Vm::open(x).is_err(), "{x}");
     }
+  }
+
+  #[test]
+  fn private() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("trivm-private-{}", std::process::id()));
+    make_dir(&dir.join("a")).unwrap();
+    let mode = fs::metadata(dir.join("a")).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o700);
+    fs::remove_dir_all(&dir).unwrap();
   }
 
   #[test]
