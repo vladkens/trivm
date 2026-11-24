@@ -291,7 +291,8 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     }
   }
 
-  let _ = vz::ask(vm, "kill", "");
+  // A VM process busy with a long request answers late; SIGKILL follows anyway.
+  let _ = vz::ask_within(vm, "kill", "", Duration::from_secs(5));
   if !gone(15) {
     vm::signal(pid, 9);
     if !gone(5) {

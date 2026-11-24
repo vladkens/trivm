@@ -60,9 +60,10 @@ From the review of the whole stack (it timed out at 540 s twice, then ran), in `
 code, each checked here: a VM's folder is made for its owner only (0700; the home folder's group
 `staff` has every user of the Mac), a clone's checked so, and a clone's staging folder left from
 before is refused again, not reused; `stop` no longer waits for the shutdown command past its 2
-minutes, and takes the VM as gone once its own process is, so it never follows the VM started
-again meanwhile (a 2 GB Ubuntu clone stopped from inside in 3 s, deleted in 0.3 s); the names of
-trivm's own files (`id_ed25519.pub`, `entitlements.plist`, ...) are refused as VM names. Folders
-made before keep their mode. Not changed: the reaper's stop of a clone another process replaced
-between its inode check and its kill request, a few milliseconds where a replacement takes
-seconds to make and start.
+minutes nor for the answer to its `kill` request past 5 s (a busy VM process answered it after
+up to 300 s), and takes the VM as gone once its own process is, so it never follows the VM
+started again meanwhile (a 2 GB Ubuntu clone stopped from inside in 3 s, with `--force` in 0.3 s);
+the names of trivm's own files (`id_ed25519.pub`, `entitlements.plist`, ...) are refused as VM
+names. Folders made before keep their mode. Not changed: the reaper's stop of a clone another
+process replaced between its inode check and its kill request, a few milliseconds where a
+replacement takes seconds to make and start.
