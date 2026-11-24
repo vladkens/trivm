@@ -270,8 +270,17 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
       Os::Linux => "sudo -n systemctl poweroff",
     };
 
-    let _ = ssh::ssh(vm)?.args(["--", cmd]).stdin(Stdio::null()).output();
-    if gone(120) {
+    // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
+    let mut ssh = ssh::ssh(vm)?;
+    ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let child = ssh.spawn();
+    let down = gone(120);
+    if let Ok(mut x) = child {
+      let _ = x.kill();
+      let _ = x.wait();
+    }
+
+    if down {
       return Ok(());
     }
   }
