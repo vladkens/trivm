@@ -55,3 +55,6 @@ On this Mac (macOS 27.2, Apple silicon), guest macOS 27.2:
 accessibility tree, needs both. Left: recording from the microphone would need an audio input
 device in the VM, which trivm doesn't add; recoveryOS's screens were read on macOS 27.2 only, and
 an older macOS's recoveryOS may need other steps.
+
+Not pushed, no PR yet: pr-gate's deep review, which diffs the whole stack against `origin/main`
+(3,597 lines, `vz` and `clones` with it), timed out at 540 s twice, and the push waits for it.
