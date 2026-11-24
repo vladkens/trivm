@@ -75,6 +75,22 @@ trivm grant macos-27 /Applications/Wavo.app
 trivm grant macos-27 /usr/local/bin/tool screen input
 ```
 
+An agent can read the screen as named elements and click them by name: `ui` lists the windows on
+the guest's desktop (and macOS's menu bar) with their elements, a line each with the role, name,
+value, state and frame in a shot's pixels, read through the system's accessibility by
+[agent-desktop](https://github.com/vercel-labs/agent-desktop), which trivm puts in the guest at
+the first use. On macOS it needs SIP off for its grant. An app shows what its toolkit gives
+accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the first `ui`.
+
+```sh
+trivm ui macos-27 --app Wavo
+# Wavo: window "Wavo" [focused] 520,100 560x593
+#   radiobutton "General" [checked selected] 654,132 56x48
+#   radiobutton "Models" 710,132 56x48
+#   combobox "Microphone" = "Automatic" 939,233 111x24
+trivm click macos-27 --name Models
+```
+
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
 shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
 (`TRIVM_HOME`), downloads in `~/.trivm/cache`.

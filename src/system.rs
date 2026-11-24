@@ -54,9 +54,9 @@ fn cache() -> PathBuf {
   vm::home().join("cache")
 }
 
-/// The system's file in the cache, downloaded (resumed after a break) and checked first.
-fn download(sys: &System) -> io::Result<PathBuf> {
-  let name = sys.url.rsplit('/').next().unwrap_or(sys.name);
+/// The file at `url` in the cache, downloaded (resumed after a break) and checked first.
+pub fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
+  let name = url.rsplit('/').next().unwrap_or(url);
   let path = cache().join(name);
   fs::create_dir_all(cache())?;
   let _lock = lock(&path)?;
@@ -65,20 +65,20 @@ fn download(sys: &System) -> io::Result<PathBuf> {
   }
 
   let part = path.with_extension("part");
-  eprintln!("downloading {}", sys.url);
+  eprintln!("downloading {url}");
   let mut curl = Command::new("curl");
-  curl.args(["-fL", "--retry", "5", "-C", "-", "-o"]).arg(&part).arg(sys.url);
+  curl.args(["-fL", "--retry", "5", "-C", "-", "-o"]).arg(&part).arg(url);
   curl.arg(if io::stderr().is_terminal() { "--progress-bar" } else { "-sS" });
   if !curl.status()?.success() {
-    return Err(bad(format!("downloading {} failed; run again to resume", sys.url)));
+    return Err(bad(format!("downloading {url} failed; run again to resume")));
   }
 
   eprintln!("checking {name}");
   let out = run(Command::new("shasum").args(["-a", "256"]).arg(&part))?;
   let sum = String::from_utf8_lossy(&out);
-  if sum.split_whitespace().next() != Some(sys.sha256) {
+  if sum.split_whitespace().next() != Some(sha256) {
     fs::remove_file(&part)?;
-    return Err(bad(format!("{name}: SHA-256 isn't {}; removed, run again", sys.sha256)));
+    return Err(bad(format!("{name}: SHA-256 isn't {sha256}; removed, run again")));
   }
 
   fs::rename(&part, &path)?;
@@ -106,7 +106,7 @@ pub fn create(
     return Err(bad(format!("{name} exists; trivm delete {name} first")));
   }
 
-  let file = download(sys)?;
+  let file = download(sys.url, sys.sha256)?;
   let config = Config {
     system: sys.name.into(),
     cpus: cpus.unwrap_or(sys.cpus),

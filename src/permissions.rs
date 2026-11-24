@@ -224,7 +224,7 @@ fn png_size(png: &Path) -> io::Result<(f64, f64)> {
 
 /// A service `grant` takes: its name, TCC's services for it, and whether the user's database keeps
 /// them, not the system's.
-struct Service {
+pub struct Service {
   name: &'static str,
   tcc: &'static [&'static str],
   user: bool,
@@ -283,6 +283,19 @@ sudo -n killall -9 tccd 2>/dev/null || true
 pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
   let vm = macos(name)?;
   let services = services(names)?;
+  let client = allow(&vm, app, &services)?;
+  let names: Vec<_> = services.iter().map(|s| s.name).collect();
+  eprintln!(
+    "{client} may use {} in {name}; an app that runs sees them once relaunched",
+    names.join(", ")
+  );
+  Ok(())
+}
+
+/// Writes the grants of the services for the app at a path in a running macOS guest with SIP
+/// off; the app's TCC client, its bundle identifier or path.
+pub fn allow(vm: &Vm, app: &str, services: &[&Service]) -> io::Result<String> {
+  let name = &vm.name;
   if !app.starts_with('/') {
     return Err(bad(format!("{app}: the app's path in the guest, from /")));
   }
@@ -291,7 +304,7 @@ pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
     return Err(bad(format!("{name} isn't running; trivm start {name}")));
   }
 
-  let out = ssh::output(&vm, &format!("sh -c {} app {}", ssh::quote(APP), ssh::quote(app)))?;
+  let out = ssh::output(vm, &format!("sh -c {} app {}", ssh::quote(APP), ssh::quote(app)))?;
   let lines: Vec<&str> = out.lines().collect();
   let [status, kind, client] = lines[..] else {
     return Err(bad(format!("{app} in {name}: {out}")));
@@ -310,18 +323,12 @@ pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
   let (system, user) = (sql(&pick(false), client, kind), sql(&pick(true), client, kind));
   let script =
     format!("sh -c {} write {} {}", ssh::quote(WRITE), ssh::quote(&system), ssh::quote(&user));
-  ssh::output(&vm, &script)?;
-
-  let names: Vec<_> = services.iter().map(|s| s.name).collect();
-  eprintln!(
-    "{client} may use {} in {name}; an app that runs sees them once relaunched",
-    names.join(", ")
-  );
-  Ok(())
+  ssh::output(vm, &script)?;
+  Ok(client.to_string())
 }
 
 /// The services named, all with none.
-fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
+pub fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
   let all: Vec<_> = SERVICES.iter().map(|s| s.name).collect();
   let find = |x: &String| {
     let known = SERVICES.iter().find(|s| s.name == x);

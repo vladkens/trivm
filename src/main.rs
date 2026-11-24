@@ -2,8 +2,8 @@
 //! trivm: macOS and Linux VMs on Apple silicon for coding agents to test apps in. A VM runs in a
 //! process of its own (`vz.rs`), commands and files go through SSH (`ssh.rs`), the screen is read
 //! and driven from the host (`display.rs`), `create` installs a system (`system.rs`), `clone`
-//! and `run` copy one (`clone.rs`), and `sip` and `grant` give the app under test its macOS
-//! permissions (`permissions.rs`).
+//! and `run` copy one (`clone.rs`), `sip` and `grant` give the app under test its macOS
+//! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
 
 mod args;
 mod clone;
@@ -12,6 +12,7 @@ mod permissions;
 mod qcow2;
 mod ssh;
 mod system;
+mod ui;
 mod vm;
 mod vz;
 
@@ -88,6 +89,10 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = vz::ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = vz::ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = vz::ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
+    Cmd::Ui { vm, app } => ui::ui(&vm, app.as_deref())?,
+    Cmd::ClickName { vm, name, app, right, double } => {
+      ui::click(&vm, &name, app.as_deref(), right, double)?;
+    }
     Cmd::Serve { vm, recovery } => {
       signed()?;
       vz::serve(Vm::open(&vm)?, recovery)?;
