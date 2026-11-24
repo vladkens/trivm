@@ -260,7 +260,7 @@ fi
 
 /// Runs `$1` on the system's TCC.db and `$2`, if any, on the user's (macOS 27's is in a container
 /// of tccd's, older ones' in `~/Library`), then kills tccd, which reads them once and ignores
-/// SIGTERM; launchd starts it again.
+/// SIGTERM; launchd starts it again, on demand, so none may be running.
 const WRITE: &str = r#"set -e
 printf '%s' "$1" | sudo -n sqlite3 '/Library/Application Support/com.apple.TCC/TCC.db'
 if [ -n "$2" ]; then
@@ -275,7 +275,7 @@ if [ -n "$2" ]; then
   done
   printf '%s' "$2" | sudo -n sqlite3 "$db"
 fi
-sudo -n killall -9 tccd
+sudo -n killall -9 tccd 2>/dev/null || true
 "#;
 
 /// `grant <vm> <app> [<service>...]`: the services, all by default, allowed for the app at a
