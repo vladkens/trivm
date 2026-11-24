@@ -150,7 +150,8 @@ impl Vm {
   }
 
   pub fn save(&self) -> io::Result<()> {
-    let tmp = self.dir.join("config.tmp");
+    // A file of this process's own: two `start`s may save at once.
+    let tmp = self.dir.join(format!("config.{}", std::process::id()));
     fs::write(&tmp, self.config.text())?;
     fs::rename(tmp, self.dir.join("config"))
   }
