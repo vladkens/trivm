@@ -28,6 +28,10 @@ Clones of a stopped VM, made in a second with APFS and sharing its disk until wr
 macOS permissions for the app under test:
   sip <vm> on|off         turn System Integrity Protection on or off from recoveryOS, which trivm
                           drives (about a minute); the VM is up after
+  grant <vm> <app> [<service>...]
+                          allow an app, by its path in the guest, the services, all by default:
+                          accessibility, screen (recording), input (monitoring), microphone.
+                          Needs SIP off; a running app sees them once relaunched
 
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
@@ -122,6 +126,11 @@ pub enum Cmd {
   Sip {
     vm: String,
     on: bool,
+  },
+  Grant {
+    vm: String,
+    app: String,
+    services: Vec<String>,
   },
   /// The process that runs a VM, started by `start`; macOS's from recoveryOS for `sip`.
   Serve {
@@ -236,6 +245,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
 
       Cmd::Sip { vm: pos[0].clone(), on }
     }
+    "grant" => match pos.len() {
+      2.. => Cmd::Grant { vm: pos[0].clone(), app: pos[1].clone(), services: pos[2..].to_vec() },
+      _ => return Err(bad("usage: trivm grant <vm> <app> [<service>...]")),
+    },
     "cp" => {
       want(2, "<src> <dst>")?;
       Cmd::Cp { src: pos[0].clone(), dst: pos[1].clone() }
@@ -306,6 +319,15 @@ mod tests {
 
     assert_eq!(args("sip a off").unwrap(), Cmd::Sip { vm: "a".into(), on: false });
     assert_eq!(args("sip a on").unwrap(), Cmd::Sip { vm: "a".into(), on: true });
+    assert_eq!(
+      args("grant a /x").unwrap(),
+      Cmd::Grant { vm: "a".into(), app: "/x".into(), services: vec![] }
+    );
+    let services = vec!["screen".into(), "input".into()];
+    assert_eq!(
+      args("grant a /x screen input").unwrap(),
+      Cmd::Grant { vm: "a".into(), app: "/x".into(), services }
+    );
     assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into(), recovery: false });
     assert_eq!(args("_run a --recovery").unwrap(), Cmd::Serve { vm: "a".into(), recovery: true });
     assert_eq!(args("type a --x").unwrap(), Cmd::Type { vm: "a".into(), text: "--x".into() });
@@ -342,6 +364,7 @@ mod tests {
     assert!(args("clone a").is_err());
     assert!(args("sip a").is_err());
     assert!(args("sip a no").is_err());
+    assert!(args("grant a").is_err());
     assert!(args("create x --cpus many").is_err());
     assert!(args("click a -1 2").is_err());
     assert!(args("start a --what").is_err());

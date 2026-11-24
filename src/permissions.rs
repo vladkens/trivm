@@ -209,3 +209,152 @@ fn png_size(png: &Path) -> io::Result<(f64, f64)> {
   let num = |i: usize| u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as f64;
   Ok((num(16), num(20)))
 }
+
+// MARK: TCC grants
+
+/// A service `grant` takes, by name: TCC's services for it, and whether the user's database keeps
+/// them, not the system's.
+type Service = (&'static str, &'static [&'static str], bool);
+
+const SERVICES: &[Service] = &[
+  // Sending events (CGEventPost) is a service of its own beside Accessibility.
+  ("accessibility", &["kTCCServiceAccessibility", "kTCCServicePostEvent"], false),
+  ("screen", &["kTCCServiceScreenCapture"], false),
+  ("input", &["kTCCServiceListenEvent"], false),
+  ("microphone", &["kTCCServiceMicrophone"], true),
+];
+
+/// Prints SIP's state, then the app's TCC client: a bundle by its identifier (type 0), which is
+/// what tccd looks a bundle's executable up by, anything else by its path (type 1).
+const APP: &str = r#"set -e
+csrutil status
+if [ -f "$1/Contents/Info.plist" ]; then
+  echo 0
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist"
+elif [ -f "$1" ]; then
+  echo 1
+  echo "$1"
+else
+  echo "no app at $1" >&2
+  exit 1
+fi
+"#;
+
+/// Runs `$1` on the system's TCC.db and `$2`, if any, on the user's (macOS 27's is in a container
+/// of tccd's, older ones' in `~/Library`), then kills tccd, which reads them once and ignores
+/// SIGTERM; launchd starts it again.
+const WRITE: &str = r#"set -e
+printf '%s' "$1" | sudo -n sqlite3 '/Library/Application Support/com.apple.TCC/TCC.db'
+if [ -n "$2" ]; then
+  db="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
+  for x in /private/var/containers/Data/ProtectedSystem/*/; do
+    m="$x.com.apple.containermanagerd.metadata.plist"
+    id=$(sudo -n plutil -extract MCMMetadataIdentifier raw "$m" 2>/dev/null || true)
+    uid=$(sudo -n plutil -extract MCMMetadataOwnership.uid raw "$m" 2>/dev/null || true)
+    if [ "$id" = com.apple.tccd ] && [ "$uid" = "$(id -u)" ]; then
+      db="${x}Data/Library/Application Support/com.apple.TCC/TCC.db"
+    fi
+  done
+  printf '%s' "$2" | sudo -n sqlite3 "$db"
+fi
+sudo -n killall -9 tccd
+"#;
+
+/// `grant <vm> <app> [<service>...]`: the services, all by default, allowed for the app at a
+/// path in the running guest, which needs SIP off.
+pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
+  let vm = macos(name)?;
+  let services = services(names)?;
+  if !app.starts_with('/') {
+    return Err(bad(format!("{app}: the app's path in the guest, from /")));
+  }
+
+  if vm.pid().is_none() {
+    return Err(bad(format!("{name} isn't running; trivm start {name}")));
+  }
+
+  let out = ssh::output(&vm, &format!("sh -c {} app {}", ssh::quote(APP), ssh::quote(app)))?;
+  let lines: Vec<&str> = out.lines().collect();
+  let [status, kind, client] = lines[..] else {
+    return Err(bad(format!("{app} in {name}: {out}")));
+  };
+
+  if !status.contains("status: disabled") {
+    return Err(bad(format!(
+      "SIP is on in {name}, which keeps TCC's databases from root; trivm sip {name} off"
+    )));
+  }
+
+  let kind: u8 = kind.parse().map_err(|_| bad(format!("{app} in {name}: {out}")))?;
+  let pick = |user: bool| -> Vec<&str> {
+    services.iter().filter(|s| s.2 == user).flat_map(|s| s.1.iter().copied()).collect()
+  };
+  let (system, user) = (sql(&pick(false), client, kind), sql(&pick(true), client, kind));
+  let script =
+    format!("sh -c {} write {} {}", ssh::quote(WRITE), ssh::quote(&system), ssh::quote(&user));
+  ssh::output(&vm, &script)?;
+
+  let names: Vec<_> = services.iter().map(|s| s.0).collect();
+  eprintln!(
+    "{client} may use {} in {name}; an app that runs sees it once relaunched",
+    names.join(", ")
+  );
+  Ok(())
+}
+
+/// The services named, all with none.
+fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
+  let all: Vec<_> = SERVICES.iter().map(|s| s.0).collect();
+  let find = |x: &String| {
+    let known = SERVICES.iter().find(|s| s.0 == x);
+    known.ok_or_else(|| bad(format!("unknown service {x}; {}", all.join(", "))))
+  };
+  match names {
+    [] => Ok(SERVICES.iter().collect()),
+    _ => names.iter().map(find).collect(),
+  }
+}
+
+/// Rows that allow `client` the services, with no code requirement (`csreq`): tccd honours them
+/// on macOS 27, and they hold for every build of the app, where an ad hoc signed app's designated
+/// requirement is its hash.
+fn sql(services: &[&str], client: &str, kind: u8) -> String {
+  let client = client.replace('\'', "''");
+  let row = |s: &&str| {
+    format!(
+      "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, \
+      auth_version, csreq, flags) VALUES ('{s}', '{client}', {kind}, 2, 4, 1, NULL, 0);\n"
+    )
+  };
+  services.iter().map(row).collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn service_names() {
+    let names = |x: &[&str]| -> io::Result<Vec<&str>> {
+      let x: Vec<String> = x.iter().map(|x| x.to_string()).collect();
+      Ok(services(&x)?.iter().map(|s| s.0).collect())
+    };
+    assert_eq!(names(&[]).unwrap(), ["accessibility", "screen", "input", "microphone"]);
+    assert_eq!(names(&["microphone", "screen"]).unwrap(), ["microphone", "screen"]);
+    assert!(names(&["camera"]).is_err());
+  }
+
+  #[test]
+  fn rows() {
+    assert_eq!(sql(&[], "a", 0), "");
+    assert_eq!(
+      sql(&["kTCCServiceAccessibility", "kTCCServicePostEvent"], "me.vladkens.wavo", 0),
+      "INSERT OR REPLACE INTO access (service, client, client_type, auth_value, auth_reason, \
+      auth_version, csreq, flags) VALUES ('kTCCServiceAccessibility', 'me.vladkens.wavo', 0, 2, 4, \
+      1, NULL, 0);\nINSERT OR REPLACE INTO access (service, client, client_type, auth_value, \
+      auth_reason, auth_version, csreq, flags) VALUES ('kTCCServicePostEvent', 'me.vladkens.wavo', \
+      0, 2, 4, 1, NULL, 0);\n"
+    );
+    assert!(sql(&["kTCCServiceMicrophone"], "/opt/it's/app", 1).contains("'/opt/it''s/app', 1,"));
+  }
+}

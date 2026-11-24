@@ -59,6 +59,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Clone { vm, name } => _ = clone::clone(&vm, &name, vm::random_mac()?, |_| Ok(()))?,
     Cmd::Run { vm, cmd } => return Ok(status(clone::run(&vm, &cmd)?)),
     Cmd::Sip { vm, on } => permissions::sip(&vm, on)?,
+    Cmd::Grant { vm, app, services } => permissions::grant(&vm, &app, &services)?,
     Cmd::Open { vm } => {
       if Vm::open(&vm)?.pid().is_none() {
         start(&vm)?;

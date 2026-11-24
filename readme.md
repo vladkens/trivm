@@ -63,11 +63,16 @@ trivm clone macos-27 macos-27-clean   # a clone to keep, with its own address
 ```
 
 An app that needs macOS's permissions gets them with no one clicking Allow: trivm turns System
-Integrity Protection off from recoveryOS, which it drives itself (about a minute, once per VM):
+Integrity Protection off from recoveryOS, which it drives itself (about a minute, once per VM),
+then writes the grants for the app, by its path in the guest, into macOS's TCC databases.
+Accessibility, Screen Recording, Input Monitoring and the microphone, or the ones named; an app
+that runs sees them once relaunched. A VM's clones have its grants:
 
 ```sh
 trivm sip macos-27 off
 trivm exec macos-27 -- csrutil status   # disabled
+trivm grant macos-27 /Applications/Wavo.app
+trivm grant macos-27 /usr/local/bin/tool screen input
 ```
 
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
