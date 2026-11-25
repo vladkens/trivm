@@ -221,8 +221,9 @@ fn act(vm: &Vm, seen: Seen, lines: &[Line], shot: &Path) -> io::Result<()> {
   Ok(())
 }
 
-/// Remote Login on from Terminal, opened by Spotlight, sudo given the user's password; Terminal
-/// quit once SSH answers.
+/// Remote Login on from Terminal, opened from Finder's Utilities, sudo given the user's password;
+/// Terminal quit and Finder's window closed once SSH answers. Not Spotlight: on 13 its first use
+/// takes no Return, and a click on a hit may land on a web suggestion as the list grows.
 fn remote_login(vm: &Vm, shot: &Path) -> io::Result<()> {
   let up = || ssh::answers(vm);
   if up() {
@@ -233,37 +234,16 @@ fn remote_login(vm: &Vm, shot: &Path) -> io::Result<()> {
   let key = |x: &str| vz::ask(vm, &format!("key {x}"), "").map(|_| ());
   let typing = |x: &str| vz::ask(vm, "type", x).map(|_| ());
   let screen = |text: &str| vision::wait_text(vm, shot, text, Duration::from_secs(60));
-  let wait = |what: &str, done: &dyn Fn(&[Line]) -> bool| -> io::Result<()> {
-    let t = Instant::now();
-    loop {
-      if vz::ask(vm, "shot", &shot.to_string_lossy()).is_ok() && done(&vision::lines(shot)?) {
-        return Ok(());
-      }
 
-      if t.elapsed() > Duration::from_secs(60) {
-        return Err(bad(format!("no {what} in a minute; its screen: {}", shot.display())));
-      }
-
-      thread::sleep(Duration::from_secs(1));
-    }
-  };
-
-  key("cmd+space")?;
-  wait("Spotlight", &|x| x.iter().any(|x| x.text.contains("Spotlight")))?;
-  typing("Terminal")?;
-  wait("Terminal in Spotlight", &|x| hit(x).is_some())?;
-
-  // Return opens the top hit; 13's Spotlight opens it only clicked.
-  key("enter")?;
-  if vision::wait_text(vm, shot, "Last login", Duration::from_secs(10)).is_err() {
-    vz::ask(vm, "shot", &shot.to_string_lossy())?;
-    if let Some(x) = hit(&vision::lines(shot)?) {
-      vz::ask(vm, &format!("click {} {} left 1", x.x, x.y), "")?;
-    }
-
-    screen("Last login")?;
-  }
-
+  // Finder in front, clicked on the desktop's right edge, which nothing covers yet; then Terminal
+  // opened from Utilities by a double click on its name. Its name typed there selects nothing on
+  // 14, where that first click on the wallpaper shows a tip.
+  vz::ask(vm, "click 1560 450 left 1", "")?;
+  key("cmd+shift+u")?;
+  screen("Utilities")?;
+  let (x, y) = screen("Terminal")?;
+  vz::ask(vm, &format!("click {x} {y} left 2"), "")?;
+  screen("Last login")?;
   typing("sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist\n")?;
   screen("Password:")?;
   typing(&format!("{PASSWORD}\n"))?;
@@ -277,14 +257,12 @@ fn remote_login(vm: &Vm, shot: &Path) -> io::Result<()> {
     thread::sleep(Duration::from_secs(1));
   }
 
-  key("cmd+q")
-}
-
-/// Spotlight's hit for Terminal: the line of it under the query's.
-fn hit(lines: &[Line]) -> Option<&Line> {
-  let mut found = lines.iter().filter(|x| x.text.contains("Terminal"));
-  let query = found.next()?;
-  found.find(|x| x.y - query.y > 10.0)
+  // Finder in front again once Terminal is gone; a window left open is only untidy.
+  key("cmd+q")?;
+  match screen("Finder") {
+    Ok(_) => key("cmd+w"),
+    Err(_) => Ok(()),
+  }
 }
 
 #[cfg(test)]
@@ -333,15 +311,5 @@ mod tests {
       Seen::Other(true)
     );
     assert_eq!(seen(&lines(&[])), Seen::Other(false));
-
-    // As read on 13.6: the query, completed, then the hit.
-    let spotlight = lines(&[
-      ("Terminal - Open", 585.0, 206.0),
-      ("Terminal", 552.0, 207.0),
-      ("Terminal", 529.0, 252.0),
-      ("Siri Suggested Websites", 552.0, 293.0),
-    ]);
-    assert_eq!(hit(&spotlight).map(|x| x.y), Some(252.0));
-    assert_eq!(hit(&spotlight[..2]), None);
   }
 }
