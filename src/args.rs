@@ -20,6 +20,12 @@ VMs:
   delete <vm>             stop and remove
   open <vm>               show the VM's window, to look or use the mouse
 
+Clones of a stopped VM, made in a second with APFS and sharing its disk until written:
+  clone <vm> <name>       a clone to keep, with its own address
+  run <vm> [--] <cmd>...  run a command on the host with a new clone started and its name in
+                          TRIVM_VM, then delete the clone; exit with the command's code. One
+                          argument is a shell line, more are run as they are
+
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
                           are passed as they are; on Windows PowerShell 5.1, which drops a
@@ -107,10 +113,20 @@ pub enum Cmd {
     vm: String,
     keys: String,
   },
-  /// The process that runs a VM, started by `start`.
+  Clone {
+    vm: String,
+    name: String,
+  },
   Run {
     vm: String,
+    cmd: Vec<String>,
   },
+  /// The process that runs a VM, started by `start`.
+  Serve {
+    vm: String,
+  },
+  /// The process that deletes a `run`'s clone if `run` ends without doing it.
+  Reap,
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
@@ -118,19 +134,22 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
   let Some(cmd) = args.next() else { return Ok(Cmd::Help) };
   let rest: Vec<String> = args.collect();
 
-  if cmd == "exec" {
+  if cmd == "exec" || cmd == "run" {
     let mut rest = rest.into_iter();
-    let vm = rest.next().ok_or_else(|| bad("exec: no VM given"))?;
-    let mut cmd: Vec<String> = rest.collect();
-    if cmd.first().is_some_and(|x| x == "--") {
-      cmd.remove(0);
+    let vm = rest.next().ok_or_else(|| bad(format!("{cmd}: no VM given")))?;
+    let mut line: Vec<String> = rest.collect();
+    if line.first().is_some_and(|x| x == "--") {
+      line.remove(0);
     }
 
-    if cmd.is_empty() {
-      return Err(bad("exec: no command given"));
+    if line.is_empty() {
+      return Err(bad(format!("{cmd}: no command given")));
     }
 
-    return Ok(Cmd::Exec { vm, cmd });
+    return Ok(match cmd.as_str() {
+      "exec" => Cmd::Exec { vm, cmd: line },
+      _ => Cmd::Run { vm, cmd: line },
+    });
   }
 
   let mut pos = Vec::new();
@@ -194,11 +213,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         "open" => Cmd::Open { vm },
         "ssh" => Cmd::Ssh { vm },
         "ip" => Cmd::Ip { vm },
-        _ => Cmd::Run { vm },
+        _ => Cmd::Serve { vm },
       }
     }
 
     "list" | "ls" => Cmd::List,
+    "_reap" => Cmd::Reap,
+    "clone" => {
+      want(2, "<vm> <name>")?;
+      Cmd::Clone { vm: pos[0].clone(), name: pos[1].clone() }
+    }
     "cp" => {
       want(2, "<src> <dst>")?;
       Cmd::Cp { src: pos[0].clone(), dst: pos[1].clone() }
@@ -266,6 +290,8 @@ mod tests {
     );
     assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None });
     assert_eq!(args("cp a:/x .").unwrap(), Cmd::Cp { src: "a:/x".into(), dst: ".".into() });
+    assert_eq!(args("clone a b").unwrap(), Cmd::Clone { vm: "a".into(), name: "b".into() });
+    assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into() });
     assert_eq!(args("type a --x").unwrap(), Cmd::Type { vm: "a".into(), text: "--x".into() });
     assert_eq!(args("type a --help").unwrap(), Cmd::Type { vm: "a".into(), text: "--help".into() });
   }
@@ -283,12 +309,21 @@ mod tests {
     );
     assert!(args("exec a --").is_err());
     assert!(args("exec").is_err());
+
+    assert_eq!(
+      args("run a -- ./test.sh --fast").unwrap(),
+      Cmd::Run { vm: "a".into(), cmd: cmd(&["./test.sh", "--fast"]) }
+    );
+    assert_eq!(args("run a make").unwrap(), Cmd::Run { vm: "a".into(), cmd: cmd(&["make"]) });
+    assert!(args("run a").is_err());
+    assert!(args("run").is_err());
   }
 
   #[test]
   fn errors() {
     assert!(args("start").is_err());
     assert!(args("start a b").is_err());
+    assert!(args("clone a").is_err());
     assert!(args("create x --cpus many").is_err());
     assert!(args("click a -1 2").is_err());
     assert!(args("start a --what").is_err());

@@ -2,9 +2,11 @@
 //! trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test apps in. A
 //! macOS or Linux VM runs in a process of its own (`vz.rs`), a Windows VM is QEMU's (`qemu.rs`);
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
-//! (`display.rs`, QMP for QEMU), and `create` installs a system (`system.rs`, `windows.rs`).
+//! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), and
+//! `clone` and `run` copy one (`clone.rs`).
 
 mod args;
+mod clone;
 mod display;
 mod qcow2;
 mod qemu;
@@ -14,7 +16,7 @@ mod vm;
 mod vz;
 mod windows;
 
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
@@ -38,8 +40,11 @@ fn main() -> ExitCode {
 }
 
 fn start_cli() -> io::Result<ExitCode> {
-  let status =
-    |x: std::process::ExitStatus| ExitCode::from(x.code().unwrap_or(1).clamp(0, 255) as u8);
+  // A command ended by a signal exits as a shell has it: 128 + the signal.
+  let status = |x: std::process::ExitStatus| {
+    let code = x.code().or(x.signal().map(|x| 128 + x)).unwrap_or(1);
+    ExitCode::from(code.clamp(0, 255) as u8)
+  };
 
   match args::parse(env::args().skip(1))? {
     Cmd::Help => print!("{}", args::HELP),
@@ -52,6 +57,8 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Stop { vm, force } => stop(&Vm::open(&vm)?, force)?,
     Cmd::List => list()?,
     Cmd::Delete { vm } => delete(&Vm::open(&vm)?)?,
+    Cmd::Clone { vm, name } => _ = clone::clone(&vm, &name, vm::random_mac()?, |_| Ok(()))?,
+    Cmd::Run { vm, cmd } => return Ok(status(clone::run(&vm, &cmd)?)),
     Cmd::Open { vm } => {
       if Vm::open(&vm)?.pid().is_none() {
         start(&vm)?;
@@ -80,10 +87,11 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
-    Cmd::Run { vm } => {
+    Cmd::Serve { vm } => {
       signed()?;
       vz::serve(Vm::open(&vm)?)?;
     }
+    Cmd::Reap => clone::reap()?,
   }
 
   Ok(ExitCode::SUCCESS)
@@ -134,9 +142,10 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// VZ runs only in a binary signed with the virtualization entitlement: trivm signs itself ad hoc
-/// the first time (a copy signed, then renamed over the running binary) and runs again.
+/// the first time (a copy signed, then renamed over the running binary) and runs again. The binary
+/// is the file a symlink to it names: `current_exe` is the path trivm was run by.
 fn signed() -> io::Result<()> {
-  let exe = env::current_exe()?;
+  let exe = env::current_exe()?.canonicalize()?;
   let out =
     Command::new("codesign").args(["-d", "--entitlements", "-", "--xml"]).arg(&exe).output()?;
   if String::from_utf8_lossy(&out.stdout).contains("com.apple.security.virtualization") {
@@ -190,20 +199,20 @@ pub fn start(name: &str) -> io::Result<()> {
     vm = Vm::open(name)?;
   }
 
-  if vm.setup {
-    match vm.config.os() {
-      Os::Macos => system::macos_setup(&vm)?,
-      Os::Linux => system::linux_setup(&vm)?,
-      Os::Windows => system::windows_setup(&vm)?,
-    }
-
-    vm.setup = false;
-    vm.save()?;
-  } else {
-    ssh::wait(&vm, Duration::from_secs(300))?;
+  match (vm.setup, vm.config.os()) {
+    (true, Os::Macos) => system::macos_setup(&vm)?,
+    (true, Os::Linux) => system::linux_setup(&vm)?,
+    (true, Os::Windows) => system::windows_setup(&vm)?,
+    (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
   system::desktop(&vm)?;
+  // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
+  if vm.setup {
+    vm.setup = false;
+    vm.save()?;
+  }
+
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
 }
@@ -221,8 +230,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     .stdin(Stdio::null())
     .stdout(log.try_clone()?)
     .stderr(log);
-  // SAFETY: setsid is async-signal-safe.
-  unsafe { cmd.pre_exec(|| if setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }) };
+  detach(&mut cmd);
   let mut child = cmd.spawn()?;
 
   let t = Instant::now();
@@ -249,6 +257,13 @@ fn spawn(vm: &Vm) -> io::Result<()> {
 
     thread::sleep(Duration::from_millis(300));
   }
+}
+
+/// Makes `cmd` run in a session of its own, out of the terminal's reach: Ctrl+C or the terminal
+/// closed don't end it.
+pub fn detach(cmd: &mut Command) {
+  // SAFETY: setsid is async-signal-safe.
+  unsafe { cmd.pre_exec(|| if setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }) };
 }
 
 unsafe extern "C" {
@@ -311,8 +326,8 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   Ok(())
 }
 
-/// Stops the VM at once and removes it, holding its lock: it can't start meanwhile, and one being
-/// made isn't removed under its install.
+/// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
+/// and one being made or cloned isn't removed under it.
 fn delete(vm: &Vm) -> io::Result<()> {
   stop(vm, true)?;
   let _lock = vm.take()?;

@@ -198,6 +198,7 @@ impl Vm {
       return Err(bad(format!("not a VM name: {name}")));
     }
 
+    socket_fits(&self.state_dir)?;
     if self.conf.exists() {
       return Err(taken(name));
     }
@@ -302,7 +303,10 @@ impl Vm {
     match f.try_lock() {
       Ok(()) => {}
       Err(fs::TryLockError::WouldBlock) => {
-        return Err(bad(format!("{} is in use: running, being made or deleted", self.name)));
+        return Err(bad(format!(
+          "{} is in use: running, being made, cloned or deleted",
+          self.name
+        )));
       }
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
@@ -313,7 +317,8 @@ impl Vm {
   }
 
   /// Keeps the VM from starting or being deleted for as long as the file returned is open: a
-  /// shared lock on `pid`, which the VM's process takes exclusive.
+  /// shared lock on `pid`, which the VM's process takes exclusive, so clones of a VM made at once
+  /// don't wait for each other.
   pub fn hold(&self) -> io::Result<fs::File> {
     let f = self.pid_file()?;
     match f.try_lock_shared() {
@@ -374,7 +379,7 @@ fn put(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// A removal that found nothing to remove is done.
-fn gone(res: io::Result<()>) -> io::Result<()> {
+pub fn gone(res: io::Result<()>) -> io::Result<()> {
   match res {
     Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
     x => x,
@@ -392,12 +397,33 @@ fn valid(name: &str) -> bool {
   chars && !name.is_empty() && !name.starts_with('.') && !own
 }
 
+/// Checks that the VM's `ctl.sock` in its state folder fits a Unix socket's path, which macOS caps
+/// at 104 bytes with the NUL: a VM whose doesn't can't start.
+pub fn socket_fits(dir: &Path) -> io::Result<()> {
+  match dir.join("ctl.sock").as_os_str().len() < 104 {
+    true => Ok(()),
+    false => Err(bad(format!("{}: too long a path for a socket; a shorter name", dir.display()))),
+  }
+}
+
 /// A random locally administered unicast MAC address.
 pub fn random_mac() -> io::Result<String> {
   let mut b = [0u8; 6];
   fs::File::open("/dev/urandom")?.read_exact(&mut b)?;
   b[0] = (b[0] & 0xfe) | 0x02;
-  Ok(b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":"))
+  Ok(mac_text(&b))
+}
+
+/// The MAC address of `run`'s `n`th clone of a VM: the VM's own with the last byte XORed with
+/// `n`, the same each time, so the clone gets the same lease and address each time.
+pub fn clone_mac(mac: &str, n: u8) -> io::Result<String> {
+  let mut b = parse_mac(mac).ok_or_else(|| bad(format!("not a MAC address: {mac}")))?;
+  b[5] ^= n;
+  Ok(mac_text(&b))
+}
+
+fn mac_text(b: &[u8; 6]) -> String {
+  b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
 }
 
 unsafe extern "C" {
@@ -541,6 +567,12 @@ mod tests {
       assert!(valid(x), "{x}");
     }
 
+    // 63 bytes of a name in this Mac's state folder.
+    let state = Path::new("/Users/user/.local/state/trivm");
+    assert!(socket_fits(&state.join("macos-27-run-1")).is_ok());
+    assert!(socket_fits(&state.join("x".repeat(63))).is_ok());
+    assert!(socket_fits(&state.join("x".repeat(64))).is_err());
+
     let own = ["id_ed25519", "ID_ED25519.pub", "id_ed25519.lock"];
     for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a"].into_iter().chain(own) {
       assert!(!valid(x), "{x}");
@@ -615,5 +647,9 @@ mod tests {
     let m = random_mac().unwrap();
     let b = parse_mac(&m).unwrap();
     assert_eq!(b[0] & 0x03, 0x02);
+
+    assert_eq!(clone_mac("02:0a:00:0b:0c:0d", 1).unwrap(), "02:0a:00:0b:0c:0c");
+    assert_eq!(clone_mac("02:0a:00:0b:0c:0d", 2).unwrap(), "02:0a:00:0b:0c:0f");
+    assert!(clone_mac("02:0a", 1).is_err());
   }
 }
