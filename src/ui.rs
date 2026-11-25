@@ -537,14 +537,33 @@ fn frame(bounds: &Json) -> Option<[f64; 4]> {
 /// The elements whose name is `text`, else those whose name holds it, ignoring case; windows
 /// are not elements to click.
 fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
-  let elements = || nodes.iter().filter(|x| x.depth > 0);
-  let found: Vec<&Node> = elements().filter(|x| x.name == text).collect();
+  let found = outermost(nodes, |x| x.name == text);
   if !found.is_empty() {
     return found;
   }
 
   let low = text.to_lowercase();
-  elements().filter(|x| x.name.to_lowercase().contains(&low)).collect()
+  outermost(nodes, |x| x.name.to_lowercase().contains(&low))
+}
+
+/// The elements that match and aren't inside one that does: GTK 4 gives a cell, a cell in it and
+/// its label one name, one element to click.
+fn outermost(nodes: &[Node], hit: impl Fn(&Node) -> bool) -> Vec<&Node> {
+  let mut out = Vec::new();
+  // The depth of the match the elements now are in.
+  let mut inside = None;
+  for x in nodes {
+    if inside.is_some_and(|depth| x.depth <= depth) {
+      inside = None;
+    }
+
+    if x.depth > 0 && inside.is_none() && hit(x) {
+      out.push(x);
+      inside = Some(x.depth);
+    }
+  }
+
+  out
 }
 
 /// Whether the element is an item of an open menu whose items all lie in `frame`: the popup the
@@ -871,6 +890,24 @@ mod tests {
     assert_eq!(names("Wavo"), [r#"statictext "Wavo" 783,108 34x16"#]);
     assert!(names("Hidden").is_empty());
     assert_eq!(names("e").len(), 4);
+
+    // GTK 4's cell, its twin and its label in Files are one; the next is another.
+    let el = |depth: usize, role: &str, name: &str| Node {
+      depth,
+      role: role.into(),
+      name: name.into(),
+      ..Node::default()
+    };
+    let cells = [
+      el(0, "window", "Home"),
+      el(1, "cell", "Videos"),
+      el(2, "cell", "Videos"),
+      el(3, "statictext", "Videos"),
+      el(1, "cell", "Music"),
+      el(1, "statictext", "Videos"),
+    ];
+    let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
+    assert_eq!(roles("Videos"), ["cell", "statictext"]);
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;
