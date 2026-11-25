@@ -7,7 +7,8 @@ typing; a person opens a window onto a running VM to look or use the mouse. Agen
 change end to end by following this file.
 
 Each fact has one source, which this file points to: what trivm does is `readme.md` and
-`trivm --help`, dependencies `Cargo.toml`, checks the `Makefile`, the work under way `docs/plans/`.
+`trivm --help`, dependencies `Cargo.toml`, checks the `Makefile`, what comes next
+`docs/roadmap.md`, the work under way `docs/plans/`.
 
 ## Scope
 
@@ -42,9 +43,13 @@ Each fact has one source, which this file points to: what trivm does is `readme.
 - Unit-test what breaks silently: QEMU's command line, the unattended-install files, a VM's
   configuration. The proof of a change to how a system is installed or driven is that system on
   this Mac: installed, started, a command run in it, a screenshot taken.
+- A scratch run of trivm, beside this Mac's VMs, sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and
+  `XDG_STATE_HOME` to folders of its own and keeps `XDG_CACHE_HOME`, sharing its downloads.
 
 ## Workflow
 
+- `docs/roadmap.md` is the person's backlog: change it only when the person asks. Each item is
+  done as a plan and one PR.
 - Keep multi-step work as a checklist in `docs/plans/yyyymmdd-<name>.md`, only ticking it during
   the work; when done, add `Done: yyyy-mm-dd` on top and a short `## Result`, and move it to
   `docs/plans/completed/`.
@@ -55,5 +60,5 @@ Each fact has one source, which this file points to: what trivm does is `readme.
   fix.
 - Ask the person only when what trivm does must change, a heavy dependency is needed, or the
   request is ambiguous. Otherwise decide and say so in your report.
-- Keep docs to `readme.md` (users), the rustdoc, `agents.md` and the plans. No progress journals,
-  run logs or disclaimer paragraphs.
+- Keep docs to `readme.md` (users), the rustdoc, `agents.md`, the roadmap and the plans. No
+  progress journals, run logs or disclaimer paragraphs.

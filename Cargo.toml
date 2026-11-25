@@ -8,6 +8,18 @@ license = "MIT"
 repository = "https://github.com/vladkens/trivm"
 
 [dependencies]
+block2 = "0.6.2"
+dispatch2 = "0.3.1"
+miniz_oxide = "0.9.1"
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSBitmapImageRep", "NSCIImageRep", "NSColor", "NSColorSpace", "NSEvent", "NSGraphics", "NSGraphicsContext", "NSImageRep", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow", "objc2-core-foundation", "objc2-core-graphics", "objc2-core-image", "objc2-quartz-core"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGWindowLevel"] }
+objc2-core-image = { version = "0.3.2", features = ["CIImage", "objc2-core-foundation", "objc2-io-surface", "std"], default-features = false }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSDate", "NSDictionary", "NSEnumerator", "NSError", "NSGeometry", "NSObject", "NSProcessInfo", "NSRunLoop", "NSString", "NSURL", "objc2-core-foundation"] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "CALayer"] }
+objc2-virtualization = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-app-kit", "VZBootLoader", "VZDiskImageStorageDeviceAttachment", "VZEFIBootLoader", "VZEFIVariableStore", "VZEntropyDeviceConfiguration", "VZFileSerialPortAttachment", "VZGenericMachineIdentifier", "VZGenericPlatformConfiguration", "VZGraphicsDeviceConfiguration", "VZGraphicsDisplayConfiguration", "VZKeyboardConfiguration", "VZMACAddress", "VZMacAuxiliaryStorage", "VZMacGraphicsDeviceConfiguration", "VZMacGraphicsDisplayConfiguration", "VZMacHardwareModel", "VZMacKeyboardConfiguration", "VZMacMachineIdentifier", "VZMacOSBootLoader", "VZMacOSConfigurationRequirements", "VZMacOSInstaller", "VZMacOSRestoreImage", "VZMacOSVirtualMachineStartOptions", "VZMacPlatformConfiguration", "VZMacTrackpadConfiguration", "VZMemoryBalloonDeviceConfiguration", "VZNATNetworkDeviceAttachment", "VZNetworkDeviceAttachment", "VZNetworkDeviceConfiguration", "VZPlatformConfiguration", "VZPointingDeviceConfiguration", "VZSerialPortAttachment", "VZSerialPortConfiguration", "VZStorageDeviceAttachment", "VZStorageDeviceConfiguration", "VZUSBKeyboardConfiguration", "VZUSBScreenCoordinatePointingDeviceConfiguration", "VZVirtioBlockDeviceConfiguration", "VZVirtioConsoleDeviceSerialPortConfiguration", "VZVirtioEntropyDeviceConfiguration", "VZVirtioGraphicsDeviceConfiguration", "VZVirtioGraphicsScanoutConfiguration", "VZVirtioNetworkDeviceConfiguration", "VZVirtioTraditionalMemoryBalloonDeviceConfiguration", "VZVirtualMachine", "VZVirtualMachineConfiguration", "VZVirtualMachineStartOptions", "VZVirtualMachineView"] }
 
 [profile.release]
 debug = 1
