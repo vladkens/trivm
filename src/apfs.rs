@@ -371,14 +371,9 @@ impl<'a> Node<'a> {
 
   /// The offsets of entry `i`'s key and value.
   fn entry(&self, i: usize) -> (usize, usize) {
-    match self.fixed {
-      true => {
-        (le16(self.b, self.toc + i * 4) as usize, le16(self.b, self.toc + i * 4 + 2) as usize)
-      }
-      false => {
-        (le16(self.b, self.toc + i * 8) as usize, le16(self.b, self.toc + i * 8 + 4) as usize)
-      }
-    }
+    let (size, value) = if self.fixed { (4, 2) } else { (8, 4) };
+    let at = self.toc + i * size;
+    (le16(self.b, at) as usize, le16(self.b, at + value) as usize)
   }
 
   fn key(&self, off: usize, len: usize) -> io::Result<usize> {

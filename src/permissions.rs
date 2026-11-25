@@ -90,6 +90,7 @@ fn recovery(vm: &Vm, on: bool, shot: &Path) -> io::Result<()> {
   // The startup options: the disk and Options, which shows its Continue button once chosen.
   click(screen("Options", 180)?)?;
   click(screen("Continue", 30)?)?;
+
   // Recovery's menu bar, then Utilities › Terminal by its shortcut.
   screen("Utilities", 300)?;
   vz::ask(vm, "key cmd+shift+t", "")?;
@@ -224,13 +225,13 @@ pub fn allow(vm: &Vm, app: &str, services: &[&Service]) -> io::Result<String> {
 /// The services named, all with none.
 pub fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
   let all: Vec<_> = SERVICES.iter().map(|s| s.name).collect();
-  let find = |x: &String| {
+  let find = |x: &str| {
     let known = SERVICES.iter().find(|s| s.name == x);
     known.ok_or_else(|| bad(format!("unknown service {x}; {}", all.join(", "))))
   };
   match names {
     [] => Ok(SERVICES.iter().collect()),
-    _ => names.iter().map(find).collect(),
+    _ => names.iter().map(|x| find(x)).collect(),
   }
 }
 

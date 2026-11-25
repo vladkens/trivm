@@ -170,13 +170,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     })
   };
 
-  let mut child = match cmd.spawn() {
-    Ok(x) => x,
-    Err(e) => {
-      tpm_kill(vm);
-      return Err(e);
-    }
-  };
+  let mut child = cmd.spawn().inspect_err(|_| tpm_kill(vm))?;
 
   vm::write_pid(&lock, child.id())?;
   drop(lock);
@@ -208,7 +202,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
 fn tpm_kill(vm: &Vm) {
   let pid = fs::read_to_string(vm.path("tpm.pid")).ok().and_then(|x| x.trim().parse().ok());
   if let Some(pid) = pid {
-    crate::vm::signal(pid, 15);
+    vm::signal(pid, 15);
   }
 }
 

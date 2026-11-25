@@ -2,10 +2,11 @@
 //! Commands and files through the system's `ssh` and `scp` with trivm's own key; the password
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
-use std::{env, fs, io, thread};
+use std::{env, fs, thread};
 
 use crate::vm::{self, Os, Vm};
 use crate::{bad, run, windows};
@@ -215,7 +216,6 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
 
       let mut child = cmd.spawn()?;
       if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
         let _ = writeln!(stdin, "{}", vm::PASSWORD);
       }
 

@@ -129,8 +129,8 @@ pub fn click(
     [one] => one,
     [] => return Err(bad(format!("no element named {text:?} in {name}"))),
     ref found => {
-      let lines: Vec<String> = found.iter().map(|x| format!("\n  {}", x.line())).collect();
-      let (n, lines) = (found.len(), lines.concat());
+      let lines: String = found.iter().map(|x| format!("\n  {}", x.line())).collect();
+      let n = found.len();
       return Err(bad(format!(
         "{n} elements named {text:?} in {name}; click one by its frame:{lines}"
       )));
@@ -274,16 +274,16 @@ fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
   let wanted = |x: &str| app.is_none_or(|a| x.eq_ignore_ascii_case(a));
   let windows: Vec<&Node> = all.iter().filter(|w| wanted(&w.app)).collect();
 
-  let snapshot = |scope: String| {
+  let snapshot = |scope: &str| {
     format!(
       r#"{{"command":"snapshot","args":{{{scope},"include_bounds":true,"compact":true,"max_depth":{DEPTH}}}}}"#
     )
   };
-  let window = |w: &&Node| snapshot(format!(r#""window_id":{}"#, json_str(&w.id)));
+  let window = |w: &&Node| snapshot(&format!(r#""window_id":{}"#, json_str(&w.id)));
   let mut batch: Vec<String> = windows.iter().map(window).collect();
   let menubar = vm.config.os() == Os::Macos;
   if menubar {
-    batch.push(snapshot(r#""surface":"menubar""#.into()));
+    batch.push(snapshot(r#""surface":"menubar""#));
   }
 
   let mut out = Vec::new();
