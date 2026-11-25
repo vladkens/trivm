@@ -229,7 +229,12 @@ impl Vm {
 
     match fs::DirBuilder::new().mode(0o700).create(&self.dir) {
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-        let msg = format!("{} is in the way: files of a VM with no config", self.dir.display());
+        if self.conf.exists() {
+          return Err(taken(name));
+        }
+
+        let dir = self.dir.display();
+        let msg = format!("{dir} is in the way: a VM being made, or left with no config");
         return Err(io::Error::new(e.kind(), msg));
       }
       x => x?,
@@ -606,7 +611,7 @@ mod tests {
     fs::remove_dir_all(&root).unwrap();
     assert_eq!(
       err.to_string(),
-      format!("{} is in the way: files of a VM with no config", vm.dir.display())
+      format!("{} is in the way: a VM being made, or left with no config", vm.dir.display())
     );
   }
 
