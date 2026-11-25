@@ -363,7 +363,7 @@ fn taken(name: &str) -> io::Error {
 /// Writes a file through one of this process's own beside it, renamed over it: a reader sees the
 /// old or the new.
 fn put(path: &Path, text: &str) -> io::Result<()> {
-  let tmp = PathBuf::from(format!("{}.{}", path.display(), process::id()));
+  let tmp = path.with_added_extension(process::id().to_string());
   fs::write(&tmp, text)?;
   fs::rename(tmp, path)
 }
