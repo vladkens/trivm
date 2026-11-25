@@ -152,6 +152,9 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     vm.save()?;
   }
 
+  // Opened before swtpm starts: nothing fails between it and QEMU, which ends it.
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  let out = log.try_clone()?;
   fs::create_dir_all(vm.path("tpm"))?;
   let _ = fs::remove_file(vm.path("tpm.sock"));
   let _ = fs::remove_file(vm.path("tpm.log"));
@@ -170,9 +173,8 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   }
 
   let fd = lock.as_raw_fd();
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
   let mut cmd = Command::new(&bin);
-  cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+  cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(out).stderr(log);
   // SAFETY: setsid, fcntl, getpid, pwrite and ftruncate are async-signal-safe, `pid_text`
   // allocates nothing; the lock's fd stays open in QEMU.
   unsafe {
