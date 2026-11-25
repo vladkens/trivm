@@ -8,6 +8,7 @@
 
 mod apfs;
 mod args;
+mod assistant;
 mod clone;
 mod display;
 mod permissions;
@@ -68,7 +69,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Sip { vm, on } => permissions::sip(&vm, on)?,
     Cmd::Grant { vm, app, services } => permissions::grant(&vm, &app, &services)?,
     Cmd::Open { vm } => {
-      // One still being set up shows at once: an older macOS's Setup Assistant is answered in it.
+      // One still being set up shows at once, its setup watched as it goes.
       let vm = match Vm::open(&vm)? {
         x if x.config.setup => boot(&vm)?,
         x if x.pid().is_none() => start(&vm).and_then(|_| Vm::open(&vm))?,

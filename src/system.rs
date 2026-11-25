@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::{fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
-use crate::{apfs, bad, qcow2, qemu, run, ssh, vz, windows};
+use crate::{apfs, assistant, bad, qcow2, qemu, run, ssh, vz, windows};
 
 pub struct System {
   pub name: &'static str,
@@ -333,24 +333,12 @@ fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
   vz::install(vm, ipsw)?;
   match vm.config.provisioned() {
     true => Ok(()),
+    // Its first boot shows the Setup Assistant, which trivm answers.
     false if apfs::encrypted(&vm.path("disk.img"), apfs::DATA)? => {
-      eprintln!("{}", mac_by_hand(&vm.name));
-      Ok(())
+      fs::write(vm.path(assistant::MARK), "")
     }
     false => mac_data(vm),
   }
-}
-
-/// macOS 13 and 14 leave their Data volume encrypted after the install, its keys the guest's: no
-/// file can be written to it from the host, and the Setup Assistant shows at the first boot.
-fn mac_by_hand(name: &str) -> String {
-  format!(
-    "{name}'s Data volume is encrypted, so its Setup Assistant can't be skipped: answer it in \
-    `trivm open {name}` (or with shot, click, type and key) with the user {USER} and the password \
-    {PASSWORD}, then turn Remote Login on in Terminal: \
-    sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist\n\
-    trivm goes on once SSH answers (it waits 30 minutes)"
-  )
 }
 
 /// The files an older macOS's first boot reads, relative to its Data volume: the Setup Assistant
@@ -522,7 +510,7 @@ printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' > /e
 /// No sleep, screen saver or lock, which would leave the screen dark; no automatic updates
 /// (macOS 27 kept checking regardless of some of these, as the old `vm` tool found); the host's
 /// time zone, `$2`, which macOS would otherwise guess as Cupertino's; the automatic login of `$4`
-/// by its `kcpassword`, `$3`, which a Setup Assistant answered by hand leaves off.
+/// by its `kcpassword`, `$3`, which the Setup Assistant leaves off.
 const MAC_TUNE: &str = r#"set -e
 sudo -n pmset -a displaysleep 0 sleep 0 disksleep 0 >/dev/null
 defaults -currentHost write com.apple.screensaver idleTime -int 0
@@ -537,12 +525,18 @@ printf "$3" | sudo -n sh -c 'umask 077; cat > /etc/kcpassword'
 sudo -n defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$4"
 "#;
 
-/// The first boot of a new macOS VM, which made the user: the key, then the tuning.
+/// The first boot of a new macOS VM, which made the user, or whose Setup Assistant trivm answers
+/// to make it: the key, then the tuning.
 pub fn macos_setup(vm: &Vm) -> io::Result<()> {
+  if vm.path(assistant::MARK).exists() {
+    assistant::answer(vm)?;
+  }
+
   eprintln!("waiting for macOS to make the user and answer SSH (a few minutes)");
   let script =
     format!("sh -ec {} enroll {} {USER}", ssh::quote(MAC_ENROLL), ssh::quote(&ssh::public_key()?));
   ssh::with_password(vm, &script, Duration::from_secs(1800))?;
+  let _ = fs::remove_file(vm.path(assistant::MARK));
   ssh::wait(vm, Duration::from_secs(60))?;
   let kc = ssh::quote(&kcpassword(PASSWORD));
   let tune = format!("sh -ec {} tune {PASSWORD} {} {kc} {USER}", ssh::quote(MAC_TUNE), timezone());
@@ -931,7 +925,6 @@ mod tests {
     assert!(lint("plutil", &["-lint", "-s", "-"], &mac_daemon()));
     assert!(mac_daemon().contains("<string>/private/var/db/trivm-setup.sh</string>"));
     assert!(lint("sh", &["-n"], MAC_TUNE));
-    assert!(mac_by_hand("m").contains("trivm open m"));
   }
 
   #[test]

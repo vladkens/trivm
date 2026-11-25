@@ -57,7 +57,7 @@ impl Config {
 
   /// Whether VZ makes the guest's user on its first boot (`VZMacGuestProvisioningOptions`), as
   /// for macOS 27 and later; an older macOS gets its user from files on its Data volume, or from
-  /// its Setup Assistant answered by hand when that volume is encrypted.
+  /// its Setup Assistant, which trivm answers, when that volume is encrypted.
   pub fn provisioned(&self) -> bool {
     self.macos().is_some_and(|x| x >= 27)
   }

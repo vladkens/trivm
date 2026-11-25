@@ -101,14 +101,10 @@ trivm click macos-27 --name Models   # raises Wavo's window first if another is 
 
 ### macOS 13 and 14
 
-Their Data volume is encrypted once installed, so their Setup Assistant can't be skipped from the
-host: `trivm create macos-14` boots into it and waits. Answer it in `trivm open macos-14` (or with
-`shot`, `click`, `type` and `key`) with the user `user` and the password `1234`, then turn Remote
-Login on in Terminal; trivm goes on once SSH answers.
-
-```sh
-sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
-```
+Their Data volume is encrypted once installed, so the files that skip the Setup Assistant on the
+others can't be written from the host: at the first boot trivm answers it as a person would,
+reading each screen's text from a shot with Vision and clicking its buttons, then turns Remote
+Login on in Terminal (about 5 minutes). Leave the VM's screen alone meanwhile.
 
 ### Windows
 

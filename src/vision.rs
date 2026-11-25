@@ -17,6 +17,14 @@ use objc2_foundation::{NSArray, NSDictionary, NSError, NSRange, NSRect, NSString
 use crate::vm::Vm;
 use crate::{bad, vz};
 
+/// A line of text read in a shot, and its middle in the shot's pixels.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Line {
+  pub text: String,
+  pub x: f64,
+  pub y: f64,
+}
+
 /// Waits until `text` shows on the VM's screen; the middle of it, in a shot's pixels.
 pub fn wait_text(vm: &Vm, shot: &Path, text: &str, timeout: Duration) -> io::Result<(f64, f64)> {
   let t = Instant::now();
@@ -61,6 +69,21 @@ pub fn find_text(png: &Path, want: &str) -> io::Result<Option<(f64, f64)>> {
   }
 
   Ok(None)
+}
+
+/// The lines of text in a PNG, top to bottom; a line read at both levels shows twice.
+pub fn lines(png: &Path) -> io::Result<Vec<Line>> {
+  let (w, h) = png_size(png)?;
+  let mut out = Vec::new();
+  for Found { line, string: text, .. } in recognize(png)? {
+    // SAFETY: VNRectangleObservation's box.
+    let r: NSRect = unsafe { msg_send![&*line, boundingBox] };
+    let (x, y) = middle(r, w, h);
+    out.push(Line { text, x, y });
+  }
+
+  out.sort_by(|a, b| a.y.total_cmp(&b.y));
+  Ok(out)
 }
 
 /// A normalized box from the bottom left, as Vision gives it: its middle in pixels.
