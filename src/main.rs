@@ -44,9 +44,9 @@ fn start_cli() -> io::Result<ExitCode> {
   match args::parse(env::args().skip(1))? {
     Cmd::Help => print!("{}", args::HELP),
     Cmd::Version => println!("trivm {}", env!("CARGO_PKG_VERSION")),
-    Cmd::Create { system, name, cpus, memory, disk, iso } => {
+    Cmd::Create { system, name, cpus, memory, disk } => {
       signed()?;
-      system::create(&system, name, cpus, memory, disk, iso)?;
+      system::create(&system, name, cpus, memory, disk)?;
     }
     Cmd::Start { vm } => start(&vm)?,
     Cmd::Stop { vm, force } => stop(&Vm::open(&vm)?, force)?,
@@ -175,7 +175,7 @@ pub fn start(name: &str) -> io::Result<()> {
   if vm.pid().is_none() {
     match vm.config.os() {
       Os::Windows => {
-        let cds = system::windows_cds(&vm);
+        let cds = system::windows_cds(&vm)?;
         qemu::spawn(&mut vm, &cds)?
       }
       _ => spawn(&vm)?,

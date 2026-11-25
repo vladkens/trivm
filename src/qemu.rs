@@ -19,7 +19,7 @@ use crate::{bad, run};
 
 const QEMU: &str = "qemu-system-aarch64";
 
-/// The CDs attached while a VM is set up, by their device ids.
+/// The CDs attached while a VM is set up, the install media and the seed, by their device ids.
 const CDS: [&str; 2] = ["cd0", "cd1"];
 
 /// QEMU's binary and its share folder, which holds edk2's firmware.
@@ -70,7 +70,7 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-drive".into(),
     format!("if=none,id=disk,format=raw,discard=unmap,file={}", opt(&vm.path("disk.img"))),
     "-device".into(),
-    "nvme,drive=disk,serial=trivm,bootindex=1".into(),
+    "nvme,drive=disk,serial=trivm,bootindex=0".into(),
     "-device".into(),
     "ramfb".into(),
     "-device".into(),
@@ -100,9 +100,11 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
   ]
   .into();
 
-  // edk2 connects only the devices that have a boot index: the ISO's too, or it isn't seen.
+  // edk2 connects only the devices that have a boot index: the media's too, or it isn't seen. The
+  // disk goes first: blank, it doesn't boot and the media does; once Setup has written Windows'
+  // boot files, each of Setup's restarts boots the disk, with no key pressed.
   for (i, (cd, id)) in cds.iter().zip(CDS).enumerate() {
-    let boot = if i == 0 { ",bootindex=0" } else { "" };
+    let boot = if i == 0 { ",bootindex=1" } else { "" };
     args.push("-drive".into());
     args.push(format!("if=none,id={id}d,format=raw,media=cdrom,readonly=on,file={}", opt(cd)));
     args.push("-device".into());
@@ -562,7 +564,7 @@ mod tests {
       "-machine virt -accel hvf -cpu host -smp 4 -m 6G",
       "if=pflash,format=raw,readonly=on,file=/q/edk2-aarch64-code.fd",
       "if=pflash,format=raw,file=/v/a,,b/efi.bin",
-      "file=/v/a,,b/disk.img -device nvme,drive=disk,serial=trivm,bootindex=1 ",
+      "file=/v/a,,b/disk.img -device nvme,drive=disk,serial=trivm,bootindex=0 ",
       "-device ramfb -device qemu-xhci,id=usb -device usb-kbd -device usb-tablet",
       "user,id=net,hostfwd=tcp:127.0.0.1:50022-:22",
       "virtio-net-pci,netdev=net,mac=02:00:00:00:00:01",
@@ -570,7 +572,7 @@ mod tests {
       "tpm-tis-device,tpmdev=tpm,ppi=off",
       "-qmp unix:/s/a,,b/qmp.sock,server=on,wait=off",
       "-vnc 127.0.0.1:0,to=99,password=on -display none",
-      "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=0",
+      "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=1",
       "file=/v/a,,b/seed.iso -device usb-storage,drive=cd1d,id=cd1",
     ] {
       assert!(line.contains(x), "{x} not in {line}");

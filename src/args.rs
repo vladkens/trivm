@@ -11,9 +11,9 @@ trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test a
 Usage: trivm <command> [args]
 
 VMs:
-  create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>] [--iso <path>]
+  create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]
                           install a system unattended and start it; systems: macos-27,
-                          ubuntu-24.04, windows-11 (its ISO from Microsoft's page by --iso, once)
+                          ubuntu-24.04, windows-11 (needs brew install qemu swtpm wimlib)
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
@@ -54,7 +54,6 @@ pub enum Cmd {
     cpus: Option<u32>,
     memory: Option<u32>,
     disk: Option<u32>,
-    iso: Option<String>,
   },
   Start {
     vm: String,
@@ -141,7 +140,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     match x.as_str() {
       // `type` takes any text, dashes included.
       _ if cmd == "type" => pos.push(x),
-      "--name" | "--cpus" | "--memory" | "--disk" | "--iso" => {
+      "--name" | "--cpus" | "--memory" | "--disk" => {
         let value = it.next().ok_or_else(|| bad(format!("{x}: no value given")))?;
         flags.push((x, Some(value)));
       }
@@ -176,17 +175,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
   let cmd = match cmd.as_str() {
     "-V" | "--version" | "version" => Cmd::Version,
     "create" => {
-      want(
-        1,
-        "<system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>] [--iso <path>]",
-      )?;
+      want(1, "<system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]")?;
       Cmd::Create {
         system: pos[0].clone(),
         name: value("--name"),
         cpus: number("--cpus")?,
         memory: number("--memory")?,
         disk: number("--disk")?,
-        iso: value("--iso"),
       }
     }
     "start" | "stop" | "delete" | "open" | "ssh" | "ip" | "_run" => {
@@ -262,20 +257,9 @@ mod tests {
         cpus: None,
         memory: None,
         disk: Some(80),
-        iso: None
       }
     );
-    assert_eq!(
-      args("create windows-11 --iso /x/w.iso").unwrap(),
-      Cmd::Create {
-        system: "windows-11".into(),
-        name: None,
-        cpus: None,
-        memory: None,
-        disk: None,
-        iso: Some("/x/w.iso".into())
-      }
-    );
+    assert!(args("create windows-11 --iso /x/w.iso").is_err());
     assert_eq!(
       args("click a 10 20.5 --double").unwrap(),
       Cmd::Click { vm: "a".into(), x: 10.0, y: 20.5, right: false, double: true }

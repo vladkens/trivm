@@ -2,11 +2,11 @@
 //! The systems trivm installs, each from its own source pinned by SHA-256, and `create`: the
 //! download, the VM's files, the install, and the first boot that makes the user.
 
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
 use crate::{bad, qcow2, qemu, run, ssh, vz, windows};
@@ -45,18 +45,19 @@ pub const SYSTEMS: &[System] = &[
   System {
     name: "windows-11",
     os: Os::Windows,
-    // Its page's flow gives a link only to a browser: the person downloads the ISO, `--iso`.
-    url: "https://www.microsoft.com/en-us/software-download/windows11arm64",
-    // The page's list, English: Windows 11 26H2 (26300.9457) Arm64.
-    sha256: "8992f2d2cfd2fa647e579e9eb31fc21f34da8333c29b6170fde17d2ed6623e9c",
+    // Windows 11 24H2's consumer editions for arm64 in English, from the catalog of Microsoft's
+    // Media Creation Tool (go.microsoft.com/fwlink/?LinkId=2156292). Its CDN has no certificate
+    // for its name: HTTP, checked by the SHA-256.
+    url: "http://dl.delivery.mp.microsoft.com/filestreamingservice/files/37acc189-7f4f-4e07-976c-1cf0a099ec79/26100.4349.250607-1500.ge_release_svc_refresh_CLIENTCONSUMER_RET_A64FRE_en-us.esd",
+    sha256: "c01b6f474c772093159b63fb3a168d2666556b223d288f67efc37c4fbaeddd25",
     cpus: 4,
     memory: 6,
     disk: 64,
   },
 ];
 
-/// Windows' ISO in the cache, cloned there from `--iso`.
-const WINDOWS_ISO: &str = "Win11_26H2_English_Arm64.iso";
+/// Windows 11 Pro's image in the ESD, after Setup's media, Windows PE and Setup, 1 to 3.
+const WINDOWS_PRO: u32 = 6;
 
 /// Fedora's virtio-win, for NetKVM, the driver of the VM's virtio-net.
 const VIRTIO: (&str, &str) = (
@@ -113,43 +114,6 @@ fn check(path: &Path, sha256: &str) -> io::Result<()> {
   }
 }
 
-/// The CDs of a Windows VM being set up: Microsoft's ISO and the seed.
-pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
-  let cds = [vm::cache_dir().join(WINDOWS_ISO), vm.path("seed.iso")];
-  match vm.setup {
-    true => cds.into_iter().filter(|x| x.exists()).collect(),
-    false => Vec::new(),
-  }
-}
-
-/// Windows' ISO in the cache, cloned there from `iso` once its SHA-256 is Microsoft's.
-fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
-  let path = vm::cache_dir().join(WINDOWS_ISO);
-  vm::made(&vm::cache_dir())?;
-  let _lock = lock(&path)?;
-  if path.exists() {
-    return Ok(path);
-  }
-
-  let Some(iso) = iso else {
-    return Err(bad(format!(
-      "Microsoft gives its ISO only to a browser: download Windows 11 (multi-edition ISO for \
-      Arm64), English, from {}, then: trivm create {} --iso <path>",
-      sys.url, sys.name
-    )));
-  };
-
-  check(Path::new(iso), sys.sha256)
-    .map_err(|e| bad(format!("{e}: not Microsoft's English Arm64 ISO of 26H2")))?;
-  let part = path.with_extension("part");
-  if run(Command::new("cp").arg("-c").arg(iso).arg(&part)).is_err() {
-    run(Command::new("cp").arg(iso).arg(&part))?;
-  }
-
-  fs::rename(&part, &path)?;
-  Ok(path)
-}
-
 /// A lock beside a file in the cache, held until it is dropped: a second create of the same system
 /// waits for the first one's download or conversion instead of writing the same file.
 fn lock(path: &Path) -> io::Result<fs::File> {
@@ -164,7 +128,6 @@ pub fn create(
   cpus: Option<u32>,
   memory: Option<u32>,
   disk: Option<u32>,
-  iso: Option<String>,
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
@@ -180,9 +143,9 @@ pub fn create(
   }
 
   let file = match sys.os {
-    Os::Windows => windows_download(sys, iso.as_deref())?,
-    _ if iso.is_some() => {
-      return Err(bad(format!("--iso: {} installs from its own image", sys.name)));
+    Os::Windows => {
+      tools()?;
+      windows_media(sys)?
     }
     _ => download(sys.url, sys.sha256)?,
   };
@@ -367,6 +330,75 @@ pub fn linux_setup(vm: &Vm) -> io::Result<()> {
 
 // MARK: Windows
 
+/// Fails unless Homebrew's tools for Windows are on `PATH`, before the downloads they need.
+fn tools() -> io::Result<()> {
+  let path = env::var_os("PATH").unwrap_or_default();
+  for x in ["qemu-system-aarch64", "swtpm", "wimlib-imagex"] {
+    if !env::split_paths(&path).any(|p| p.join(x).is_file()) {
+      return Err(bad(format!("{x} not found; brew install qemu swtpm wimlib")));
+    }
+  }
+
+  Ok(())
+}
+
+/// Windows' install media in the cache, named after the ESD it is made from.
+fn media(sys: &System) -> PathBuf {
+  let name = sys.url.rsplit('/').next().unwrap_or(sys.name);
+  vm::cache_dir().join(name).with_extension("pro.iso")
+}
+
+/// Windows' install media, made once from the ESD with wimlib as the Media Creation Tool makes it:
+/// image 1's files, Windows PE and Setup (2, 3) as `sources/boot.wim`, Pro as `install.esd`, in an
+/// ISO booted by its El Torito image for UEFI, which asks for no key. The ESD goes then.
+fn windows_media(sys: &System) -> io::Result<PathBuf> {
+  let iso = media(sys);
+  vm::made(&vm::cache_dir())?;
+  let _lock = lock(&iso)?;
+  if iso.exists() {
+    return Ok(iso);
+  }
+
+  let esd = download(sys.url, sys.sha256)?;
+  eprintln!("making Windows' install media from {}", esd.display());
+  // A make cut short left its folder.
+  let dir = iso.with_extension("part");
+  let _ = fs::remove_dir_all(&dir);
+  let wimlib = |cmd: &str, image: u32, to: &Path, opts: &[&str]| -> io::Result<()> {
+    let mut c = Command::new("wimlib-imagex");
+    run(c.arg(cmd).arg(&esd).arg(image.to_string()).arg(to).args(opts)).map(|_| ())
+  };
+
+  wimlib("apply", 1, &dir, &[])?;
+  let boot = dir.join("sources/boot.wim");
+  wimlib("export", 2, &boot, &["--compress=LZX"])?;
+  wimlib("export", 3, &boot, &["--boot"])?;
+  wimlib("export", WINDOWS_PRO, &dir.join("sources/install.esd"), &["--solid"])?;
+
+  // UDF for install.esd, past ISO9660's 4 GiB; El Torito's image as its own sectors of 512 bytes.
+  let efi = dir.join("efi/microsoft/boot/efisys_noprompt.bin");
+  let sectors = fs::metadata(&efi)?.len() / 512;
+  let part = iso.with_extension("part.iso");
+  let mut hdiutil = Command::new("hdiutil");
+  hdiutil.args(["makehybrid", "-quiet", "-iso", "-udf", "-default-volume-name", "WIN11_ARM64"]);
+  hdiutil.arg("-eltorito-boot").arg(&efi).args(["-no-emul-boot", "-eltorito-platform", "0xEF"]);
+  hdiutil.args(["-boot-load-size", &sectors.to_string(), "-ov", "-o"]);
+  run(hdiutil.arg(&part).arg(&dir).stdin(Stdio::null()))?;
+  fs::rename(&part, &iso)?;
+  fs::remove_dir_all(&dir)?;
+  fs::remove_file(&esd)?;
+  Ok(iso)
+}
+
+/// The CDs of a Windows VM being set up: the install media and the seed.
+pub fn windows_cds(vm: &Vm) -> io::Result<Vec<PathBuf>> {
+  let cds = [media(find(&vm.config.system)?), vm.path("seed.iso")];
+  Ok(match vm.setup {
+    true => cds.into_iter().filter(|x| x.exists()).collect(),
+    false => Vec::new(),
+  })
+}
+
 /// The disk, the firmware's variables and the seed: `autounattend.xml`, the setup script its first
 /// logon runs, trivm's key, Win32-OpenSSH's MSI and virtio-net's driver from virtio-win.
 fn windows(vm: &Vm) -> io::Result<()> {
@@ -398,26 +430,10 @@ fn windows(vm: &Vm) -> io::Result<()> {
   fs::remove_dir_all(&seed)
 }
 
-/// Whether a disk has a GPT, the first thing Windows Setup writes.
-fn partitioned(disk: &Path) -> io::Result<bool> {
-  let mut head = [0u8; 520];
-  fs::File::open(disk)?.read_exact(&mut head)?;
-  Ok(&head[512..] == b"EFI PART")
-}
-
-/// The first boot of a new Windows VM: the ISO's boot asks for a key first, then Setup installs
-/// unattended, and the first logon's script starts sshd last. The CDs go then.
+/// The first boot of a new Windows VM: Setup installs from the media unattended, restarting from
+/// the disk, and the first logon's script starts sshd last. The CDs go then.
 pub fn windows_setup(vm: &Vm) -> io::Result<()> {
-  // Once Setup has partitioned the disk, no key: the prompt times out and the disk boots, so a
-  // setup cut short goes on instead of wiping the disk again.
-  if !partitioned(&vm.path("disk.img"))? {
-    for _ in 0..40 {
-      let _ = qemu::ask(vm, "key enter", "");
-      thread::sleep(Duration::from_secs(1));
-    }
-  }
-
-  eprintln!("installing Windows on {}, unattended", vm.name);
+  eprintln!("installing Windows on {}, unattended (about 12 minutes)", vm.name);
   ssh::wait(vm, Duration::from_secs(5400))?;
   qemu::ask(vm, "eject", "")?;
   match fs::remove_file(vm.path("seed.iso")) {
@@ -473,19 +489,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn disks() {
-    let path = std::env::temp_dir().join(format!("trivm-disk-{}", std::process::id()));
-    let mut data = vec![0u8; 1024];
-    fs::write(&path, &data).unwrap();
-    assert!(!partitioned(&path).unwrap());
-
-    data[512..520].copy_from_slice(b"EFI PART");
-    fs::write(&path, &data).unwrap();
-    assert!(partitioned(&path).unwrap());
-    fs::remove_file(&path).unwrap();
-  }
-
-  #[test]
   fn systems() {
     assert_eq!(find("macos-27").unwrap().os, Os::Macos);
     assert_eq!(find("windows-11").unwrap().os, Os::Windows);
@@ -493,8 +496,16 @@ mod tests {
     for x in SYSTEMS.iter().map(|x| (x.url, x.sha256)).chain([VIRTIO, OPENSSH]) {
       assert_eq!(x.1.len(), 64, "{}", x.0);
       assert!(x.1.chars().all(|x| x.is_ascii_hexdigit() && !x.is_ascii_uppercase()), "{}", x.0);
-      assert!(x.0.starts_with("https://"), "{}", x.0);
+      let cdn = x.0.starts_with("http://dl.delivery.mp.microsoft.com/");
+      assert!(x.0.starts_with("https://") || cdn, "{}", x.0);
     }
+
+    // The media's lock isn't the ESD's, which its make takes too.
+    let (sys, lock) = (find("windows-11").unwrap(), |x: &Path| x.with_extension("lock"));
+    let esd = vm::cache_dir().join(sys.url.rsplit('/').next().unwrap());
+    assert_eq!(esd.extension().unwrap(), "esd");
+    assert_ne!(lock(&media(sys)), lock(&esd));
+    assert!(media(sys).to_string_lossy().ends_with("_A64FRE_en-us.pro.iso"));
   }
 
   #[test]

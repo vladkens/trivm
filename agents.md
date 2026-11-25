@@ -14,13 +14,13 @@ Each fact has one source, which this file points to: what trivm does is `readme.
 
 - Host: macOS on Apple silicon. Guests are arm64 only, never emulated: macOS and Linux on
   Virtualization.framework, Windows 11 on QEMU with HVF (Homebrew's `qemu` and `swtpm`), run as a
-  child process and driven over QMP.
+  child process and driven over QMP; its install media made with Homebrew's `wimlib`.
 - trivm drives no other app: no AppleScript, no UTM, no permission prompts on the host. A
   Virtualization.framework VM runs in trivm's own process. Screenshots and input go through the
   VM's display from the host (the VM's view, QMP for QEMU), commands and files through SSH, so a
   guest needs no agent of ours.
-- Systems come from their own sources (Apple's IPSW, the distros' cloud images, Microsoft's ISO)
-  and are installed by code; trivm hosts nothing.
+- Systems come from their own sources (Apple's IPSW, the distros' cloud images, the ESD of
+  Microsoft's Media Creation Tool) and are installed by code; trivm hosts nothing.
 - Pure Rust: Virtualization.framework and AppKit through the `objc2-*` crates; no Swift, no C
   compiled, no bindings generated. Enable only the `objc2-*` features the code uses.
 - Prefer a small own routine to a dependency. Change dependencies only with `cargo add` /
