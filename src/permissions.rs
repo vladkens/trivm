@@ -251,14 +251,15 @@ const SERVICES: &[Service] = &[
 ];
 
 /// Prints the app's TCC client: a bundle by its identifier (type 0), which is what tccd looks a
-/// bundle's executable up by, anything else by its path (type 1).
+/// bundle's executable up by, anything else by its path (type 1) with its links resolved, as tccd
+/// sees the process.
 const APP: &str = r#"set -e
 if [ -f "$1/Contents/Info.plist" ]; then
   echo 0
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist"
 elif [ -f "$1" ]; then
   echo 1
-  echo "$1"
+  realpath "$1"
 else
   echo "no app at $1" >&2
   exit 1
@@ -266,8 +267,8 @@ fi
 "#;
 
 /// Runs `$1` on the system's TCC.db and `$2`, if any, on the user's (macOS 27's is in a container
-/// of tccd's, older ones' in `~/Library`), then kills tccd, which reads them once and ignores
-/// SIGTERM; launchd starts it again.
+/// of tccd's, older ones' in `~/Library`), then kills tccd if it runs, which reads them once and
+/// ignores SIGTERM; launchd starts it at the next request.
 const WRITE: &str = r#"set -e
 printf '%s' "$1" | sudo -n sqlite3 '/Library/Application Support/com.apple.TCC/TCC.db'
 if [ -n "$2" ]; then
@@ -282,7 +283,7 @@ if [ -n "$2" ]; then
   done
   printf '%s' "$2" | sudo -n sqlite3 "$db"
 fi
-sudo -n killall -9 tccd
+sudo -n pkill -9 -x tccd || [ $? -eq 1 ]
 "#;
 
 /// `os grant <vm> <app> [<service>...]`: the services, all by default, allowed for the app at a
