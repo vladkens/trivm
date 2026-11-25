@@ -51,7 +51,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Delete { vm } => {
       let vm = Vm::open(&vm)?;
       stop(&vm, true)?;
-      fs::remove_dir_all(&vm.dir)?;
+      vm.remove()?;
     }
     Cmd::Open { vm } => {
       if Vm::open(&vm)?.pid().is_none() {
@@ -143,8 +143,8 @@ fn signed() -> io::Result<()> {
     )));
   }
 
-  let plist = vm::home().join("entitlements.plist");
-  fs::create_dir_all(vm::home())?;
+  let plist = vm::cache_dir().join("entitlements.plist");
+  vm::made(&vm::cache_dir())?;
   fs::write(&plist, ENTITLEMENTS)?;
   let copy = exe.with_extension(format!("signing{}", std::process::id()));
   fs::copy(&exe, &copy)?;
@@ -169,13 +169,13 @@ pub fn start(name: &str) -> io::Result<()> {
     spawn(&vm)?;
   }
 
-  if vm.config.setup {
+  if vm.setup {
     match vm.config.os() {
       Os::Macos => system::macos_setup(&vm)?,
       Os::Linux => system::linux_setup(&vm)?,
     }
 
-    vm.config.setup = false;
+    vm.setup = false;
     vm.save()?;
   } else {
     ssh::wait(&vm, Duration::from_secs(300))?;
@@ -190,7 +190,8 @@ pub fn start(name: &str) -> io::Result<()> {
 /// `start`'s, whose lock makes this one exit.
 fn spawn(vm: &Vm) -> io::Result<()> {
   let name = &vm.name;
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  vm::made(&vm.state_dir)?;
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let mut cmd = Command::new(env::current_exe()?);
   cmd
     .args(["_run", name])
@@ -207,7 +208,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     if let Some(code) = child.try_wait()?
       && vm.pid().is_none()
     {
-      let log = fs::read_to_string(vm.path("log")).unwrap_or_default();
+      let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
       let tail: Vec<_> = log.lines().rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{name} didn't start ({code}):\n{}", tail.join("\n"))));
@@ -220,7 +221,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     if t.elapsed() > Duration::from_secs(120) {
       return Err(bad(format!(
         "{name} didn't start in 2 minutes; see {}",
-        vm.path("log").display()
+        vm.state("log").display()
       )));
     }
 
@@ -284,7 +285,7 @@ fn list() -> io::Result<()> {
   );
   for vm in vms {
     let c = &vm.config;
-    let state = match (vm.pid().is_some(), c.setup) {
+    let state = match (vm.pid().is_some(), vm.setup) {
       (true, _) => "running",
       (false, true) => "new",
       (false, false) => "stopped",

@@ -50,15 +50,11 @@ pub fn find(name: &str) -> io::Result<&'static System> {
   SYSTEMS.iter().find(|x| x.name == name).ok_or_else(err)
 }
 
-fn cache() -> PathBuf {
-  vm::home().join("cache")
-}
-
 /// The system's file in the cache, downloaded (resumed after a break) and checked first.
 fn download(sys: &System) -> io::Result<PathBuf> {
   let name = sys.url.rsplit('/').next().unwrap_or(sys.name);
-  let path = cache().join(name);
-  fs::create_dir_all(cache())?;
+  let path = vm::cache_dir().join(name);
+  vm::made(&vm::cache_dir())?;
   let _lock = lock(&path)?;
   if path.exists() {
     return Ok(path);
@@ -102,29 +98,28 @@ pub fn create(
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
-  if vm::home().join(&name).join("config").exists() {
-    return Err(bad(format!("{name} exists; trivm delete {name} first")));
-  }
-
-  let file = download(sys)?;
   let config = Config {
     system: sys.name.into(),
     cpus: cpus.unwrap_or(sys.cpus),
     memory: memory.unwrap_or(sys.memory),
     disk: disk.unwrap_or(sys.disk),
-    mac: vm::random_mac()?,
-    setup: true,
   };
+  let vm = Vm { mac: vm::random_mac()?, setup: true, ..Vm::at(&name, config) };
+  if vm.conf.exists() {
+    return Err(bad(format!("{name} exists; trivm delete {name} first")));
+  }
 
-  let vm = Vm::new(&name, config)?;
-  let made = match sys.os {
+  let file = download(sys)?;
+  // The config written first: the VM lists as new while it installs.
+  vm.claim()?;
+  let made = vm.commit().and_then(|_| match sys.os {
     Os::Macos => macos(&vm, &file),
     Os::Linux => linux(&vm, &file),
-  };
+  });
 
   // A VM whose install failed is no use: it goes, its downloads stay.
   if let Err(e) = made {
-    let _ = fs::remove_dir_all(&vm.dir);
+    let _ = vm.remove();
     return Err(e);
   }
 
@@ -205,8 +200,8 @@ fn linux(vm: &Vm, qcow2: &Path) -> io::Result<()> {
   let seed = vm.path("seed");
   fs::create_dir_all(&seed)?;
   fs::write(seed.join("user-data"), user_data(&ssh::public_key()?, &timezone()))?;
-  fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.config.mac))?;
-  fs::write(seed.join("network-config"), network_config(&vm.config.mac))?;
+  fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.mac))?;
+  fs::write(seed.join("network-config"), network_config(&vm.mac))?;
   let mut hdiutil = Command::new("hdiutil");
   hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "cidata", "-o"]);
   run(hdiutil.arg(vm.path("seed.iso")).arg(&seed).stdin(Stdio::null()))?;

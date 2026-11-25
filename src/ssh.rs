@@ -15,9 +15,9 @@ pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
 /// trivm's key, made on first use.
 pub fn key() -> io::Result<PathBuf> {
-  let path = vm::home().join("id_ed25519");
+  let path = vm::data_dir().join("id_ed25519");
   if !path.exists() {
-    fs::create_dir_all(vm::home())?;
+    vm::made(&vm::data_dir())?;
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
@@ -116,7 +116,7 @@ pub fn wait(vm: &Vm, timeout: Duration) -> io::Result<()> {
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if vm.ip().is_some() {
@@ -142,7 +142,7 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if let Some(ip) = vm.ip() {
