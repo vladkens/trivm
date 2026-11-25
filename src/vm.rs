@@ -2,10 +2,11 @@
 //! A VM's folder in `~/.trivm`: its config, its files, whether its process runs, and the guest's
 //! address from the host's DHCP leases.
 
-use std::fs;
-use std::io::{self, Read, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{self, Read};
+use std::os::unix::fs::{FileExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+use std::{fs, thread};
 
 use crate::bad;
 
@@ -193,12 +194,23 @@ impl Vm {
       return None;
     }
 
-    io::read_to_string(f).ok()?.trim().parse().ok()
+    // The process writes its pid just after taking the lock.
+    for _ in 0..50 {
+      let mut buf = [0; 16];
+      let n = f.read_at(&mut buf, 0).ok()?;
+      if let Some(pid) = std::str::from_utf8(&buf[..n]).ok().and_then(|x| x.trim().parse().ok()) {
+        return Some(pid);
+      }
+
+      thread::sleep(Duration::from_millis(10));
+    }
+
+    None
   }
 
   /// Marks the VM as running, with this process's pid, for as long as the file returned is open.
   pub fn lock(&self) -> io::Result<fs::File> {
-    let mut f =
+    let f =
       fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.path("pid"))?;
     match f.try_lock() {
       Ok(()) => {}
@@ -208,8 +220,7 @@ impl Vm {
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
-    f.set_len(0)?;
-    write!(f, "{}", std::process::id())?;
+    write_pid(&f, std::process::id())?;
     Ok(f)
   }
 
@@ -296,6 +307,13 @@ fn mac_text(b: &[u8; 6]) -> String {
 
 unsafe extern "C" {
   fn kill(pid: i32, sig: i32) -> i32;
+}
+
+/// A pid over the one in a locked `pid` file in one write, padded and not truncated first: a
+/// reader sees one pid or the other, never an empty file or a mix.
+pub fn write_pid(f: &fs::File, pid: u32) -> io::Result<()> {
+  f.write_all_at(format!("{pid:<10}").as_bytes(), 0)?;
+  f.set_len(10)
 }
 
 pub fn signal(pid: i32, sig: i32) {
@@ -424,6 +442,14 @@ mod tests {
 
     let lock = vm.lock().unwrap();
     assert_eq!(vm.pid(), Some(std::process::id() as i32));
+
+    // QEMU's pid over trivm's, shorter or longer.
+    write_pid(&lock, 42).unwrap();
+    assert_eq!(vm.pid(), Some(42));
+    write_pid(&lock, 1234567).unwrap();
+    assert_eq!(fs::read_to_string(vm.path("pid")).unwrap(), "1234567   ");
+    write_pid(&lock, std::process::id()).unwrap();
+
     assert!(vm.lock().is_err());
     assert!(vm.hold().is_err());
     drop(lock);

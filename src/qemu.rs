@@ -3,7 +3,7 @@
 //! it, and trivm's requests (`status`, `shot`, `click`, `open`, ...) done over QMP on `qmp.sock`.
 
 use std::cell::RefCell;
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use crate::display::{self, Act};
-use crate::vm::{PASSWORD, Vm};
+use crate::vm::{self, PASSWORD, Vm};
 use crate::{bad, run};
 
 const QEMU: &str = "qemu-system-aarch64";
@@ -130,7 +130,7 @@ const F_SETFD: i32 = 2;
 pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
-  let mut lock = vm.lock()?;
+  let lock = vm.lock()?;
   let port = match vm.config.port {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
@@ -178,10 +178,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     }
   };
 
-  // One write over trivm's pid, padded and not truncated first: a reader sees one pid or the other.
-  lock.rewind()?;
-  lock.write_all(format!("{:<10}", child.id()).as_bytes())?;
-  lock.set_len(10)?;
+  vm::write_pid(&lock, child.id())?;
   drop(lock);
   let _ = Command::new("caffeinate").args(["-i", "-w", &child.id().to_string()]).spawn();
 
