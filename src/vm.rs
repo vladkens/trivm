@@ -321,6 +321,13 @@ pub fn signal(pid: i32, sig: i32) {
   unsafe { kill(pid, sig) };
 }
 
+/// Whether a process of that pid runs: one of another user's can't be signalled (EPERM) but runs.
+pub fn alive(pid: i32) -> bool {
+  // SAFETY: signal 0 only checks the pid.
+  let res = unsafe { kill(pid, 0) };
+  res == 0 || io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
 /// Where macOS's bootpd, which VZ's NAT network uses, writes its leases.
 const LEASES: &str = "/var/db/dhcpd_leases";
 
@@ -430,6 +437,15 @@ mod tests {
     let mode = fs::metadata(&dir).unwrap().permissions().mode();
     fs::remove_dir(&dir).unwrap();
     assert_eq!(mode & 0o777, 0o700);
+  }
+
+  #[test]
+  fn processes() {
+    assert!(alive(std::process::id() as i32));
+    assert!(alive(1), "launchd, root's");
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    child.wait().unwrap();
+    assert!(!alive(child.id() as i32));
   }
 
   #[test]

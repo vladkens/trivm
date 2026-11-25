@@ -16,10 +16,12 @@ mod qemu;
 mod ssh;
 mod system;
 mod ui;
+mod vision;
 mod vm;
 mod vz;
 mod windows;
 
+use std::cell::Cell;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -290,14 +292,21 @@ unsafe extern "C" {
 }
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
+/// A guest with no address yet gets its power button pressed.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
-  // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.
+  // Gone once its process no longer holds the lock. A starting Windows VM's process is trivm's
+  // until QEMU's replaces it, while trivm's still runs; a pid replacing a dead one's is the VM
+  // started again, not this one.
+  let pid = Cell::new(pid);
   let gone = |secs: u64| {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
-      if vm.pid() != Some(pid) {
-        return true;
+      match vm.pid() {
+        None => return true,
+        Some(x) if x == pid.get() => {}
+        Some(x) if vm::alive(pid.get()) => pid.set(x),
+        Some(_) => return true,
       }
 
       thread::sleep(Duration::from_millis(300));
@@ -306,7 +315,7 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     false
   };
 
-  if !force && vm.ip().is_some() {
+  if !force {
     let cmd = match vm.config.os() {
       Os::Macos => "sudo -n shutdown -h now",
       Os::Linux => "sudo -n systemctl poweroff",
@@ -314,16 +323,26 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     };
 
     // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
-    let mut ssh = ssh::ssh(vm)?;
-    ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let child = ssh.spawn();
-    // The power button too, for a Windows guest whose SSH isn't up.
-    if vm.config.os() == Os::Windows {
+    let ip = vm.ip();
+    let child = match ip {
+      Some(_) => {
+        let mut ssh = ssh::ssh(vm)?;
+        ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        ssh.spawn().ok()
+      }
+      None => None,
+    };
+
+    // Windows's SSH may not be up yet either; macOS asks first.
+    if ip.is_none() || vm.config.os() == Os::Windows {
       let _ = ask(vm, "stop", "");
+      if vm.config.os() == Os::Macos {
+        let _ = shut_down(vm);
+      }
     }
 
     let down = gone(120);
-    if let Ok(mut x) = child {
+    if let Some(mut x) = child {
       let _ = x.kill();
       let _ = x.wait();
     }
@@ -340,12 +359,34 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   };
 
   if !gone(15) {
-    vm::signal(pid, 9);
+    vm::signal(pid.get(), 9);
     if !gone(5) {
-      return Err(bad(format!("{} didn't stop; its process is {pid}", vm.name)));
+      return Err(bad(format!("{} didn't stop; its process is {}", vm.name, pid.get())));
     }
   }
 
+  Ok(())
+}
+
+/// Answers macOS's question at its power button: Shut Down, clicked again while it shows, as a
+/// click while the dialog fades in is lost.
+fn shut_down(vm: &Vm) -> io::Result<()> {
+  let shot = env::temp_dir().join(format!("trivm-{}-stop.png", vm.name));
+  let (t, mut clicked) = (Instant::now(), false);
+  while t.elapsed() < Duration::from_secs(30) {
+    vz::ask(vm, "shot", &shot.to_string_lossy())?;
+    match vision::find_text(&shot, "Shut Down")? {
+      Some((x, y)) => {
+        vz::ask(vm, &format!("click {x} {y} left 1"), "")?;
+        clicked = true;
+        thread::sleep(Duration::from_secs(3));
+      }
+      None if clicked => break,
+      None => thread::sleep(Duration::from_secs(1)),
+    }
+  }
+
+  let _ = fs::remove_file(&shot);
   Ok(())
 }
 
