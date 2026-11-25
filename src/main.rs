@@ -370,7 +370,9 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   };
 
   if !gone(15) {
-    vm::signal(pid.get(), 9);
+    if vm::is_vm(pid.get()) {
+      vm::signal(pid.get(), 9);
+    }
 
     if !gone(5) {
       return Err(bad(format!("{} didn't stop; its process is {}", vm.name, pid.get())));

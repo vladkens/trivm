@@ -291,6 +291,21 @@ fn mac_text(b: &[u8; 6]) -> String {
 
 unsafe extern "C" {
   fn kill(pid: i32, sig: i32) -> i32;
+  fn proc_name(pid: i32, buf: *mut u8, size: u32) -> i32;
+}
+
+/// The name of the program a process of that pid runs.
+pub fn process_name(pid: i32) -> Option<String> {
+  let mut b = [0u8; 64];
+  // SAFETY: a buffer of the size given.
+  let n = unsafe { proc_name(pid, b.as_mut_ptr(), b.len() as u32) };
+  (n > 0).then(|| String::from_utf8_lossy(&b[..n as usize]).into_owned())
+}
+
+/// Whether the process of that pid is a VM's, trivm's or QEMU, so not one that took a gone VM's
+/// pid since.
+pub fn is_vm(pid: i32) -> bool {
+  process_name(pid).is_some_and(|x| x.starts_with("trivm") || x.starts_with("qemu"))
 }
 
 /// A pid over the one in a locked `pid` file in one write, padded and not truncated first: a
@@ -479,6 +494,9 @@ mod tests {
     assert_eq!(fs::read_to_string(vm.path("pid")).unwrap(), "1234567   ");
     assert_eq!(&pid_text(0), b"0         ");
     assert_eq!(&pid_text(u32::MAX), b"4294967295");
+    // The test's own binary is `trivm-<hash>`; launchd is root's, its name not ours to read.
+    assert!(is_vm(std::process::id() as i32));
+    assert!(!is_vm(1) && !is_vm(-1));
     write_pid(&lock, std::process::id()).unwrap();
 
     assert!(vm.lock().is_err());

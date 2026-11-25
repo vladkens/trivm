@@ -231,7 +231,7 @@ fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
 
 /// Kills the process that holds an open `pid` file's lock, and waits until it lets go.
 fn kill(f: &fs::File) {
-  let Some(pid) = vm::pid_of(f) else { return };
+  let Some(pid) = vm::pid_of(f).filter(|&x| vm::is_vm(x)) else { return };
   vm::signal(pid, 9);
   for _ in 0..100 {
     if vm::pid_of(f) != Some(pid) {
@@ -264,13 +264,13 @@ mod tests {
     let vm = Vm { name: "a".into(), dir: dir.clone(), config };
     let ino = fs::metadata(&dir).unwrap().ino();
 
-    // A process holding the clone's lock, as its VM's does, through its stdin.
+    // A process holding the clone's lock, as its VM's does, through its stdin, named as QEMU.
+    let qemu = env::temp_dir().join(format!("trivm-discard-bin-{}/qemu", process::id()));
+    fs::create_dir_all(qemu.parent().unwrap()).unwrap();
+    fs::copy("/bin/sleep", &qemu).unwrap();
     let lock = vm.lock().unwrap();
-    let mut child = Command::new("sleep")
-      .arg("30")
-      .stdin(Stdio::from(lock.try_clone().unwrap()))
-      .spawn()
-      .unwrap();
+    let mut child =
+      Command::new(&qemu).arg("30").stdin(Stdio::from(lock.try_clone().unwrap())).spawn().unwrap();
     vm::write_pid(&lock, child.id()).unwrap();
     drop(lock);
 
@@ -282,5 +282,6 @@ mod tests {
     discard(&vm, ino).unwrap();
     assert!(!dir.exists());
     assert_eq!(child.wait().unwrap().signal(), Some(9));
+    fs::remove_dir_all(qemu.parent().unwrap()).unwrap();
   }
 }

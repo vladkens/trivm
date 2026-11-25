@@ -122,15 +122,11 @@ unsafe extern "C" {
   fn fcntl(fd: i32, cmd: i32, ...) -> i32;
   fn pwrite(fd: i32, buf: *const u8, len: usize, off: i64) -> isize;
   fn ftruncate(fd: i32, len: i64) -> i32;
-  fn proc_name(pid: i32, buf: *mut u8, size: u32) -> i32;
 }
 
 /// Whether the process of that pid is QEMU, not the trivm that starts it.
 pub fn is_qemu(pid: i32) -> bool {
-  let mut b = [0u8; 64];
-  // SAFETY: a buffer of the size given.
-  let n = unsafe { proc_name(pid, b.as_mut_ptr(), b.len() as u32) };
-  n > 0 && b[..n as usize].starts_with(b"qemu")
+  vm::process_name(pid).is_some_and(|x| x.starts_with("qemu"))
 }
 
 const F_SETFD: i32 = 2;
@@ -563,7 +559,7 @@ mod tests {
     let exe = dir.join("qemu-system-aarch64");
     fs::copy("/bin/sleep", &exe).unwrap();
     let mut child = Command::new(&exe).arg("10").spawn().unwrap();
-    let told = is_qemu(child.id() as i32);
+    let told = is_qemu(child.id() as i32) && vm::is_vm(child.id() as i32);
     let _ = child.kill();
     let _ = child.wait();
     fs::remove_dir_all(&dir).unwrap();
