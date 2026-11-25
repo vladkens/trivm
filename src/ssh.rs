@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
@@ -14,7 +14,8 @@ use crate::{bad, run, windows};
 /// Set when trivm runs as `ssh`'s askpass program: it prints the guest's password.
 pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
-/// trivm's key, made on first use; `ssh-keygen` writes the public half last.
+/// trivm's key, made on first use beside its place, then moved there, the public half last: a
+/// public half there is whole.
 pub fn key() -> io::Result<PathBuf> {
   let path = vm::home().join("id_ed25519");
   if path.with_extension("pub").exists() {
@@ -26,12 +27,17 @@ pub fn key() -> io::Result<PathBuf> {
   let lock = fs::File::create(path.with_extension("lock"))?;
   lock.lock()?;
   if !path.with_extension("pub").exists() {
-    let _ = fs::remove_file(&path);
+    let new = path.with_extension(format!("new{}", process::id()));
+    let public = |x: &Path| PathBuf::from(format!("{}.pub", x.display()));
+    let _ = fs::remove_file(&new);
+    let _ = fs::remove_file(public(&new));
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
-        .arg(&path),
+        .arg(&new),
     )?;
+    fs::rename(&new, &path)?;
+    fs::rename(public(&new), public(&path))?;
   }
 
   Ok(path)
