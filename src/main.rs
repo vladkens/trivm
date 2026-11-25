@@ -148,8 +148,8 @@ fn signed() -> io::Result<()> {
     )));
   }
 
-  let plist = vm::home().join("entitlements.plist");
-  fs::create_dir_all(vm::home())?;
+  let plist = vm::cache_dir().join("entitlements.plist");
+  vm::made(&vm::cache_dir())?;
   fs::write(&plist, ENTITLEMENTS)?;
   let copy = exe.with_extension(format!("signing{}", std::process::id()));
   fs::copy(&exe, &copy)?;
@@ -174,7 +174,7 @@ pub fn start(name: &str) -> io::Result<()> {
     spawn(&vm)?;
   }
 
-  match (vm.config.setup, vm.config.os()) {
+  match (vm.setup, vm.config.os()) {
     (true, Os::Macos) => system::macos_setup(&vm)?,
     (true, Os::Linux) => system::linux_setup(&vm)?,
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
@@ -182,8 +182,8 @@ pub fn start(name: &str) -> io::Result<()> {
 
   system::desktop(&vm)?;
   // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
-  if vm.config.setup {
-    vm.config.setup = false;
+  if vm.setup {
+    vm.setup = false;
     vm.save()?;
   }
 
@@ -195,7 +195,8 @@ pub fn start(name: &str) -> io::Result<()> {
 /// `start`'s, whose lock makes this one exit.
 fn spawn(vm: &Vm) -> io::Result<()> {
   let name = &vm.name;
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  vm::made(&vm.state_dir)?;
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let mut cmd = Command::new(env::current_exe()?);
   cmd
     .args(["_run", name])
@@ -211,7 +212,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     if let Some(code) = child.try_wait()?
       && vm.pid().is_none()
     {
-      let log = fs::read_to_string(vm.path("log")).unwrap_or_default();
+      let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
       let tail: Vec<_> = log.lines().rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{name} didn't start ({code}):\n{}", tail.join("\n"))));
@@ -224,7 +225,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     if t.elapsed() > Duration::from_secs(120) {
       return Err(bad(format!(
         "{name} didn't start in 2 minutes; see {}",
-        vm.path("log").display()
+        vm.state("log").display()
       )));
     }
 
@@ -265,8 +266,17 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
       Os::Linux => "sudo -n systemctl poweroff",
     };
 
-    let _ = ssh::ssh(vm)?.args(["--", cmd]).stdin(Stdio::null()).output();
-    if gone(120) {
+    // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
+    let mut ssh = ssh::ssh(vm)?;
+    ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let child = ssh.spawn();
+    let down = gone(120);
+    if let Ok(mut x) = child {
+      let _ = x.kill();
+      let _ = x.wait();
+    }
+
+    if down {
       return Ok(());
     }
   }
@@ -282,11 +292,12 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   Ok(())
 }
 
-/// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile.
-pub fn delete(vm: &Vm) -> io::Result<()> {
+/// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
+/// and one being made or cloned isn't removed under it.
+fn delete(vm: &Vm) -> io::Result<()> {
   stop(vm, true)?;
-  let _lock = vm.lock()?;
-  fs::remove_dir_all(&vm.dir)
+  let _lock = vm.take()?;
+  vm.remove()
 }
 
 fn list() -> io::Result<()> {
@@ -302,7 +313,7 @@ fn list() -> io::Result<()> {
   );
   for vm in vms {
     let c = &vm.config;
-    let state = match (vm.pid().is_some(), c.setup) {
+    let state = match (vm.pid().is_some(), vm.setup) {
       (true, _) => "running",
       (false, true) => "new",
       (false, false) => "stopped",
