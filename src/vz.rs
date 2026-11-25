@@ -86,9 +86,8 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
     let net = VZVirtioNetworkDeviceConfiguration::new();
     net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
-    let mac =
-      VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&vm.config.mac));
-    let mac = mac.ok_or_else(|| bad(format!("config: not a MAC address: {}", vm.config.mac)))?;
+    let mac = VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&vm.mac));
+    let mac = mac.ok_or_else(|| bad(format!("{}: not a MAC address", vm.path("mac").display())))?;
     net.setMACAddress(&mac);
     c.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
 
@@ -398,7 +397,7 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   // SAFETY: the VM runs on the main queue, which `app.run()` runs.
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
-  match (vm.config.os(), vm.config.setup, recovery) {
+  match (vm.config.os(), vm.setup, recovery) {
     (Os::Linux | Os::Windows, _, true) => {
       return Err(bad(format!("{} isn't macOS: no recoveryOS", vm.name)));
     }

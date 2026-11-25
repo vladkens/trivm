@@ -136,7 +136,8 @@ Windows).
 trivm keeps its files as Linux tools do, by the XDG Base Directory spec, each folder moved by its
 variable:
 
-- `~/.local/share/trivm` (`XDG_DATA_HOME`): each VM's disks and settings, trivm's SSH key.
+- `~/.config/trivm` (`XDG_CONFIG_HOME`): each VM's settings, `<vm>.conf`.
+- `~/.local/share/trivm` (`XDG_DATA_HOME`): each VM's disks and machine, trivm's SSH key.
 - `~/.cache/trivm` (`XDG_CACHE_HOME`): downloads and the disks made from them.
 - `~/.local/state/trivm` (`XDG_STATE_HOME`): each VM's log, lock and sockets.
 

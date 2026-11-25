@@ -59,7 +59,7 @@ pub fn ip(vm: &Vm) -> io::Result<String> {
 
 /// Whether the guest's SSH port takes a connection now.
 pub fn answers(vm: &Vm) -> bool {
-  let port = vm.config.port.unwrap_or(22);
+  let port = vm.port.unwrap_or(22);
   let addr = vm.ip().and_then(|x| format!("{x}:{port}").parse::<SocketAddr>().ok());
   addr.is_some_and(|x| TcpStream::connect_timeout(&x, Duration::from_secs(2)).is_ok())
 }
@@ -67,7 +67,7 @@ pub fn answers(vm: &Vm) -> bool {
 /// The guest's SSH as `ip` or `ip:port`.
 pub fn address(vm: &Vm) -> io::Result<String> {
   let ip = ip(vm)?;
-  Ok(match vm.config.port {
+  Ok(match vm.port {
     Some(port) => format!("{ip}:{port}"),
     None => ip,
   })
@@ -94,7 +94,7 @@ fn options(key: &Path) -> Vec<String> {
 pub fn ssh(vm: &Vm) -> io::Result<Command> {
   let mut cmd = Command::new("ssh");
   cmd.args(options(&key()?)).args(["-o", "BatchMode=yes"]);
-  if let Some(port) = vm.config.port {
+  if let Some(port) = vm.port {
     cmd.args(["-p", &port.to_string()]);
   }
 
@@ -162,7 +162,7 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     }
 
     let vm = Vm::open(name)?;
-    Ok(url(&ip(&vm)?, vm.config.port, path))
+    Ok(url(&ip(&vm)?, vm.port, path))
   };
 
   let (src, dst) = (side(src)?, side(dst)?);

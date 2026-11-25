@@ -8,7 +8,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::{DirBuilderExt, FileExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{env, fs, thread};
+use std::{env, fs, process, thread};
 
 use crate::bad;
 
@@ -18,7 +18,12 @@ pub const PASSWORD: &str = "1234";
 
 const GIB: u64 = 1 << 30;
 
-/// Each VM's disks and platform files, and trivm's SSH key.
+/// What a person sets: each VM's settings.
+pub fn config_dir() -> PathBuf {
+  xdg("XDG_CONFIG_HOME", ".config")
+}
+
+/// Each VM's disks, platform files and machine state, and trivm's SSH key.
 pub fn data_dir() -> PathBuf {
   xdg("XDG_DATA_HOME", ".local/share")
 }
@@ -67,7 +72,8 @@ pub enum Os {
   Windows,
 }
 
-#[derive(Debug, PartialEq)]
+/// A VM's settings, the person's: `<vm>.conf` in trivm's config folder, `key = value` lines.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
   pub system: String,
   pub cpus: u32,
@@ -75,11 +81,6 @@ pub struct Config {
   pub memory: u32,
   /// GiB.
   pub disk: u32,
-  pub mac: String,
-  /// Set until the first boot has made the user and the guest answers SSH with trivm's key.
-  pub setup: bool,
-  /// The host's port forwarded to the guest's SSH, for a VM on QEMU's user network.
-  pub port: Option<u16>,
 }
 
 impl Config {
@@ -117,10 +118,10 @@ impl Config {
         let (k, v) = x.split_once('=')?;
         (k.trim() == key).then(|| v.trim().to_string())
       });
-      line.ok_or_else(|| bad(format!("config: no {key}")))
+      line.ok_or_else(|| bad(format!("no {key}")))
     };
     let number = |key: &str| -> io::Result<u32> {
-      get(key)?.parse().map_err(|_| bad(format!("config: {key} is not a number")))
+      get(key)?.parse().map_err(|_| bad(format!("{key} is not a number")))
     };
 
     Ok(Self {
@@ -128,39 +129,41 @@ impl Config {
       cpus: number("cpus")?,
       memory: number("memory")?,
       disk: number("disk")?,
-      mac: get("mac")?,
-      setup: get("setup").is_ok_and(|x| x == "true"),
-      port: get("port").ok().and_then(|x| x.parse().ok()),
     })
   }
 
   fn text(&self) -> String {
-    let Self { system, cpus, memory, disk, mac, setup, port } = self;
-    let mut text = format!(
-      "system = {system}\ncpus = {cpus}\nmemory = {memory}\ndisk = {disk}\nmac = {mac}\nsetup = {setup}\n"
-    );
-    if let Some(port) = port {
-      text += &format!("port = {port}\n");
-    }
-
-    text
+    let Self { system, cpus, memory, disk } = self;
+    format!("system = {system}\ncpus = {cpus}\nmemory = {memory}\ndisk = {disk}\n")
   }
 }
 
 pub struct Vm {
   pub name: String,
-  /// Its disks, platform files and config, in trivm's data folder.
+  /// Its settings' file, in trivm's config folder.
+  pub conf: PathBuf,
+  /// Its disks, platform files and machine state, in trivm's data folder.
   pub dir: PathBuf,
   /// What its runs write (`log`, `pid`, the sockets), in trivm's state folder.
   pub state_dir: PathBuf,
   pub config: Config,
+  /// The NIC's address, `mac` in the data folder: the guest's DHCP lease follows it.
+  pub mac: String,
+  /// Set until the first boot has made the user and the guest answers SSH with trivm's key: the
+  /// mark `setup` in the data folder, as it says what the disk holds.
+  pub setup: bool,
+  /// The host's port forwarded to the guest's SSH, for a VM on QEMU's user network: `port` in the
+  /// state folder, chosen at each start.
+  pub port: Option<u16>,
 }
 
 impl Vm {
-  /// The VM of that name in trivm's folders.
+  /// The VM of that name in trivm's folders, its machine state not read.
   pub fn at(name: &str, config: Config) -> Self {
+    let conf = config_dir().join(format!("{name}.conf"));
     let (dir, state_dir) = (data_dir().join(name), state_dir().join(name));
-    Self { name: name.into(), dir, state_dir, config }
+    let (mac, setup, port) = (String::new(), false, None);
+    Self { name: name.into(), conf, dir, state_dir, config, mac, setup, port }
   }
 
   pub fn open(name: &str) -> io::Result<Self> {
@@ -169,72 +172,115 @@ impl Vm {
       return Err(none());
     }
 
-    let text = match fs::read_to_string(data_dir().join(name).join("config")) {
-      Ok(x) => x,
-      Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(none()),
+    let mut vm = Self::at(name, Config::default());
+    match vm.read() {
+      Err(e) if e.kind() == io::ErrorKind::NotFound => Err(none()),
+      x => x.map(|_| vm),
+    }
+  }
+
+  /// The VM's config and machine state from its files.
+  fn read(&mut self) -> io::Result<()> {
+    let text = fs::read_to_string(&self.conf)?;
+    self.config = Config::parse(&text).map_err(|e| bad(format!("{}: {e}", self.conf.display())))?;
+    // A VM whose data is gone, as a `delete` cut short leaves it, opens, so `delete` finishes it.
+    self.mac = match fs::read_to_string(self.path("mac")) {
+      Ok(x) => x.trim().into(),
+      Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
       Err(e) => return Err(e),
     };
 
-    Ok(Self::at(name, Config::parse(&text)?))
-  }
-
-  /// A new VM's folders with its config; the files of its system come next.
-  pub fn new(name: &str, config: Config) -> io::Result<Self> {
-    if !valid(name) {
-      return Err(bad(format!("not a VM name: {name}")));
-    }
-
-    // The config made only if there is none, so of two creates of a name one fails.
-    let vm = Self::at(name, config);
-    socket_fits(&vm.state_dir)?;
-    made(&vm.dir)?;
-    made(&vm.state_dir)?;
-    match fs::OpenOptions::new().write(true).create_new(true).open(vm.path("config")) {
-      Ok(_) => {}
-      Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-        return Err(bad(format!("{name} exists; trivm delete {name} first")));
-      }
-      Err(e) => return Err(e),
-    }
-
-    vm.save()?;
-    Ok(vm)
+    self.setup = self.path(SETUP).exists();
+    self.port = fs::read_to_string(self.state("port")).ok().and_then(|x| x.trim().parse().ok());
+    Ok(())
   }
 
   pub fn all() -> io::Result<Vec<Self>> {
-    let mut names: Vec<String> = match fs::read_dir(data_dir()) {
-      Ok(x) => x.filter_map(|x| x.ok()?.file_name().into_string().ok()).collect(),
+    let mut names: Vec<String> = match fs::read_dir(config_dir()) {
+      Ok(x) => x
+        .filter_map(|x| x.ok()?.file_name().into_string().ok())
+        .filter_map(|x| x.strip_suffix(".conf").map(str::to_string))
+        .collect(),
       Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
       Err(e) => return Err(e),
     };
 
     names.sort();
-    Ok(
-      names
-        .iter()
-        .filter(|x| data_dir().join(x).join("config").exists())
-        .flat_map(|x| Self::open(x))
-        .collect(),
-    )
+    Ok(names.iter().flat_map(|x| Self::open(x)).collect())
   }
 
-  pub fn save(&self) -> io::Result<()> {
-    // A file of this process's own: two `start`s may save at once.
-    let tmp = self.path(&format!("config.{}", std::process::id()));
-    fs::write(&tmp, self.config.text())?;
-    fs::rename(tmp, self.path("config"))
-  }
-
-  /// Removes the VM's folders, its data first: the state folder, with the lock, goes last.
-  pub fn remove(&self) -> io::Result<()> {
-    for dir in [&self.dir, &self.state_dir] {
-      match fs::remove_dir_all(dir) {
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        _ => {}
-      }
+  /// Claims the VM's name by making its data folder, which fails if there is one, so of two VMs of
+  /// a name made at once one gets it; then its state folder, and its machine state saved. Nothing
+  /// opens it until `commit` writes its config.
+  pub fn claim(&self) -> io::Result<()> {
+    let name = &self.name;
+    if !valid(name) {
+      return Err(bad(format!("not a VM name: {name}")));
     }
 
-    Ok(())
+    socket_fits(&self.state_dir)?;
+    if self.conf.exists() {
+      return Err(taken(name));
+    }
+
+    if let Some(x) = self.dir.parent() {
+      made(x)?;
+    }
+
+    match fs::DirBuilder::new().mode(0o700).create(&self.dir) {
+      Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+        let msg = format!("{} is in the way: files of a VM with no config", self.dir.display());
+        return Err(io::Error::new(e.kind(), msg));
+      }
+      x => x?,
+    }
+
+    let res = made(&self.state_dir).and_then(|_| self.save());
+    if res.is_err() {
+      let _ = self.remove();
+    }
+
+    res
+  }
+
+  /// Writes the config of a VM `claim` made, which shows it: whole, beside its place, then linked
+  /// there, which fails if a config is there.
+  pub fn commit(&self) -> io::Result<()> {
+    if let Some(x) = self.conf.parent() {
+      made(x)?;
+    }
+
+    let tmp = self.conf.with_file_name(format!(".{}.conf.{}", self.name, process::id()));
+    fs::write(&tmp, self.config.text())?;
+    let res = fs::hard_link(&tmp, &self.conf);
+    let _ = fs::remove_file(&tmp);
+    match res {
+      Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(taken(&self.name)),
+      x => x,
+    }
+  }
+
+  /// Saves the machine state: `mac` and the `setup` mark in the data folder, `port` in the state
+  /// folder. A file is written beside its place and renamed there: two `start`s may save at once.
+  pub fn save(&self) -> io::Result<()> {
+    put(&self.path("mac"), &format!("{}\n", self.mac))?;
+    match self.setup {
+      true => fs::write(self.path(SETUP), "")?,
+      false => gone(fs::remove_file(self.path(SETUP)))?,
+    }
+
+    match self.port {
+      Some(x) => put(&self.state("port"), &format!("{x}\n")),
+      None => gone(fs::remove_file(self.state("port"))),
+    }
+  }
+
+  /// Removes the VM: its data first, its config last, so a removal cut short leaves a VM that
+  /// `delete` finishes, never a disk with no config naming it.
+  pub fn remove(&self) -> io::Result<()> {
+    gone(fs::remove_dir_all(&self.dir))?;
+    gone(fs::remove_dir_all(&self.state_dir))?;
+    gone(fs::remove_file(&self.conf))
   }
 
   /// A file in the VM's data folder.
@@ -264,7 +310,7 @@ impl Vm {
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
-    write_pid(&f, std::process::id())?;
+    write_pid(&f, process::id())?;
     Ok(f)
   }
 
@@ -291,13 +337,37 @@ impl Vm {
   /// The guest's address: from its newest DHCP lease, or the host's own for a VM on QEMU's user
   /// network, whose SSH is forwarded from `port`.
   pub fn ip(&self) -> Option<String> {
-    if self.config.port.is_some() {
+    if self.port.is_some() {
       return Some("127.0.0.1".into());
     }
 
     let mut text = String::new();
     fs::File::open(LEASES).ok()?.read_to_string(&mut text).ok()?;
-    lease(&text, &self.config.mac)
+    lease(&text, &self.mac)
+  }
+}
+
+/// The mark of a VM whose first boot hasn't finished, in its data folder.
+const SETUP: &str = "setup";
+
+fn taken(name: &str) -> io::Error {
+  let msg = format!("{name} exists; trivm delete {name} first");
+  io::Error::new(io::ErrorKind::AlreadyExists, msg)
+}
+
+/// Writes a file through one of this process's own beside it, renamed over it: a reader sees the
+/// old or the new.
+fn put(path: &Path, text: &str) -> io::Result<()> {
+  let tmp = PathBuf::from(format!("{}.{}", path.display(), process::id()));
+  fs::write(&tmp, text)?;
+  fs::rename(tmp, path)
+}
+
+/// A removal that found nothing to remove is done.
+fn gone(res: io::Result<()>) -> io::Result<()> {
+  match res {
+    Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+    x => x,
   }
 }
 
@@ -334,7 +404,7 @@ pub fn random_mac() -> io::Result<String> {
 /// hash (FNV-1a) of the clone's name, the same each time, so the clone gets the same lease and
 /// address each time, and a clone of a clone none of its ancestors'.
 pub fn clone_mac(mac: &str, name: &str) -> io::Result<String> {
-  let mut b = parse_mac(mac).ok_or_else(|| bad(format!("config: not a MAC address: {mac}")))?;
+  let mut b = parse_mac(mac).ok_or_else(|| bad(format!("not a MAC address: {mac}")))?;
   let hash = name.bytes().fold(0x811c9dc5u32, |h, x| (h ^ x as u32).wrapping_mul(0x01000193));
   let [_, h @ ..] = (hash & 0xff_ffff).max(1).to_be_bytes();
   for (x, h) in b[3..].iter_mut().zip(h) {
@@ -473,29 +543,71 @@ mod tests {
 
   #[test]
   fn config() {
-    let c = Config {
-      system: "macos-27".into(),
-      cpus: 4,
-      memory: 8,
-      disk: 64,
-      mac: "02:00:00:00:00:01".into(),
-      setup: true,
-      port: None,
-    };
+    let c = Config { system: "macos-27".into(), cpus: 4, memory: 8, disk: 64 };
+    assert_eq!(c.text(), "system = macos-27\ncpus = 4\nmemory = 8\ndisk = 64\n");
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
     assert!(c.provisioned());
-    assert!(
-      !Config { system: "macos-26".into(), ..Config::parse(&c.text()).unwrap() }.provisioned()
-    );
-    assert!(!c.text().contains("port"));
+    assert!(!Config { system: "macos-26".into(), ..c.clone() }.provisioned());
     assert_eq!(c.memory_bytes(), 8 << 30);
     assert!(Config::parse("system = x\n").is_err());
-    assert!(!Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\n").unwrap().setup);
+    // A line it doesn't know, such as the machine state the config used to hold, is left.
+    let old = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\nsetup = true\n");
+    assert_eq!(old.unwrap().text(), "system = a\ncpus = 1\nmemory = 2\ndisk = 3\n");
+    assert_eq!(Config { system: "windows-11".into(), ..c }.os(), Os::Windows);
+  }
 
-    let w = Config { system: "windows-11".into(), port: Some(50022), ..c };
-    assert_eq!(Config::parse(&w.text()).unwrap(), w);
-    assert_eq!(w.os(), Os::Windows);
+  #[test]
+  fn claim() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("trivm-claim-{}", process::id()));
+    let config = Config { system: "windows-11".into(), cpus: 1, memory: 2, disk: 3 };
+    let mac = "02:00:00:00:00:01";
+    let at = |name: &str| Vm {
+      conf: root.join(format!("config/{name}.conf")),
+      dir: root.join("data").join(name),
+      state_dir: root.join("state").join(name),
+      mac: mac.into(),
+      setup: true,
+      ..Vm::at(name, config.clone())
+    };
+
+    // Claimed: its folders, its owner's only, and its machine state; no config, so not opened.
+    let mut vm = at("a");
+    vm.claim().unwrap();
+    assert_eq!(fs::metadata(&vm.dir).unwrap().permissions().mode() & 0o777, 0o700);
+    assert_eq!(fs::read_to_string(vm.path("mac")).unwrap(), format!("{mac}\n"));
+    assert!(vm.path("setup").exists() && vm.state_dir.is_dir() && !vm.conf.exists());
+    assert_eq!(at("a").read().unwrap_err().kind(), io::ErrorKind::NotFound);
+    assert_eq!(at("a").claim().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+
+    vm.commit().unwrap();
+    assert_eq!(fs::read_to_string(&vm.conf).unwrap(), config.text());
+    assert_eq!(vm.commit().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(at("a").claim().unwrap_err().to_string(), "a exists; trivm delete a first");
+
+    // Set up, then started on QEMU's network: read back as saved.
+    vm.setup = false;
+    vm.port = Some(50022);
+    vm.save().unwrap();
+    let mut read = Vm { mac: String::new(), ..at("a") };
+    read.read().unwrap();
+    assert_eq!((&read.config, read.mac.as_str()), (&config, mac));
+    assert_eq!((read.setup, read.port), (false, Some(50022)));
+    vm.port = None;
+    vm.save().unwrap();
+    assert!(!vm.state("port").exists());
+
+    // Removed, the name is free; its data folder left with no config is in the way.
+    vm.remove().unwrap();
+    assert!(!vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists());
+    made(&vm.dir).unwrap();
+    let err = at("a").claim().unwrap_err();
+    fs::remove_dir_all(&root).unwrap();
+    assert_eq!(
+      err.to_string(),
+      format!("{} is in the way: files of a VM with no config", vm.dir.display())
+    );
   }
 
   #[test]
@@ -558,9 +670,10 @@ mod tests {
   #[test]
   fn lock() {
     let dir = std::env::temp_dir().join(format!("trivm-lock-{}", std::process::id()));
-    let config = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\n").unwrap();
+    let config = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\n").unwrap();
     // The state folder made by the lock.
-    let vm = Vm { name: "a".into(), dir: dir.join("data"), state_dir: dir.join("state"), config };
+    let (conf, data, state_dir) = (dir.join("a.conf"), dir.join("data"), dir.join("state"));
+    let vm = Vm { conf, dir: data, state_dir, ..Vm::at("a", config) };
     assert_eq!(vm.pid(), None);
 
     let lock = vm.lock().unwrap();

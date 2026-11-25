@@ -49,7 +49,7 @@ pub fn platform(vm: &Vm) -> io::Result<()> {
 /// QEMU's command line for the VM, the CDs attached as USB drives.
 pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
   let c = &vm.config;
-  let port = c.port.unwrap_or(0);
+  let port = vm.port.unwrap_or(0);
   let mut args: Vec<String> = [
     "-name".into(),
     vm.name.clone(),
@@ -82,7 +82,7 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-netdev".into(),
     format!("user,id=net,hostfwd=tcp:127.0.0.1:{port}-:22"),
     "-device".into(),
-    format!("virtio-net-pci,netdev=net,mac={}", c.mac),
+    format!("virtio-net-pci,netdev=net,mac={}", vm.mac),
     "-chardev".into(),
     format!("socket,id=tpm,path={}", opt(&vm.state("tpm.sock"))),
     "-tpmdev".into(),
@@ -138,13 +138,13 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
   let lock = vm.lock()?;
-  let port = match vm.config.port {
+  let port = match vm.port {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
   };
 
-  if vm.config.port != Some(port) {
-    vm.config.port = Some(port);
+  if vm.port != Some(port) {
+    vm.port = Some(port);
     vm.save()?;
   }
 
@@ -570,17 +570,10 @@ mod tests {
 
   #[test]
   fn command_line() {
-    let config = Config {
-      system: "windows-11".into(),
-      cpus: 4,
-      memory: 6,
-      disk: 64,
-      mac: "02:00:00:00:00:01".into(),
-      setup: true,
-      port: Some(50022),
-    };
+    let config = Config { system: "windows-11".into(), cpus: 4, memory: 6, disk: 64 };
     let (dir, state_dir) = ("/v/a,b".into(), "/s/a,b".into());
-    let vm = Vm { name: "w".into(), dir, state_dir, config };
+    let mac = "02:00:00:00:00:01".into();
+    let vm = Vm { dir, state_dir, mac, setup: true, port: Some(50022), ..Vm::at("w", config) };
     let cds = ["/c/win.iso".into(), "/v/a,b/seed.iso".into()];
     let line = args(&vm, Path::new("/q"), &cds).join(" ");
 

@@ -216,7 +216,7 @@ fn check(path: &Path, sha256: &str) -> io::Result<()> {
 /// The CDs of a Windows VM being set up: Microsoft's ISO and the seed.
 pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
   let cds = [vm::cache_dir().join(WINDOWS_ISO), vm.path("seed.iso")];
-  match vm.config.setup {
+  match vm.setup {
     true => cds.into_iter().filter(|x| x.exists()).collect(),
     false => Vec::new(),
   }
@@ -270,7 +270,14 @@ pub fn create(
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
-  if vm::data_dir().join(&name).join("config").exists() {
+  let config = Config {
+    system: sys.name.into(),
+    cpus: cpus.unwrap_or(sys.cpus),
+    memory: memory.unwrap_or(sys.memory),
+    disk: disk.unwrap_or(sys.disk),
+  };
+  let vm = Vm { mac: vm::random_mac()?, setup: true, ..Vm::at(&name, config) };
+  if vm.conf.exists() {
     return Err(bad(format!("{name} exists; trivm delete {name} first")));
   }
 
@@ -282,32 +289,28 @@ pub fn create(
     _ => download(sys.url, sys.sha256)?,
   };
 
-  let config = Config {
-    system: sys.name.into(),
-    cpus: cpus.unwrap_or(sys.cpus),
-    memory: memory.unwrap_or(sys.memory),
-    disk: disk.unwrap_or(sys.disk),
-    mac: vm::random_mac()?,
-    setup: true,
-    port: None,
-  };
+  // Held while installing, so the VM isn't deleted or started in the middle; listed as new.
+  vm.claim()?;
+  let made = vm.hold().and_then(|hold| {
+    vm.commit()?;
+    match sys.os {
+      Os::Macos => macos(&vm, &file)?,
+      Os::Linux => linux(&vm, sys, &file)?,
+      Os::Windows => windows(&vm)?,
+    }
 
-  let vm = Vm::new(&name, config)?;
-  // Held while installing, so the VM isn't deleted or started in the middle.
-  let hold = vm.hold()?;
-  let made = match sys.os {
-    Os::Macos => macos(&vm, &file),
-    Os::Linux => linux(&vm, sys, &file),
-    Os::Windows => windows(&vm),
-  };
+    Ok(hold)
+  });
 
   // A VM whose install failed is no use: it goes, its downloads stay.
-  if let Err(e) = made {
-    let _ = vm.remove();
-    return Err(e);
+  match made {
+    Ok(hold) => drop(hold),
+    Err(e) => {
+      let _ = vm.remove();
+      return Err(e);
+    }
   }
 
-  drop(hold);
   crate::start(&vm.name)
 }
 
@@ -562,7 +565,7 @@ fn linux(vm: &Vm, sys: &System, qcow2: &Path) -> io::Result<()> {
   let seed = vm.path("seed");
   fs::create_dir_all(&seed)?;
   fs::write(seed.join("user-data"), user_data(sys, &ssh::public_key()?, &timezone()))?;
-  fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.config.mac))?;
+  fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.mac))?;
   fs::write(seed.join("network-config"), NETWORK_CONFIG)?;
   let mut hdiutil = Command::new("hdiutil");
   hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "cidata", "-o"]);

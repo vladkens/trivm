@@ -71,7 +71,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Open { vm } => {
       // One still being set up shows at once, its setup watched as it goes.
       let vm = match Vm::open(&vm)? {
-        x if x.config.setup => boot(&vm)?,
+        x if x.setup => boot(&vm)?,
         x if x.pid().is_none() => start(&vm).and_then(|_| Vm::open(&vm))?,
         x => x,
       };
@@ -197,7 +197,7 @@ fn signed() -> io::Result<()> {
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
   let mut vm = boot(name)?;
-  match (vm.config.setup, vm.config.os()) {
+  match (vm.setup, vm.config.os()) {
     (true, Os::Macos) => system::macos_setup(&vm)?,
     (true, Os::Linux) => system::linux_setup(&vm)?,
     (true, Os::Windows) => system::windows_setup(&vm)?,
@@ -206,8 +206,8 @@ pub fn start(name: &str) -> io::Result<()> {
 
   system::desktop(&vm)?;
   // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
-  if vm.config.setup {
-    vm.config.setup = false;
+  if vm.setup {
+    vm.setup = false;
     vm.save()?;
   }
 
@@ -426,7 +426,7 @@ fn list() -> io::Result<()> {
   );
   for vm in vms {
     let c = &vm.config;
-    let state = match (vm.pid().is_some(), c.setup) {
+    let state = match (vm.pid().is_some(), vm.setup) {
       (true, _) => "running",
       (false, true) => "new",
       (false, false) => "stopped",
