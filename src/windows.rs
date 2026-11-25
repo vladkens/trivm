@@ -45,25 +45,33 @@ function desktop {
   $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
   $name = "trivm-$([guid]::NewGuid())"
   Register-ScheduledTask -TaskName $name -Action $action -Principal $user -Settings $set | Out-Null
-  try { Start-ScheduledTask -TaskName $name; Start-Sleep -Milliseconds 500 }
-  finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+  # A task unregistered before it has started never runs; 267011 is "not run yet".
+  try {
+    Start-ScheduledTask -TaskName $name
+    for ($i = 0; $i -lt 50 -and (Get-ScheduledTaskInfo -TaskName $name).LastTaskResult -eq 267011; $i++) {
+      Start-Sleep -Milliseconds 100
+    }
+  } finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false }
 }
 $global:LASTEXITCODE = 0
 "#;
 
-/// After the command: the last native command's exit code, or 1 when a cmdlet failed.
+/// After the command, the exit code in `$trivm`: the last native command's, or 1 when a cmdlet
+/// failed.
 const EPILOGUE: &str = r#"
-if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }
-exit $LASTEXITCODE
+$global:trivm = if ($?) { $LASTEXITCODE } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
 "#;
 
-/// `powershell` running `script` after the prelude, given as `-EncodedCommand` (base64 of
-/// UTF-16), which no shell in between unquotes; sshd's shell is cmd. Its errors as text: they
-/// come as CLIXML otherwise.
+/// `powershell` running `script` after the prelude, as base64 of UTF-16, which no shell in between
+/// unquotes (sshd's shell is cmd), decoded by `-Command`: PowerShell 5.1 writes the errors of an
+/// `-EncodedCommand` as CLIXML to a stderr that isn't a console, whatever `-OutputFormat` says.
 pub fn powershell(script: &str) -> String {
-  let script = format!("{PRELUDE}{script}{EPILOGUE}");
+  let script = encode(&format!("{PRELUDE}{script}{EPILOGUE}"));
   let opts = "-NoLogo -NoProfile -NonInteractive -OutputFormat Text";
-  format!("powershell {opts} -EncodedCommand {}", encode(&script))
+  let text = format!("[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{script}'))");
+  // `-Command` formats its whole line at the end, which an `exit` skips: `Out-Default` writes the
+  // script's output (tables too) before it.
+  format!("powershell {opts} -Command \"iex ({text}) | Out-Default; exit $trivm\"")
 }
 
 /// An interactive PowerShell with the prelude.
@@ -93,9 +101,11 @@ fn base64(data: &[u8]) -> String {
   s
 }
 
-/// Waits up to 5 minutes for the desktop: Explorer running in the user's session.
+/// Waits up to 5 minutes for the desktop: Explorer running in the user's session, and the first
+/// sign-in's animation gone, which covers the desktop for a minute and a half after an install.
 pub const DESKTOP: &str = r#"for ($i = 0; $i -lt 150; $i++) {
-  if (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -gt 0) { exit 0 }
+  $up = Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -gt 0
+  if ($up -and -not (Get-Process FirstLogonAnim -ErrorAction SilentlyContinue)) { exit 0 }
   Start-Sleep 2
 }
 'no desktop in 5 minutes'; exit 1"#;
@@ -289,8 +299,15 @@ mod tests {
     assert_eq!(encode("dir"), "ZABpAHIA");
 
     let cmd = powershell("exit 3");
-    assert!(cmd.starts_with("powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text "));
-    assert_eq!(cmd.split(' ').count(), 8);
+    let run = "-OutputFormat Text -Command \"iex ([Text.Encoding]::Unicode.GetString([Convert]::";
+    assert!(cmd.starts_with(&format!("powershell -NoLogo -NoProfile -NonInteractive {run}")));
+    let script = encode(&format!("{PRELUDE}exit 3{EPILOGUE}"));
+    assert!(cmd.ends_with(&format!("FromBase64String('{script}'))) | Out-Default; exit $trivm\"")));
+    // cmd's operators only between the quotes, where it reads them as text; no `%` anywhere.
+    assert_eq!(cmd.matches('"').count(), 2);
+    let (head, _) = cmd.split_once('"').unwrap();
+    assert!(!head.contains(['&', '|', '<', '>', '^']));
+    assert!(!cmd.contains('%'));
   }
 
   #[test]
