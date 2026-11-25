@@ -5,7 +5,7 @@
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
 
@@ -287,6 +287,7 @@ impl Vm {
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
+    self.current(&f)?;
     f.set_len(0)?;
     write!(f, "{}", process::id())?;
     Ok(f)
@@ -297,11 +298,24 @@ impl Vm {
   pub fn hold(&self) -> io::Result<fs::File> {
     let f = self.pid_file()?;
     match f.try_lock_shared() {
-      Ok(()) => Ok(f),
+      Ok(()) => {}
       Err(fs::TryLockError::WouldBlock) => {
-        Err(bad(format!("{} is running; trivm stop {} first", self.name, self.name)))
+        return Err(bad(format!("{} is running; trivm stop {} first", self.name, self.name)));
       }
-      Err(fs::TryLockError::Error(e)) => Err(e),
+      Err(fs::TryLockError::Error(e)) => return Err(e),
+    }
+
+    self.current(&f)?;
+    Ok(f)
+  }
+
+  /// Checks that the `pid` this process locked is still the VM's: a `delete` removes it, maybe
+  /// while another has it open, and a VM made again of the name has one of its own.
+  fn current(&self, f: &fs::File) -> io::Result<()> {
+    let ino = fs::metadata(self.state("pid")).map(|x| x.ino()).ok();
+    match ino == Some(f.metadata()?.ino()) {
+      true => Ok(()),
+      false => Err(bad(format!("{} was deleted meanwhile; see trivm list", self.name))),
     }
   }
 
@@ -409,7 +423,6 @@ fn parse_mac(x: &str) -> Option<[u8; 6]> {
 
 /// The space a sparse file takes on disk, as `12.3G`.
 pub fn size(path: &Path) -> String {
-  use std::os::unix::fs::MetadataExt;
   let bytes = fs::metadata(path).map(|x| x.blocks() * 512).unwrap_or(0);
   format!("{:.1}G", bytes as f64 / GIB as f64)
 }
@@ -549,6 +562,14 @@ mod tests {
     assert!(vm.lock().is_err());
     drop((a, b));
     assert!(vm.lock().is_ok());
+
+    // A `pid` removed while open, as by a `delete`, and one made again in its place aren't it.
+    let old = vm.pid_file().unwrap();
+    assert!(vm.current(&old).is_ok());
+    fs::remove_dir_all(&vm.state_dir).unwrap();
+    assert!(vm.current(&old).is_err());
+    let new = vm.pid_file().unwrap();
+    assert!(vm.current(&old).is_err() && vm.current(&new).is_ok());
     fs::remove_dir_all(&dir).unwrap();
   }
 
