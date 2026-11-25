@@ -110,17 +110,25 @@ pub fn create(
   }
 
   let file = download(sys)?;
-  // The config written first: the VM lists as new while it installs.
+  // Held while installing, so the VM isn't deleted or started in the middle; listed as new.
   vm.claim()?;
-  let made = vm.commit().and_then(|_| match sys.os {
-    Os::Macos => macos(&vm, &file),
-    Os::Linux => linux(&vm, &file),
+  let made = vm.hold().and_then(|hold| {
+    vm.commit()?;
+    match sys.os {
+      Os::Macos => macos(&vm, &file)?,
+      Os::Linux => linux(&vm, &file)?,
+    }
+
+    Ok(hold)
   });
 
   // A VM whose install failed is no use: it goes, its downloads stay.
-  if let Err(e) = made {
-    let _ = vm.remove();
-    return Err(e);
+  match made {
+    Ok(hold) => drop(hold),
+    Err(e) => {
+      let _ = vm.remove();
+      return Err(e);
+    }
   }
 
   crate::start(&vm.name)

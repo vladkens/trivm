@@ -48,11 +48,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Start { vm } => start(&vm)?,
     Cmd::Stop { vm, force } => stop(&Vm::open(&vm)?, force)?,
     Cmd::List => list()?,
-    Cmd::Delete { vm } => {
-      let vm = Vm::open(&vm)?;
-      stop(&vm, true)?;
-      vm.remove()?;
-    }
+    Cmd::Delete { vm } => delete(&Vm::open(&vm)?)?,
     Cmd::Open { vm } => {
       if Vm::open(&vm)?.pid().is_none() {
         start(&vm)?;
@@ -270,6 +266,14 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   }
 
   Ok(())
+}
+
+/// Stops the VM at once and removes it, holding its lock: it can't start meanwhile, and one being
+/// made isn't removed under its install.
+fn delete(vm: &Vm) -> io::Result<()> {
+  stop(vm, true)?;
+  let _lock = vm.lock()?;
+  vm.remove()
 }
 
 fn list() -> io::Result<()> {

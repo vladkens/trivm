@@ -281,13 +281,28 @@ impl Vm {
     let mut f = self.pid_file()?;
     match f.try_lock() {
       Ok(()) => {}
-      Err(fs::TryLockError::WouldBlock) => return Err(bad(format!("{} is running", self.name))),
+      Err(fs::TryLockError::WouldBlock) => {
+        return Err(bad(format!("{} is in use: running or being made", self.name)));
+      }
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
     f.set_len(0)?;
     write!(f, "{}", process::id())?;
     Ok(f)
+  }
+
+  /// Keeps the VM from starting or being deleted for as long as the file returned is open: a
+  /// shared lock on `pid`, which the VM's process takes exclusive.
+  pub fn hold(&self) -> io::Result<fs::File> {
+    let f = self.pid_file()?;
+    match f.try_lock_shared() {
+      Ok(()) => Ok(f),
+      Err(fs::TryLockError::WouldBlock) => {
+        Err(bad(format!("{} is running; trivm stop {} first", self.name, self.name)))
+      }
+      Err(fs::TryLockError::Error(e)) => Err(e),
+    }
   }
 
   /// `pid`, its folder made again if a person deleted it, as the spec lets them.
@@ -524,8 +539,16 @@ mod tests {
     let lock = vm.lock().unwrap();
     assert_eq!(vm.pid(), Some(process::id() as i32));
     assert!(vm.lock().is_err());
+    assert!(vm.hold().is_err());
     drop(lock);
     assert_eq!(vm.pid(), None);
+
+    // Two holds at once, which keep the VM from running and don't count as it running.
+    let (a, b) = (vm.hold().unwrap(), vm.hold().unwrap());
+    assert_eq!(vm.pid(), None);
+    assert!(vm.lock().is_err());
+    drop((a, b));
+    assert!(vm.lock().is_ok());
     fs::remove_dir_all(&dir).unwrap();
   }
 
