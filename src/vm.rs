@@ -319,18 +319,30 @@ pub fn pid_of(f: &fs::File) -> Option<i32> {
     return None;
   }
 
-  // The process writes its pid just after taking the lock.
+  // The process writes its pid just after taking the lock: until then the file is empty, or has
+  // the pid of the one before, gone.
+  let mut last = None;
   for _ in 0..50 {
     let mut buf = [0; 16];
     let n = f.read_at(&mut buf, 0).ok()?;
-    if let Some(pid) = std::str::from_utf8(&buf[..n]).ok().and_then(|x| x.trim().parse().ok()) {
+    last = std::str::from_utf8(&buf[..n]).ok().and_then(|x| x.trim().parse().ok()).or(last);
+    if let Some(pid) = last
+      && alive(pid)
+    {
       return Some(pid);
     }
 
     thread::sleep(Duration::from_millis(10));
   }
 
-  None
+  last
+}
+
+/// Whether a process of that pid runs: one of another user's can't be signalled (EPERM) but runs.
+fn alive(pid: i32) -> bool {
+  // SAFETY: signal 0 only checks the pid.
+  let res = unsafe { kill(pid, 0) };
+  res == 0 || io::Error::last_os_error().raw_os_error() == Some(1)
 }
 
 pub fn signal(pid: i32, sig: i32) {
