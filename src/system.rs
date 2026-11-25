@@ -440,7 +440,7 @@ fn windows(vm: &Vm) -> io::Result<()> {
 /// The first boot of a new Windows VM: Setup installs from the media unattended, restarting from
 /// the disk, and the first logon's script starts sshd last. The CDs go then.
 pub fn windows_setup(vm: &Vm) -> io::Result<()> {
-  eprintln!("installing Windows on {}, unattended (about 12 minutes)", vm.name);
+  eprintln!("installing Windows on {}, unattended (about 15 minutes)", vm.name);
   ssh::wait(vm, Duration::from_secs(5400))?;
   qemu::ask(vm, "eject", "")?;
   match fs::remove_file(vm.path("seed.iso")) {

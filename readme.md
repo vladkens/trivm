@@ -71,12 +71,14 @@ trivm clone macos-27 macos-27-clean   # a clone to keep, with its own address
 trivm create windows-11        # downloads 4.5 GB once, makes the media, installs: about 25 minutes
 trivm exec windows-11 'Get-ComputerInfo OsName, OsVersion'   # PowerShell
 trivm cp ./MyApp-setup.exe windows-11:            # to C:\Users\user
-trivm exec windows-11 '.\MyApp-setup.exe /S'
+trivm exec windows-11 'Start-Process -Wait .\MyApp-setup.exe /S'
 trivm exec windows-11 'desktop "C:\Program Files\MyApp\MyApp.exe"'   # shows on the desktop
 trivm key windows-11 win
+trivm run windows-11 'trivm exec "$TRIVM_VM" -- cmd /c ver'   # a throwaway clone too
 ```
 
-`exec` runs PowerShell 5.1 and exits with the last program's code (1 when a cmdlet failed).
+`exec` runs PowerShell 5.1 and exits with the last program's code (1 when a cmdlet failed); it
+doesn't wait for a windowed program, a setup among them, which `Start-Process -Wait` does.
 PowerShell 5.1 drops a program's empty arguments and the double quotes in them: write such a
 command as one line, quoted for PowerShell. An SSH session has no desktop: `desktop <program>
 [args]` starts a program in the user's desktop session. `open` hands the VM's screen to Screen
