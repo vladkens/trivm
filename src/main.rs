@@ -293,7 +293,7 @@ unsafe extern "C" {
 }
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
-/// A guest with no address yet gets its power button pressed.
+/// A guest whose SSH doesn't answer gets its power button pressed.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
   // Gone once its process no longer holds the lock. A starting Windows VM's lock is trivm's until
@@ -328,19 +328,20 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     };
 
     // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
-    let ip = vm.ip();
-    let child = match ip {
-      Some(_) => {
+    let up = ssh::answers(vm);
+    let child = match up {
+      true => {
         let mut ssh = ssh::ssh(vm)?;
         ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         ssh.spawn().ok()
       }
-      None => None,
+      false => None,
     };
 
-    // Windows's SSH may not be up yet either; macOS asks first. A VM process busy with a long
-    // request answers late.
-    if ip.is_none() || vm.config.os() == Os::Windows {
+    // The power button for a guest whose SSH doesn't answer, as before Remote Login is on, and
+    // for Windows, whose port answers before its SSH does; macOS asks first. A VM process busy
+    // with a long request answers late.
+    if !up || vm.config.os() == Os::Windows {
       let _ = match vm.config.os() {
         Os::Windows => qemu::ask(vm, "stop", ""),
         _ => vz::ask_within(vm, "stop", "", Duration::from_secs(5)),
@@ -370,6 +371,7 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
 
   if !gone(15) {
     vm::signal(pid.get(), 9);
+
     if !gone(5) {
       return Err(bad(format!("{} didn't stop; its process is {}", vm.name, pid.get())));
     }

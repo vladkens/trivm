@@ -5,14 +5,13 @@
 //! Data volume is encrypted once installed, so the files that skip the assistant on 15 and 26
 //! can't be written from the host.
 
-use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
 use crate::vision::{self, Line};
 use crate::vm::{PASSWORD, Vm};
-use crate::{bad, vz};
+use crate::{bad, ssh, vz};
 
 /// The file in a VM's folder that leaves its Setup Assistant to trivm, until SSH answers.
 pub const MARK: &str = "assistant";
@@ -225,10 +224,7 @@ fn act(vm: &Vm, seen: Seen, lines: &[Line], shot: &Path) -> io::Result<()> {
 /// Remote Login on from Terminal, opened by Spotlight, sudo given the user's password; Terminal
 /// quit once SSH answers.
 fn remote_login(vm: &Vm, shot: &Path) -> io::Result<()> {
-  let up = || {
-    let addr = vm.ip().and_then(|x| format!("{x}:22").parse::<SocketAddr>().ok());
-    addr.is_some_and(|x| TcpStream::connect_timeout(&x, Duration::from_secs(2)).is_ok())
-  };
+  let up = || ssh::answers(vm);
   if up() {
     return Ok(());
   }

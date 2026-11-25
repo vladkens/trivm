@@ -3,6 +3,7 @@
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
 use std::io::{self, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -54,6 +55,13 @@ pub fn ip(vm: &Vm) -> io::Result<String> {
   }
 
   vm.ip().ok_or_else(|| bad(format!("{} has no address yet", vm.name)))
+}
+
+/// Whether the guest's SSH port takes a connection now.
+pub fn answers(vm: &Vm) -> bool {
+  let port = vm.config.port.unwrap_or(22);
+  let addr = vm.ip().and_then(|x| format!("{x}:{port}").parse::<SocketAddr>().ok());
+  addr.is_some_and(|x| TcpStream::connect_timeout(&x, Duration::from_secs(2)).is_ok())
 }
 
 /// The guest's SSH as `ip` or `ip:port`.
