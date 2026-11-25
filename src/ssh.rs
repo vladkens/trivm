@@ -89,10 +89,10 @@ pub fn ssh(vm: &Vm) -> io::Result<Command> {
 }
 
 /// A script as the guest runs it: Windows' as PowerShell, others' by the user's shell.
-fn remote(vm: &Vm, script: &str) -> String {
+fn remote(vm: &Vm, script: &str) -> io::Result<String> {
   match vm.config.os() {
     Os::Windows => windows::powershell(script),
-    _ => script.to_string(),
+    _ => Ok(script.to_string()),
   }
 }
 
@@ -119,12 +119,12 @@ pub fn exec(vm: &Vm, cmd: &[String]) -> io::Result<ExitStatus> {
     _ => line(cmd),
   };
 
-  ssh(vm)?.arg("--").arg(remote(vm, &line)).status()
+  ssh(vm)?.arg("--").arg(remote(vm, &line)?).status()
 }
 
 /// A shell script's output, which must succeed.
 pub fn output(vm: &Vm, script: &str) -> io::Result<String> {
-  let out = run(ssh(vm)?.arg("--").arg(remote(vm, script)).stdin(Stdio::null()))?;
+  let out = run(ssh(vm)?.arg("--").arg(remote(vm, script)?).stdin(Stdio::null()))?;
   Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 

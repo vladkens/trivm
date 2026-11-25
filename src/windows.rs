@@ -2,6 +2,9 @@
 //! Windows' guest side: the unattended install's `autounattend.xml` and the setup script its
 //! first logon runs, and commands run as PowerShell through SSH, `desktop` among them.
 
+use std::io;
+
+use crate::bad;
 use crate::vm::{PASSWORD, USER};
 
 /// Microsoft's generic key for installing Windows 11 Pro; it doesn't activate it.
@@ -21,13 +24,17 @@ pub fn line(cmd: &[String]) -> String {
   }
 }
 
-/// Defined before every command: output as UTF-8 without progress records (CLIXML over SSH),
-/// and `desktop`, which starts a program in the desktop's session through a scheduled task run as
-/// the user with the interactive logon type, as an SSH session has no desktop.
+/// Before every command: output as UTF-8 without progress records (CLIXML over SSH).
 const PRELUDE: &str = r#"$ProgressPreference = 'SilentlyContinue'
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}
 $OutputEncoding = [Text.Encoding]::UTF8
-function desktop {
+$global:LASTEXITCODE = 0
+"#;
+
+/// `desktop`, defined before a command that calls it: starts a program in the desktop's session
+/// through a scheduled task run as the user with the interactive logon type, as an SSH session
+/// has no desktop.
+const DESKTOP_FN: &str = r#"function desktop {
   if (-not $args) { throw 'usage: desktop <program> [args]' }
   $exe = "$($args[0])"
   $app = Get-Command $exe -CommandType Application -ErrorAction SilentlyContinue
@@ -48,7 +55,6 @@ function desktop {
   try { Start-ScheduledTask -TaskName $name; Start-Sleep -Milliseconds 500 }
   finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false }
 }
-$global:LASTEXITCODE = 0
 "#;
 
 /// After the command: the last native command's exit code, or 1 when a cmdlet failed.
@@ -57,18 +63,31 @@ if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }
 exit $LASTEXITCODE
 "#;
 
+/// The longest command line cmd runs, sshd's shell.
+const CMD_MAX: usize = 8191;
+
 /// `powershell` running `script` after the prelude, given as `-EncodedCommand` (base64 of
-/// UTF-16), which no shell in between unquotes; sshd's shell is cmd. Its errors as text: they
-/// come as CLIXML otherwise.
-pub fn powershell(script: &str) -> String {
-  let script = format!("{PRELUDE}{script}{EPILOGUE}");
+/// UTF-16), which no shell in between unquotes. Its errors as text: they come as CLIXML otherwise.
+pub fn powershell(script: &str) -> io::Result<String> {
+  // Each character of the script takes 8/3 in the encoding.
+  let desktop = if script.to_ascii_lowercase().contains("desktop") { DESKTOP_FN } else { "" };
+  let script = format!("{desktop}{PRELUDE}{script}{EPILOGUE}");
   let opts = "-NoLogo -NoProfile -NonInteractive -OutputFormat Text";
-  format!("powershell {opts} -EncodedCommand {}", encode(&script))
+  let line = format!("powershell {opts} -EncodedCommand {}", encode(&script));
+  if line.len() > CMD_MAX {
+    return Err(bad(format!(
+      "too long a script for Windows' command line ({} characters encoded, {CMD_MAX} at most): \
+      cp it as a .ps1 file and run that",
+      line.len()
+    )));
+  }
+
+  Ok(line)
 }
 
 /// An interactive PowerShell with the prelude.
 pub fn shell() -> String {
-  format!("powershell -NoLogo -NoExit -EncodedCommand {}", encode(PRELUDE))
+  format!("powershell -NoLogo -NoExit -EncodedCommand {}", encode(&[DESKTOP_FN, PRELUDE].concat()))
 }
 
 fn encode(script: &str) -> String {
@@ -240,6 +259,12 @@ Stop-Service sshd
 $keys = 'C:\ProgramData\ssh\administrators_authorized_keys'
 Copy-Item "$seed\key.pub" $keys
 icacls $keys /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'
+# Keys only, as on the others: the forwarded port is the Mac's other users' to reach too. The
+# first of a setting counts; sshd made its config when the MSI started it.
+$config = 'C:\ProgramData\ssh\sshd_config'
+if (Test-Path $config) {{
+  Set-Content $config (@('PasswordAuthentication no', 'KbdInteractiveAuthentication no') + (Get-Content $config))
+}}
 if (-not (Get-NetFirewallRule -Name trivm-ssh -ErrorAction SilentlyContinue)) {{
   New-NetFirewallRule -Name trivm-ssh -DisplayName 'OpenSSH (trivm)' -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any | Out-Null
 }}
@@ -288,9 +313,13 @@ mod tests {
     // `[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('dir'))` in PowerShell.
     assert_eq!(encode("dir"), "ZABpAHIA");
 
-    let cmd = powershell("exit 3");
+    let cmd = powershell("exit 3").unwrap();
     assert!(cmd.starts_with("powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text "));
     assert_eq!(cmd.split(' ').count(), 8);
+    // `desktop` defined only for a command that calls it; a script cmd can't take refused.
+    assert!(powershell("Desktop notepad").unwrap().len() > cmd.len() + 2000);
+    assert!(powershell(&"x".repeat(2500)).is_ok());
+    assert!(powershell(&"x".repeat(3500)).is_err());
   }
 
   #[test]
@@ -318,5 +347,6 @@ mod tests {
     assert!(ps.trim_end().ends_with("Start-Service sshd\nStop-Transcript"));
     // The MSI starts sshd: stopped until the end.
     assert!(ps.find("msiexec") < ps.find("Stop-Service sshd"));
+    assert!(ps.find("'PasswordAuthentication no'") < ps.find("Start-Service sshd"));
   }
 }

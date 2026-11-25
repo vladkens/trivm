@@ -122,9 +122,10 @@ trivm key windows-11 win
 
 `exec` runs PowerShell 5.1 and exits with the last program's code (1 when a cmdlet failed).
 PowerShell 5.1 drops a program's empty arguments and the double quotes in them: write such a
-command as one line, quoted for PowerShell. An SSH session has no desktop: `desktop <program>
-[args]` starts a program in the user's desktop session. `open` hands the VM's screen to Screen
-Sharing (VNC on 127.0.0.1, password `1234`). Windows isn't activated.
+command as one line, quoted for PowerShell. A script of more than about 2,500 characters doesn't
+fit Windows' command line: `cp` it as a `.ps1` file and run that. An SSH session has no desktop:
+`desktop <program> [args]` starts a program in the user's desktop session. `open` hands the VM's
+screen to Screen Sharing (VNC on 127.0.0.1, password `1234`). Windows isn't activated.
 
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
 shot. The guest's user is `user`, password `1234`, sudo without a password (an administrator on
