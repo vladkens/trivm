@@ -281,7 +281,7 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
 /// made isn't removed under its install.
 fn delete(vm: &Vm) -> io::Result<()> {
   stop(vm, true)?;
-  let _lock = vm.lock()?;
+  let _lock = vm.take()?;
   vm.remove()
 }
 

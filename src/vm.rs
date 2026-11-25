@@ -278,18 +278,25 @@ impl Vm {
 
   /// Marks the VM as running, with this process's pid, for as long as the file returned is open.
   pub fn lock(&self) -> io::Result<fs::File> {
-    let mut f = self.pid_file()?;
+    let mut f = self.take()?;
+    write!(f, "{}", process::id())?;
+    Ok(f)
+  }
+
+  /// Keeps the VM to this process for as long as the file returned is open, as `delete` does: the
+  /// lock on `pid`, emptied, so no other process takes this one for the VM's and kills it.
+  pub fn take(&self) -> io::Result<fs::File> {
+    let f = self.pid_file()?;
     match f.try_lock() {
       Ok(()) => {}
       Err(fs::TryLockError::WouldBlock) => {
-        return Err(bad(format!("{} is in use: running or being made", self.name)));
+        return Err(bad(format!("{} is in use: running, being made or deleted", self.name)));
       }
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
     self.current(&f)?;
     f.set_len(0)?;
-    write!(f, "{}", process::id())?;
     Ok(f)
   }
 
@@ -558,6 +565,12 @@ mod tests {
     assert!(vm.hold().is_err());
     drop(lock);
     assert_eq!(vm.pid(), None);
+
+    // Taken, as by a `delete`: no pid to stop, and nothing else locks it.
+    let take = vm.take().unwrap();
+    assert_eq!(vm.pid(), None);
+    assert!(vm.take().is_err() && vm.lock().is_err() && vm.hold().is_err());
+    drop(take);
 
     // Two holds at once, which keep the VM from running and don't count as it running.
     let (a, b) = (vm.hold().unwrap(), vm.hold().unwrap());
