@@ -328,8 +328,8 @@ fn gone(res: io::Result<()>) -> io::Result<()> {
   }
 }
 
-/// trivm's own files beside the VMs' folders in data: the SSH key.
-const OWN: &[&str] = &["id_ed25519", "id_ed25519.pub"];
+/// trivm's own files beside the VMs' folders in data: the SSH key and its lock.
+const OWN: &[&str] = &["id_ed25519", "id_ed25519.pub", "id_ed25519.lock"];
 
 /// A VM's name: a folder in trivm's, not a path out of it or one of trivm's own files, in any case
 /// (APFS ignores it).
@@ -482,7 +482,7 @@ mod tests {
       assert!(valid(x), "{x}");
     }
 
-    let own = ["id_ed25519", "ID_ED25519.pub"];
+    let own = ["id_ed25519", "ID_ED25519.pub", "id_ed25519.lock"];
     for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a"].into_iter().chain(own) {
       assert!(!valid(x), "{x}");
       assert!(Vm::open(x).is_err(), "{x}");

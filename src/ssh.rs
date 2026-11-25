@@ -3,7 +3,7 @@
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
@@ -13,16 +13,30 @@ use crate::{bad, run};
 /// Set when trivm runs as `ssh`'s askpass program: it prints the guest's password.
 pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
-/// trivm's key, made on first use.
+/// trivm's key, made on first use beside its place, then moved there, the public half last: a
+/// public half there is whole.
 pub fn key() -> io::Result<PathBuf> {
   let path = vm::data_dir().join("id_ed25519");
-  if !path.exists() {
-    vm::made(&vm::data_dir())?;
+  if path.with_extension("pub").exists() {
+    return Ok(path);
+  }
+
+  // Two first uses at once make one key.
+  vm::made(&vm::data_dir())?;
+  let lock = fs::File::create(path.with_extension("lock"))?;
+  lock.lock()?;
+  if !path.with_extension("pub").exists() {
+    let new = path.with_extension(format!("new{}", process::id()));
+    let public = |x: &Path| PathBuf::from(format!("{}.pub", x.display()));
+    let _ = fs::remove_file(&new);
+    let _ = fs::remove_file(public(&new));
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
-        .arg(&path),
+        .arg(&new),
     )?;
+    fs::rename(&new, &path)?;
+    fs::rename(public(&new), public(&path))?;
   }
 
   Ok(path)
