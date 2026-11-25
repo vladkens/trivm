@@ -258,14 +258,12 @@ fn hostname(name: &str) -> String {
 
 /// The VM's name as Windows' computer name, which is 15 characters at most and not digits only.
 fn computer_name(name: &str) -> String {
-  let host = hostname(name);
-  let host = host.trim_matches('-');
-  let host = match host.chars().all(|x| x.is_ascii_digit()) {
-    true => format!("win-{host}"),
-    false => host.to_string(),
-  };
-
-  host.chars().take(15).collect::<String>().trim_end_matches('-').to_string()
+  let short = |x: &str| x.chars().take(15).collect::<String>().trim_matches('-').to_string();
+  let host = short(hostname(name).trim_matches('-'));
+  match host.chars().all(|x| x.is_ascii_digit()) {
+    true => short(&format!("win-{host}")),
+    false => host,
+  }
 }
 
 fn meta_data(name: &str, mac: &str) -> String {
@@ -540,6 +538,7 @@ mod tests {
       ("windows-11-run-1", "windows-11-run"),
       ("my.test_vm-number-2", "my-test-vm-numb"),
       ("123", "win-123"),
+      ("123456789012345a", "win-12345678901"),
       ("_", "win"),
       ("-x-", "x"),
     ] {

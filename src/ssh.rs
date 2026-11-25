@@ -94,10 +94,10 @@ pub fn ssh(vm: &Vm) -> io::Result<Command> {
 }
 
 /// A script as the guest runs it: Windows' as PowerShell, others' by the user's shell.
-fn remote(vm: &Vm, script: &str) -> String {
+fn remote(vm: &Vm, script: &str) -> io::Result<String> {
   match vm.config.os() {
     Os::Windows => windows::powershell(script),
-    _ => script.to_string(),
+    _ => Ok(script.to_string()),
   }
 }
 
@@ -124,12 +124,12 @@ pub fn exec(vm: &Vm, cmd: &[String]) -> io::Result<ExitStatus> {
     _ => line(cmd),
   };
 
-  ssh(vm)?.arg("--").arg(remote(vm, &line)).status()
+  ssh(vm)?.arg("--").arg(remote(vm, &line)?).status()
 }
 
 /// A shell script's output, which must succeed.
 pub fn output(vm: &Vm, script: &str) -> io::Result<String> {
-  let out = run(ssh(vm)?.arg("--").arg(remote(vm, script)).stdin(Stdio::null()))?;
+  let out = run(ssh(vm)?.arg("--").arg(remote(vm, script)?).stdin(Stdio::null()))?;
   Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
@@ -164,15 +164,17 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
 }
 
 /// The guest's side of `scp`: an `scp://` URL with a port, whose path scp decodes (`%` escapes,
-/// `+` as a space), so all but plain characters are escaped.
+/// `+` as a space), so all but plain characters are escaped. Windows' sshd finds no path with `\`
+/// in it: `/` in its place.
 fn url(ip: &str, port: Option<u16>, path: &str) -> String {
   let Some(port) = port else { return format!("{}@{ip}:{path}", vm::USER) };
   let path: String = path
     .bytes()
     .map(|x| match x {
-      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' | b'\\' => {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
         (x as char).to_string()
       }
+      b'\\' => "/".to_string(),
       _ => format!("%{x:02X}"),
     })
     .collect();
@@ -268,7 +270,7 @@ mod tests {
     let path = "C:\\a+b 100%/é@x";
     assert_eq!(
       url("127.0.0.1", Some(1), path),
-      "scp://user@127.0.0.1:1/C:\\a%2Bb%20100%25/%C3%A9%40x"
+      "scp://user@127.0.0.1:1/C:/a%2Bb%20100%25/%C3%A9%40x"
     );
     assert_eq!(url("10.0.0.2", None, "/a+b 100%"), "user@10.0.0.2:/a+b 100%");
   }
