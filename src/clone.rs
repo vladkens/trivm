@@ -199,11 +199,18 @@ pub fn reap() -> io::Result<()> {
 /// again under its lock: the folder may have been deleted meanwhile and the name taken by another.
 fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   let ours = || fs::metadata(&vm.dir).is_ok_and(|x| x.ino() == ino);
+  // Opened before the folder is checked, so it is the clone's even if the name is another VM's
+  // by the time it is read: APFS doesn't reuse inodes.
+  let pid = fs::File::open(vm.path("pid"));
   if !ours() {
     return Ok(());
   }
 
-  crate::stop(vm, true)?;
+  // Nothing of the clone's is kept: its process killed by its pid, not reached by its name.
+  if let Ok(f) = pid {
+    kill(&f);
+  }
+
   // A clone of it being made holds the lock a moment.
   let mut lock = vm.lock();
   for _ in 0..60 {
@@ -219,5 +226,61 @@ fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   match ours() {
     true => fs::remove_dir_all(&vm.dir),
     false => Ok(()),
+  }
+}
+
+/// Kills the process that holds an open `pid` file's lock, and waits until it lets go.
+fn kill(f: &fs::File) {
+  let Some(pid) = vm::pid_of(f) else { return };
+  vm::signal(pid, 9);
+  for _ in 0..100 {
+    if vm::pid_of(f) != Some(pid) {
+      return;
+    }
+
+    thread::sleep(Duration::from_millis(100));
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::os::unix::process::ExitStatusExt;
+
+  use super::*;
+
+  #[test]
+  fn discards() {
+    let dir = env::temp_dir().join(format!("trivm-discard-{}", process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let config = Config {
+      system: "macos-27".into(),
+      cpus: 1,
+      memory: 1,
+      disk: 1,
+      mac: "m".into(),
+      setup: false,
+      port: None,
+    };
+    let vm = Vm { name: "a".into(), dir: dir.clone(), config };
+    let ino = fs::metadata(&dir).unwrap().ino();
+
+    // A process holding the clone's lock, as its VM's does, through its stdin.
+    let lock = vm.lock().unwrap();
+    let mut child = Command::new("sleep")
+      .arg("30")
+      .stdin(Stdio::from(lock.try_clone().unwrap()))
+      .spawn()
+      .unwrap();
+    vm::write_pid(&lock, child.id()).unwrap();
+    drop(lock);
+
+    // Another VM's folder by that name: left alone, its process too.
+    discard(&vm, ino + 1).unwrap();
+    assert!(dir.exists());
+    assert!(child.try_wait().unwrap().is_none());
+
+    discard(&vm, ino).unwrap();
+    assert!(!dir.exists());
+    assert_eq!(child.wait().unwrap().signal(), Some(9));
   }
 }

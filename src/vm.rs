@@ -189,23 +189,7 @@ impl Vm {
   /// The pid of the VM's process while it runs: the process holds a lock on its `pid` file, so a
   /// file left by a dead one doesn't count, though its pid may be another process's by now.
   pub fn pid(&self) -> Option<i32> {
-    let f = fs::File::open(self.path("pid")).ok()?;
-    if !matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
-      return None;
-    }
-
-    // The process writes its pid just after taking the lock.
-    for _ in 0..50 {
-      let mut buf = [0; 16];
-      let n = f.read_at(&mut buf, 0).ok()?;
-      if let Some(pid) = std::str::from_utf8(&buf[..n]).ok().and_then(|x| x.trim().parse().ok()) {
-        return Some(pid);
-      }
-
-      thread::sleep(Duration::from_millis(10));
-    }
-
-    None
+    pid_of(&fs::File::open(self.path("pid")).ok()?)
   }
 
   /// Marks the VM as running, with this process's pid, for as long as the file returned is open.
@@ -314,6 +298,26 @@ unsafe extern "C" {
 pub fn write_pid(f: &fs::File, pid: u32) -> io::Result<()> {
   f.write_all_at(format!("{pid:<10}").as_bytes(), 0)?;
   f.set_len(10)
+}
+
+/// The pid in an open `pid` file while its process holds the lock on it.
+pub fn pid_of(f: &fs::File) -> Option<i32> {
+  if !matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
+    return None;
+  }
+
+  // The process writes its pid just after taking the lock.
+  for _ in 0..50 {
+    let mut buf = [0; 16];
+    let n = f.read_at(&mut buf, 0).ok()?;
+    if let Some(pid) = std::str::from_utf8(&buf[..n]).ok().and_then(|x| x.trim().parse().ok()) {
+      return Some(pid);
+    }
+
+    thread::sleep(Duration::from_millis(10));
+  }
+
+  None
 }
 
 pub fn signal(pid: i32, sig: i32) {
