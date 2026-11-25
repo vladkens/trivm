@@ -22,7 +22,8 @@ pub struct System {
   /// GiB.
   pub disk: u32,
   pub desktop: Desktop,
-  /// A Linux system's packages for its desktop, installed by cloud-init on the first boot.
+  /// A Linux system's packages for its desktop, installed by cloud-init on the first boot; with
+  /// `xprop` and `xwininfo`, which `click --name` reads X's windows with.
   pub packages: &'static [&'static str],
 }
 
@@ -91,14 +92,22 @@ pub const SYSTEMS: &[System] = &[
     "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img",
     "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
     Desktop::Xfce,
-    &["xfce4", "xfce4-terminal", "lightdm", "lightdm-gtk-greeter", "xserver-xorg", "dbus-x11"],
+    &[
+      "xfce4",
+      "xfce4-terminal",
+      "lightdm",
+      "lightdm-gtk-greeter",
+      "xserver-xorg",
+      "dbus-x11",
+      "x11-utils",
+    ],
   ),
   System::linux(
     "ubuntu-22.04",
     "https://cloud-images.ubuntu.com/releases/jammy/release-20261109/ubuntu-22.04-server-cloudimg-arm64.img",
     "e429865ad84a083a84fdbd51bf6fd6e4174bbb1610ba0d72ca01014c656d45bc",
     Desktop::Plasma,
-    &["kde-plasma-desktop", "sddm", "xserver-xorg"],
+    &["kde-plasma-desktop", "sddm", "xserver-xorg", "x11-utils"],
   ),
   // `generic`, not `genericcloud`: the cloud kernel has no DRM, USB or HID, so no screen or input.
   System::linux(
@@ -113,6 +122,7 @@ pub const SYSTEMS: &[System] = &[
       "gnome-terminal",
       "nautilus",
       "xserver-xorg",
+      "x11-utils",
     ],
   ),
   System::linux(
@@ -120,7 +130,15 @@ pub const SYSTEMS: &[System] = &[
     "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-45-1.4.aarch64.qcow2",
     "1632acc8bc14d45b6c9596a0acc71b070d3748d1abdcf1a519be5c983bb0286c",
     Desktop::Xfce,
-    &["@xfce-desktop", "lightdm", "lightdm-gtk", "xorg-x11-server-Xorg", "dbus-x11"],
+    &[
+      "@xfce-desktop",
+      "lightdm",
+      "lightdm-gtk",
+      "xorg-x11-server-Xorg",
+      "dbus-x11",
+      "xprop",
+      "xwininfo",
+    ],
   ),
   System {
     name: "windows-11",
