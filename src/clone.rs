@@ -12,7 +12,7 @@ use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::Duration;
 use std::{env, fs, thread};
 
-use crate::vm::{self, Config, Vm};
+use crate::vm::{self, Config, Os, Vm};
 use crate::{bad, vz};
 
 /// The files of a VM's folder that are its runs', not the machine's: not cloned, nor the config
@@ -54,7 +54,9 @@ pub fn clone(
   fs::create_dir(&tmp)?;
   vm::private(&tmp)?;
 
-  let new = Vm { name: name.into(), dir: tmp.clone(), config: Config { mac, ..vm.config } };
+  // QEMU's port is the clone's own once started.
+  let config = Config { mac, port: None, ..vm.config };
+  let new = Vm { name: name.into(), dir: tmp.clone(), config };
   let res = made(&tmp).and_then(|_| copy(&vm.dir, &new)).and_then(|_| {
     // rename(2) doesn't replace a folder with files in it.
     match fs::rename(&tmp, &dst) {
@@ -83,7 +85,11 @@ fn copy(src: &Path, vm: &Vm) -> io::Result<()> {
     clone_file(&x.path(), &vm.dir.join(&name))?;
   }
 
-  fs::write(vm.path("machine.bin"), vz::machine_id(vm.config.os()))?;
+  // QEMU's Windows has no identifier of trivm's.
+  if vm.config.os() != Os::Windows {
+    fs::write(vm.path("machine.bin"), vz::machine_id(vm.config.os()))?;
+  }
+
   vm.save()
 }
 

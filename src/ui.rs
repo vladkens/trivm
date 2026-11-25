@@ -188,11 +188,13 @@ pub fn click(
   Ok(())
 }
 
+/// The running macOS or Linux VM: agent-desktop has no Windows build trivm runs yet.
 fn running(name: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
-  match vm.pid() {
-    Some(_) => Ok(vm),
-    None => Err(bad(format!("{name} isn't running; trivm start {name}"))),
+  match (vm.config.os(), vm.pid()) {
+    (Os::Windows, _) => Err(bad(format!("{name} runs Windows: ui is macOS's and Linux's for now"))),
+    (_, Some(_)) => Ok(vm),
+    (_, None) => Err(bad(format!("{name} isn't running; trivm start {name}"))),
   }
 }
 
@@ -338,12 +340,12 @@ fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
   let os = vm.config.os();
   let script = match os {
     Os::Macos => format!("{HAS}{ALLOWED}{MACOS_RUN}"),
-    Os::Linux => format!("{HAS}shift\nexec {BIN} \"$@\"\n"),
+    Os::Linux | Os::Windows => format!("{HAS}shift\nexec {BIN} \"$@\"\n"),
   };
 
   let rest = match os {
     Os::Macos => ssh::quote(&plist_strings(args)),
-    Os::Linux => args.iter().map(|x| ssh::quote(x)).collect::<Vec<_>>().join(" "),
+    Os::Linux | Os::Windows => args.iter().map(|x| ssh::quote(x)).collect::<Vec<_>>().join(" "),
   };
 
   let line = format!("sh -c {} ui {VERSION} {rest}", ssh::quote(&script));
@@ -384,14 +386,14 @@ fn install(vm: &Vm) -> io::Result<()> {
   let os = vm.config.os();
   let (url, sha256) = match os {
     Os::Macos => MACOS,
-    Os::Linux => LINUX,
+    Os::Linux | Os::Windows => LINUX,
   };
 
   let archive = system::download(url, sha256)?;
   eprintln!("installing agent-desktop {VERSION} in {}", vm.name);
   let script = match os {
     Os::Macos => INSTALL.to_string(),
-    Os::Linux => format!("{INSTALL}{A11Y}"),
+    Os::Linux | Os::Windows => format!("{INSTALL}{A11Y}"),
   };
 
   run(ssh::ssh(vm)?.arg("--").arg(script).stdin(fs::File::open(&archive)?))?;

@@ -21,7 +21,7 @@ use crate::{bad, ssh, vz};
 fn macos(name: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
   if vm.config.os() != Os::Macos {
-    return Err(bad(format!("{name} runs Linux: SIP and TCC grants are macOS's")));
+    return Err(bad(format!("{name} isn't macOS: SIP and TCC grants are macOS's")));
   }
 
   if vm.config.setup {

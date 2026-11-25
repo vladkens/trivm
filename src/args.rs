@@ -6,13 +6,16 @@ use std::io;
 use crate::bad;
 
 pub const HELP: &str = "\
-trivm: macOS and Linux VMs on Apple silicon for coding agents to test apps in.
+trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test apps in.
 
 Usage: trivm <command> [args]
 
 VMs:
-  create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]
-                          install a system unattended and start it; systems: macos-27, ubuntu-24.04
+  create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>] [--iso <path>]
+                          install a system unattended and start it; systems: macos-27,
+                          macos-26, macos-15, macos-14, macos-13, ubuntu-24.04, ubuntu-22.04,
+                          debian-13, fedora-45, windows-11 (its ISO from Microsoft's page by
+                          --iso, once)
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
@@ -35,7 +38,9 @@ macOS permissions for the app under test:
 
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
-                          are passed as they are
+                          are passed as they are; on Windows PowerShell 5.1, which drops a
+                          program's empty arguments and the double quotes in them, and where
+                          `desktop <program>` starts a program on the desktop
   ssh <vm>                an interactive shell
   cp <src> <dst>          copy files, `<vm>:<path>` on either side, folders too
   ip <vm>                 the guest's address
@@ -48,8 +53,8 @@ The screen, from the host:
   type <vm> <text>        type text (US layout)
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
-The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
-(on macOS with its Accessibility grant, which needs SIP off):
+The desktop's elements on macOS and Linux, read by agent-desktop, which trivm puts in the guest
+at the first use (on macOS with its Accessibility grant, which needs SIP off):
   ui <vm> [--app <name>]  the visible windows, all apps' or one's, and macOS's menu bar, with
                           their elements, a line each: role, \"name\", = \"value\", [states] and
                           frame (x,y wxh in a shot's pixels)
@@ -57,8 +62,8 @@ The desktop's elements, read by agent-desktop, which trivm puts in the guest at 
                           click the element of that name, else the one whose name holds it,
                           its window raised first
 
-The guest's user is `user`, password `1234`, sudo without one. Files live in ~/.trivm
-(TRIVM_HOME).
+The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
+Files live in ~/.trivm (TRIVM_HOME).
 ";
 
 #[derive(Debug, PartialEq)]
@@ -71,6 +76,7 @@ pub enum Cmd {
     cpus: Option<u32>,
     memory: Option<u32>,
     disk: Option<u32>,
+    iso: Option<String>,
   },
   Start {
     vm: String,
@@ -191,7 +197,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     match x.as_str() {
       // `type` takes any text, dashes included.
       _ if cmd == "type" => pos.push(x),
-      "--name" | "--app" | "--cpus" | "--memory" | "--disk" => {
+      "--name" | "--app" | "--cpus" | "--memory" | "--disk" | "--iso" => {
         let value = it.next().ok_or_else(|| bad(format!("{x}: no value given")))?;
         flags.push((x, Some(value)));
       }
@@ -226,13 +232,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
   let cmd = match cmd.as_str() {
     "-V" | "--version" | "version" => Cmd::Version,
     "create" => {
-      want(1, "<system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]")?;
+      want(
+        1,
+        "<system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>] [--iso <path>]",
+      )?;
       Cmd::Create {
         system: pos[0].clone(),
         name: value("--name"),
         cpus: number("--cpus")?,
         memory: number("--memory")?,
         disk: number("--disk")?,
+        iso: value("--iso"),
       }
     }
     "start" | "stop" | "delete" | "open" | "ssh" | "ip" | "_run" => {
@@ -340,7 +350,19 @@ mod tests {
         name: Some("m".into()),
         cpus: None,
         memory: None,
-        disk: Some(80)
+        disk: Some(80),
+        iso: None
+      }
+    );
+    assert_eq!(
+      args("create windows-11 --iso /x/w.iso").unwrap(),
+      Cmd::Create {
+        system: "windows-11".into(),
+        name: None,
+        cpus: None,
+        memory: None,
+        disk: None,
+        iso: Some("/x/w.iso".into())
       }
     );
     assert_eq!(

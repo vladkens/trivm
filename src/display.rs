@@ -487,7 +487,7 @@ const NAMES: &[(&str, u16)] = &[
 const SHIFT: u16 = 0x38;
 
 /// The keys that type `c`: Shift first when it needs it.
-fn chord(c: char) -> Option<Vec<u16>> {
+pub fn chord(c: char) -> Option<Vec<u16>> {
   let code = |c: char| CHARS.iter().find(|x| x.0 == c).map(|x| x.1);
   match c {
     '\n' => Some(vec![36]),
@@ -501,7 +501,7 @@ fn chord(c: char) -> Option<Vec<u16>> {
 }
 
 /// `cmd+shift+t`'s key codes, in order; a character typed with Shift brings it.
-fn combo(spec: &str) -> io::Result<Vec<u16>> {
+pub fn combo(spec: &str) -> io::Result<Vec<u16>> {
   let key = |name: &str| -> Option<Vec<u16>> {
     let lower = name.to_ascii_lowercase();
     if let Some((_, code)) = NAMES.iter().find(|x| x.0 == lower) {
@@ -535,7 +535,7 @@ fn combo(spec: &str) -> io::Result<Vec<u16>> {
   Ok(codes)
 }
 
-type Do<'a> = &'a dyn Fn(Act) -> io::Result<()>;
+pub type Do<'a> = &'a dyn Fn(Act) -> io::Result<()>;
 
 fn pause(ms: u64) {
   thread::sleep(Duration::from_millis(ms));
