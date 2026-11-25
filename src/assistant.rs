@@ -253,16 +253,21 @@ fn remote_login(vm: &Vm, shot: &Path) -> io::Result<()> {
   };
 
   key("cmd+space")?;
-  // The query, then Terminal found under it.
   wait("Spotlight", &|x| x.iter().any(|x| x.text.contains("Spotlight")))?;
   typing("Terminal")?;
-  wait("Terminal in Spotlight", &|x| {
-    let mut found = x.iter().filter(|x| x.text.contains("Terminal")).map(|x| x.y);
-    found.next().is_some_and(|a| found.any(|b| (a - b).abs() > 10.0))
-  })?;
+  wait("Terminal in Spotlight", &|x| hit(x).is_some())?;
 
+  // Return opens the top hit; 13's Spotlight opens it only clicked.
   key("enter")?;
-  screen("Last login")?;
+  if vision::wait_text(vm, shot, "Last login", Duration::from_secs(10)).is_err() {
+    vz::ask(vm, "shot", &shot.to_string_lossy())?;
+    if let Some(x) = hit(&vision::lines(shot)?) {
+      vz::ask(vm, &format!("click {} {} left 1", x.x, x.y), "")?;
+    }
+
+    screen("Last login")?;
+  }
+
   typing("sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist\n")?;
   screen("Password:")?;
   typing(&format!("{PASSWORD}\n"))?;
@@ -277,6 +282,13 @@ fn remote_login(vm: &Vm, shot: &Path) -> io::Result<()> {
   }
 
   key("cmd+q")
+}
+
+/// Spotlight's hit for Terminal: the line of it under the query's.
+fn hit(lines: &[Line]) -> Option<&Line> {
+  let mut found = lines.iter().filter(|x| x.text.contains("Terminal"));
+  let query = found.next()?;
+  found.find(|x| x.y - query.y > 10.0)
 }
 
 #[cfg(test)]
@@ -325,5 +337,15 @@ mod tests {
       Seen::Other(true)
     );
     assert_eq!(seen(&lines(&[])), Seen::Other(false));
+
+    // As read on 13.6: the query, completed, then the hit.
+    let spotlight = lines(&[
+      ("Terminal - Open", 585.0, 206.0),
+      ("Terminal", 552.0, 207.0),
+      ("Terminal", 529.0, 252.0),
+      ("Siri Suggested Websites", 552.0, 293.0),
+    ]);
+    assert_eq!(hit(&spotlight).map(|x| x.y), Some(252.0));
+    assert_eq!(hit(&spotlight[..2]), None);
   }
 }
