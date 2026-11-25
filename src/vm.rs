@@ -182,10 +182,10 @@ impl Vm {
     Ok(names.iter().flat_map(|x| Self::open(x)).collect())
   }
 
-  /// Claims the VM's name by making its data folder, which fails if there is one, so of two VMs of
-  /// a name made at once one gets it; then its state folder, and its machine state saved. Nothing
-  /// opens it until `commit` writes its config.
-  pub fn claim(&self) -> io::Result<()> {
+  /// Claims the VM's name by making its data folder, which fails if there is one: of two VMs of a
+  /// name made at once one gets it. Its state follows, held while the file returned is open, and
+  /// nothing opens it until `commit` writes its config.
+  pub fn claim(&self) -> io::Result<fs::File> {
     let name = &self.name;
     if !valid(name) {
       return Err(bad(format!("not a VM name: {name}")));
@@ -212,7 +212,7 @@ impl Vm {
       x => x?,
     }
 
-    let res = made(&self.state_dir).and_then(|_| self.save());
+    let res = made(&self.state_dir).and_then(|_| self.save()).and_then(|_| self.hold());
     if res.is_err() {
       let _ = self.remove();
     }
@@ -462,10 +462,11 @@ mod tests {
 
     // Claimed: its folders, its owner's only, and its machine state; no config, so not opened.
     let mut vm = at("a");
-    vm.claim().unwrap();
+    let hold = vm.claim().unwrap();
     assert_eq!(fs::metadata(&vm.dir).unwrap().permissions().mode() & 0o777, 0o700);
     assert_eq!(fs::read_to_string(vm.path("mac")).unwrap(), format!("{mac}\n"));
     assert!(vm.path("setup").exists() && vm.state_dir.is_dir() && !vm.conf.exists());
+    assert!(vm.lock().is_err());
     assert_eq!(at("a").read().unwrap_err().kind(), io::ErrorKind::NotFound);
     assert_eq!(at("a").claim().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
 
@@ -474,7 +475,9 @@ mod tests {
     assert_eq!(vm.commit().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(at("a").claim().unwrap_err().to_string(), "a exists; trivm delete a first");
 
-    // Set up: read back as saved.
+    // Let go and set up: read back as saved.
+    drop(hold);
+    assert!(vm.lock().is_ok());
     vm.setup = false;
     vm.save().unwrap();
     let mut read = Vm { mac: String::new(), ..at("a") };
