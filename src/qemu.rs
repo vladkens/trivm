@@ -49,7 +49,7 @@ pub fn platform(vm: &Vm) -> io::Result<()> {
 /// QEMU's command line for the VM, the CDs attached as USB drives.
 pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
   let c = &vm.config;
-  let port = c.port.unwrap_or(0);
+  let port = vm.port.unwrap_or(0);
   let mut args: Vec<String> = [
     "-name".into(),
     vm.name.clone(),
@@ -82,9 +82,9 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-netdev".into(),
     format!("user,id=net,hostfwd=tcp:127.0.0.1:{port}-:22"),
     "-device".into(),
-    format!("virtio-net-pci,netdev=net,mac={}", c.mac),
+    format!("virtio-net-pci,netdev=net,mac={}", vm.mac),
     "-chardev".into(),
-    format!("socket,id=tpm,path={}", opt(&vm.path("tpm.sock"))),
+    format!("socket,id=tpm,path={}", opt(&vm.state("tpm.sock"))),
     "-tpmdev".into(),
     "emulator,id=tpm,chardev=tpm".into(),
     "-device".into(),
@@ -92,7 +92,7 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-rtc".into(),
     "base=localtime".into(),
     "-qmp".into(),
-    format!("unix:{},server=on,wait=off", opt(&vm.path("qmp.sock"))),
+    format!("unix:{},server=on,wait=off", opt(&vm.state("qmp.sock"))),
     "-vnc".into(),
     "127.0.0.1:0,to=99,password=on".into(),
     "-display".into(),
@@ -131,35 +131,35 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
   let mut lock = vm.lock()?;
-  let port = match vm.config.port {
+  let port = match vm.port {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
   };
 
-  if vm.config.port != Some(port) {
-    vm.config.port = Some(port);
+  if vm.port != Some(port) {
+    vm.port = Some(port);
     vm.save()?;
   }
 
   fs::create_dir_all(vm.path("tpm"))?;
-  let _ = fs::remove_file(vm.path("tpm.sock"));
-  let _ = fs::remove_file(vm.path("tpm.log"));
+  let _ = fs::remove_file(vm.state("tpm.sock"));
+  let _ = fs::remove_file(vm.state("tpm.log"));
 
-  let path = |x: &str| vm.path(x).to_string_lossy().into_owned();
+  let path = |x: &str| vm.state(x).to_string_lossy().into_owned();
   let mut swtpm = Command::new("swtpm");
   swtpm.args(["socket", "--tpm2", "--daemon", "--terminate"]);
-  swtpm.args(["--tpmstate", &format!("dir={}", path("tpm"))]);
+  swtpm.args(["--tpmstate", &format!("dir={}", vm.path("tpm").display())]);
   swtpm.args(["--ctrl", &format!("type=unixio,path={}", path("tpm.sock"))]);
   swtpm.args(["--pid", &format!("file={}", path("tpm.pid"))]);
   swtpm.args(["--log", &format!("file={}", path("tpm.log"))]);
   // swtpm's errors go to its log.
   if let Err(e) = run(&mut swtpm) {
-    let log = fs::read_to_string(vm.path("tpm.log")).unwrap_or_default();
+    let log = fs::read_to_string(vm.state("tpm.log")).unwrap_or_default();
     return Err(bad(format!("{} {}", e.to_string().trim_end(), log.trim())));
   }
 
   let fd = lock.as_raw_fd();
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let mut cmd = Command::new(&bin);
   cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
   // SAFETY: setsid and fcntl are async-signal-safe; the lock's fd stays open in QEMU.
@@ -189,7 +189,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   loop {
     if let Some(code) = child.try_wait()? {
       tpm_kill(vm);
-      let log = fs::read_to_string(vm.path("log")).unwrap_or_default();
+      let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
       let tail: Vec<_> = log.lines().rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{} didn't start ({code}):\n{}", vm.name, tail.join("\n"))));
@@ -209,7 +209,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
 
 /// `swtpm` ends with QEMU's connection; one that QEMU never connected to is ended here.
 fn tpm_kill(vm: &Vm) {
-  let pid = fs::read_to_string(vm.path("tpm.pid")).ok().and_then(|x| x.trim().parse().ok());
+  let pid = fs::read_to_string(vm.state("tpm.pid")).ok().and_then(|x| x.trim().parse().ok());
   if let Some(pid) = pid {
     crate::vm::signal(pid, 15);
   }
@@ -229,7 +229,7 @@ impl Qmp {
       return Err(not_running());
     }
 
-    let w = UnixStream::connect(vm.path("qmp.sock")).map_err(|_| not_running())?;
+    let w = UnixStream::connect(vm.state("qmp.sock")).map_err(|_| not_running())?;
     w.set_read_timeout(Some(Duration::from_secs(60)))?;
     let mut qmp = Self { r: BufReader::new(w.try_clone()?), w };
     qmp.line()?;
@@ -346,9 +346,9 @@ impl Frame {
   }
 }
 
-/// The screen now, through a PPM dump in the VM's folder, one per trivm process.
+/// The screen now, through a PPM dump in the VM's state folder, one per trivm process.
 fn frame(vm: &Vm, qmp: &mut Qmp) -> io::Result<Frame> {
-  let path = vm.path(&format!("screen-{}.ppm", std::process::id()));
+  let path = vm.state(&format!("screen-{}.ppm", std::process::id()));
   qmp.call("screendump", &format!(r#"{{"filename": {}}}"#, json(&path.to_string_lossy())))?;
   let mut data = Vec::new();
   fs::File::open(&path)?.read_to_end(&mut data)?;
@@ -551,16 +551,10 @@ mod tests {
 
   #[test]
   fn command_line() {
-    let config = Config {
-      system: "windows-11".into(),
-      cpus: 4,
-      memory: 6,
-      disk: 64,
-      mac: "02:00:00:00:00:01".into(),
-      setup: true,
-      port: Some(50022),
-    };
-    let vm = Vm { name: "w".into(), dir: "/v/a,b".into(), config };
+    let config = Config { system: "windows-11".into(), cpus: 4, memory: 6, disk: 64 };
+    let (dir, state_dir) = ("/v/a,b".into(), "/s/a,b".into());
+    let mac = "02:00:00:00:00:01".into();
+    let vm = Vm { dir, state_dir, mac, setup: true, port: Some(50022), ..Vm::at("w", config) };
     let cds = ["/c/win.iso".into(), "/v/a,b/seed.iso".into()];
     let line = args(&vm, Path::new("/q"), &cds).join(" ");
 
@@ -572,9 +566,9 @@ mod tests {
       "-device ramfb -device qemu-xhci,id=usb -device usb-kbd -device usb-tablet",
       "user,id=net,hostfwd=tcp:127.0.0.1:50022-:22",
       "virtio-net-pci,netdev=net,mac=02:00:00:00:00:01",
-      "socket,id=tpm,path=/v/a,,b/tpm.sock",
+      "socket,id=tpm,path=/s/a,,b/tpm.sock",
       "tpm-tis-device,tpmdev=tpm,ppi=off",
-      "-qmp unix:/v/a,,b/qmp.sock,server=on,wait=off",
+      "-qmp unix:/s/a,,b/qmp.sock,server=on,wait=off",
       "-vnc 127.0.0.1:0,to=99,password=on -display none",
       "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=0",
       "file=/v/a,,b/seed.iso -device usb-storage,drive=cd1d,id=cd1",

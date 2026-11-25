@@ -38,7 +38,10 @@ The screen, from the host:
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
 The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
-Files live in ~/.trivm (TRIVM_HOME).
+Files, by the XDG Base Directory spec: each VM's settings in ~/.config/trivm/<vm>.conf
+(XDG_CONFIG_HOME), its disks in ~/.local/share/trivm (XDG_DATA_HOME), downloads in
+~/.cache/trivm (XDG_CACHE_HOME), logs, locks and sockets in ~/.local/state/trivm
+(XDG_STATE_HOME).
 ";
 
 #[derive(Debug, PartialEq)]

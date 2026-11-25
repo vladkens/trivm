@@ -3,7 +3,7 @@
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
@@ -13,16 +13,30 @@ use crate::{bad, run, windows};
 /// Set when trivm runs as `ssh`'s askpass program: it prints the guest's password.
 pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
-/// trivm's key, made on first use.
+/// trivm's key, made on first use beside its place, then moved there, the public half last: a
+/// public half there is whole.
 pub fn key() -> io::Result<PathBuf> {
-  let path = vm::home().join("id_ed25519");
-  if !path.exists() {
-    fs::create_dir_all(vm::home())?;
+  let path = vm::data_dir().join("id_ed25519");
+  if path.with_extension("pub").exists() {
+    return Ok(path);
+  }
+
+  // Two first uses at once make one key.
+  vm::made(&vm::data_dir())?;
+  let lock = fs::File::create(path.with_extension("lock"))?;
+  lock.lock()?;
+  if !path.with_extension("pub").exists() {
+    let new = path.with_extension(format!("new{}", process::id()));
+    let public = |x: &Path| PathBuf::from(format!("{}.pub", x.display()));
+    let _ = fs::remove_file(&new);
+    let _ = fs::remove_file(public(&new));
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
-        .arg(&path),
+        .arg(&new),
     )?;
+    fs::rename(&new, &path)?;
+    fs::rename(public(&new), public(&path))?;
   }
 
   Ok(path)
@@ -44,7 +58,7 @@ pub fn ip(vm: &Vm) -> io::Result<String> {
 /// The guest's SSH as `ip` or `ip:port`.
 pub fn address(vm: &Vm) -> io::Result<String> {
   let ip = ip(vm)?;
-  Ok(match vm.config.port {
+  Ok(match vm.port {
     Some(port) => format!("{ip}:{port}"),
     None => ip,
   })
@@ -71,7 +85,7 @@ fn options(key: &Path) -> Vec<String> {
 pub fn ssh(vm: &Vm) -> io::Result<Command> {
   let mut cmd = Command::new("ssh");
   cmd.args(options(&key()?)).args(["-o", "BatchMode=yes"]);
-  if let Some(port) = vm.config.port {
+  if let Some(port) = vm.port {
     cmd.args(["-p", &port.to_string()]);
   }
 
@@ -139,7 +153,7 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     }
 
     let vm = Vm::open(name)?;
-    Ok(url(&ip(&vm)?, vm.config.port, path))
+    Ok(url(&ip(&vm)?, vm.port, path))
   };
 
   let (src, dst) = (side(src)?, side(dst)?);
@@ -162,7 +176,7 @@ pub fn wait(vm: &Vm, timeout: Duration) -> io::Result<()> {
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if vm.ip().is_some() {
@@ -189,7 +203,7 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if let Some(ip) = vm.ip() {

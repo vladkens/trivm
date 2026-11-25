@@ -75,15 +75,11 @@ pub fn find(name: &str) -> io::Result<&'static System> {
   SYSTEMS.iter().find(|x| x.name == name).ok_or_else(err)
 }
 
-fn cache() -> PathBuf {
-  vm::home().join("cache")
-}
-
 /// A file in the cache, downloaded (resumed after a break) and checked first.
 fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
   let name = url.rsplit('/').next().unwrap_or(url);
-  let path = cache().join(name);
-  fs::create_dir_all(cache())?;
+  let path = vm::cache_dir().join(name);
+  vm::made(&vm::cache_dir())?;
   let _lock = lock(&path)?;
   if path.exists() {
     return Ok(path);
@@ -119,8 +115,8 @@ fn check(path: &Path, sha256: &str) -> io::Result<()> {
 
 /// The CDs of a Windows VM being set up: Microsoft's ISO and the seed.
 pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
-  let cds = [cache().join(WINDOWS_ISO), vm.path("seed.iso")];
-  match vm.config.setup {
+  let cds = [vm::cache_dir().join(WINDOWS_ISO), vm.path("seed.iso")];
+  match vm.setup {
     true => cds.into_iter().filter(|x| x.exists()).collect(),
     false => Vec::new(),
   }
@@ -128,8 +124,8 @@ pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
 
 /// Windows' ISO in the cache, cloned there from `iso` once its SHA-256 is Microsoft's.
 fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
-  let path = cache().join(WINDOWS_ISO);
-  fs::create_dir_all(cache())?;
+  let path = vm::cache_dir().join(WINDOWS_ISO);
+  vm::made(&vm::cache_dir())?;
   let _lock = lock(&path)?;
   if path.exists() {
     return Ok(path);
@@ -172,7 +168,14 @@ pub fn create(
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
-  if vm::home().join(&name).join("config").exists() {
+  let config = Config {
+    system: sys.name.into(),
+    cpus: cpus.unwrap_or(sys.cpus),
+    memory: memory.unwrap_or(sys.memory),
+    disk: disk.unwrap_or(sys.disk),
+  };
+  let vm = Vm { mac: vm::random_mac()?, setup: true, ..Vm::at(&name, config) };
+  if vm.conf.exists() {
     return Err(bad(format!("{name} exists; trivm delete {name} first")));
   }
 
@@ -184,28 +187,22 @@ pub fn create(
     _ => download(sys.url, sys.sha256)?,
   };
 
-  let config = Config {
-    system: sys.name.into(),
-    cpus: cpus.unwrap_or(sys.cpus),
-    memory: memory.unwrap_or(sys.memory),
-    disk: disk.unwrap_or(sys.disk),
-    mac: vm::random_mac()?,
-    setup: true,
-    port: None,
-  };
-
-  let vm = Vm::new(&name, config)?;
-  let made = match sys.os {
+  // Held while installing, and while a failed install goes, so the VM isn't deleted or started in
+  // the middle; listed as new.
+  let hold = vm.claim()?;
+  let made = vm.commit().and_then(|_| match sys.os {
     Os::Macos => macos(&vm, &file),
     Os::Linux => linux(&vm, &file),
     Os::Windows => windows(&vm),
-  };
+  });
 
   // A VM whose install failed is no use: it goes, its downloads stay.
   if let Err(e) = made {
-    let _ = fs::remove_dir_all(&vm.dir);
+    let _ = vm.remove();
     return Err(e);
   }
+
+  drop(hold);
 
   crate::start(&vm.name)
 }
@@ -284,8 +281,8 @@ fn linux(vm: &Vm, qcow2: &Path) -> io::Result<()> {
   let seed = vm.path("seed");
   fs::create_dir_all(&seed)?;
   fs::write(seed.join("user-data"), user_data(&ssh::public_key()?, &timezone()))?;
-  fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.config.mac))?;
-  fs::write(seed.join("network-config"), network_config(&vm.config.mac))?;
+  fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.mac))?;
+  fs::write(seed.join("network-config"), network_config(&vm.mac))?;
   let mut hdiutil = Command::new("hdiutil");
   hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "cidata", "-o"]);
   run(hdiutil.arg(vm.path("seed.iso")).arg(&seed).stdin(Stdio::null()))?;
