@@ -163,11 +163,20 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     .status()
 }
 
+/// The guest's side of `scp`: an `scp://` URL with a port, whose path scp decodes (`%` escapes,
+/// `+` as a space), so all but plain characters are escaped.
 fn url(ip: &str, port: Option<u16>, path: &str) -> String {
-  match port {
-    Some(port) => format!("scp://{}@{ip}:{port}/{path}", vm::USER),
-    None => format!("{}@{ip}:{path}", vm::USER),
-  }
+  let Some(port) = port else { return format!("{}@{ip}:{path}", vm::USER) };
+  let path: String = path
+    .bytes()
+    .map(|x| match x {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' | b'\\' => {
+        (x as char).to_string()
+      }
+      _ => format!("%{x:02X}"),
+    })
+    .collect();
+  format!("scp://{}@{ip}:{port}/{path}", vm::USER)
 }
 
 /// Waits until the guest runs a command over SSH with trivm's key.
@@ -256,5 +265,11 @@ mod tests {
     assert_eq!(url("192.168.64.2", None, "/tmp/"), "user@192.168.64.2:/tmp/");
     assert_eq!(url("127.0.0.1", Some(50022), "C:/x"), "scp://user@127.0.0.1:50022/C:/x");
     assert_eq!(url("127.0.0.1", Some(50022), ""), "scp://user@127.0.0.1:50022/");
+    let path = "C:\\a+b 100%/é@x";
+    assert_eq!(
+      url("127.0.0.1", Some(1), path),
+      "scp://user@127.0.0.1:1/C:\\a%2Bb%20100%25/%C3%A9%40x"
+    );
+    assert_eq!(url("10.0.0.2", None, "/a+b 100%"), "user@10.0.0.2:/a+b 100%");
   }
 }

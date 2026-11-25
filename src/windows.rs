@@ -70,8 +70,8 @@ pub fn powershell(script: &str) -> String {
   let opts = "-NoLogo -NoProfile -NonInteractive -OutputFormat Text";
   let text = format!("[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{script}'))");
   // `-Command` formats its whole line at the end, which an `exit` skips: `Out-Default` writes the
-  // script's output (tables too) before it.
-  format!("powershell {opts} -Command \"iex ({text}) | Out-Default; exit $trivm\"")
+  // script's output (tables too) before it. A script that doesn't parse leaves `$trivm` at 1.
+  format!("powershell {opts} -Command \"$trivm = 1; iex ({text}) | Out-Default; exit $trivm\"")
 }
 
 /// An interactive PowerShell with the prelude.
@@ -299,7 +299,7 @@ mod tests {
     assert_eq!(encode("dir"), "ZABpAHIA");
 
     let cmd = powershell("exit 3");
-    let run = "-OutputFormat Text -Command \"iex ([Text.Encoding]::Unicode.GetString([Convert]::";
+    let run = "-OutputFormat Text -Command \"$trivm = 1; iex ([Text.Encoding]::Unicode.GetString(";
     assert!(cmd.starts_with(&format!("powershell -NoLogo -NoProfile -NonInteractive {run}")));
     let script = encode(&format!("{PRELUDE}exit 3{EPILOGUE}"));
     assert!(cmd.ends_with(&format!("FromBase64String('{script}'))) | Out-Default; exit $trivm\"")));

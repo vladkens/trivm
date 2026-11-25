@@ -256,6 +256,18 @@ fn hostname(name: &str) -> String {
   name.chars().map(|x| if x.is_ascii_alphanumeric() { x } else { '-' }).collect()
 }
 
+/// The VM's name as Windows' computer name, which is 15 characters at most and not digits only.
+fn computer_name(name: &str) -> String {
+  let host = hostname(name);
+  let host = host.trim_matches('-');
+  let host = match host.chars().all(|x| x.is_ascii_digit()) {
+    true => format!("win-{host}"),
+    false => host.to_string(),
+  };
+
+  host.chars().take(15).collect::<String>().trim_end_matches('-').to_string()
+}
+
 fn meta_data(name: &str, mac: &str) -> String {
   let host = hostname(name);
   format!("instance-id: {host}-{}\nlocal-hostname: {host}\n", mac.replace(':', ""))
@@ -406,9 +418,7 @@ fn windows(vm: &Vm) -> io::Result<()> {
 
   let seed = vm.path("seed");
   fs::create_dir_all(&seed)?;
-  // Windows' computer names are 15 characters at most.
-  let host: String = hostname(&vm.name).chars().take(15).collect();
-  fs::write(seed.join("autounattend.xml"), windows::autounattend(host.trim_end_matches('-')))?;
+  fs::write(seed.join("autounattend.xml"), windows::autounattend(&computer_name(&vm.name)))?;
   fs::write(seed.join(windows::SETUP), windows::setup_script())?;
   fs::write(seed.join("key.pub"), ssh::public_key()? + "\n")?;
   fs::copy(&msi, seed.join("openssh.msi"))?;
@@ -521,5 +531,19 @@ mod tests {
     assert!(NETWORK_CONFIG.contains("driver: virtio_net\n"));
     assert!(NETWORK_CONFIG.contains("dhcp-identifier: mac\n"));
     assert!(!NETWORK_CONFIG.contains('\t'));
+  }
+
+  #[test]
+  fn computer_names() {
+    for (name, host) in [
+      ("windows-11", "windows-11"),
+      ("windows-11-run-1", "windows-11-run"),
+      ("my.test_vm-number-2", "my-test-vm-numb"),
+      ("123", "win-123"),
+      ("_", "win"),
+      ("-x-", "x"),
+    ] {
+      assert_eq!(computer_name(name), host, "{name}");
+    }
   }
 }
