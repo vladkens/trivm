@@ -1,12 +1,14 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
-//! A VM's folder in `~/.trivm`: its config, its files, whether its process runs, and the guest's
-//! address from the host's DHCP leases.
+//! trivm's folders, by the XDG Base Directory spec, and a VM's files in them: its config, its
+//! disks, what its runs write; whether its process runs, and the guest's address from the host's
+//! DHCP leases.
 
+use std::ffi::OsString;
 use std::io::{self, Read};
-use std::os::unix::fs::{FileExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 use crate::bad;
 
@@ -16,12 +18,46 @@ pub const PASSWORD: &str = "1234";
 
 const GIB: u64 = 1 << 30;
 
-/// trivm's folder: `TRIVM_HOME`, or `~/.trivm`.
-pub fn home() -> PathBuf {
-  match std::env::var_os("TRIVM_HOME") {
-    Some(x) if !x.is_empty() => PathBuf::from(x),
-    _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".trivm"),
+/// Each VM's disks and platform files, and trivm's SSH key.
+pub fn data_dir() -> PathBuf {
+  xdg("XDG_DATA_HOME", ".local/share")
+}
+
+/// Downloads and what is made from them: all of it can be made again.
+pub fn cache_dir() -> PathBuf {
+  xdg("XDG_CACHE_HOME", ".cache")
+}
+
+/// What VMs and trivm write as they run: logs, locks, sockets.
+pub fn state_dir() -> PathBuf {
+  xdg("XDG_STATE_HOME", ".local/state")
+}
+
+/// trivm's own locks but the VMs': the SSH key's, the cache's files'.
+pub fn locks_dir() -> io::Result<PathBuf> {
+  let dir = state_dir().join("locks");
+  made(&dir)?;
+  Ok(dir)
+}
+
+fn xdg(var: &str, default: &str) -> PathBuf {
+  let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
+  base(env::var_os(var), &home, default).join("trivm")
+}
+
+/// The folder an XDG variable names, or its default in the home folder when it is unset, empty
+/// or not absolute, which the spec says to ignore.
+fn base(var: Option<OsString>, home: &Path, default: &str) -> PathBuf {
+  match var.map(PathBuf::from) {
+    Some(x) if x.is_absolute() => x,
+    _ => home.join(default),
   }
+}
+
+/// Makes a folder and those above it that are missing its owner's only (0700), as the spec asks:
+/// a VM's disk holds its user's files, and the Mac's other users share the home folder's group.
+pub fn made(dir: &Path) -> io::Result<()> {
+  fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -113,39 +149,47 @@ impl Config {
 
 pub struct Vm {
   pub name: String,
+  /// Its disks, platform files and config, in trivm's data folder.
   pub dir: PathBuf,
+  /// What its runs write (`log`, `pid`, the sockets), in trivm's state folder.
+  pub state_dir: PathBuf,
   pub config: Config,
 }
 
 impl Vm {
+  /// The VM of that name in trivm's folders.
+  pub fn at(name: &str, config: Config) -> Self {
+    let (dir, state_dir) = (data_dir().join(name), state_dir().join(name));
+    Self { name: name.into(), dir, state_dir, config }
+  }
+
   pub fn open(name: &str) -> io::Result<Self> {
     let none = || bad(format!("no VM named {name}; see trivm list"));
     if !valid(name) {
       return Err(none());
     }
 
-    let dir = home().join(name);
-    let text = match fs::read_to_string(dir.join("config")) {
+    let text = match fs::read_to_string(data_dir().join(name).join("config")) {
       Ok(x) => x,
       Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(none()),
       Err(e) => return Err(e),
     };
 
-    Ok(Self { name: name.into(), dir, config: Config::parse(&text)? })
+    Ok(Self::at(name, Config::parse(&text)?))
   }
 
-  /// A new VM's folder with its config; the files of its system come next.
+  /// A new VM's folders with its config; the files of its system come next.
   pub fn new(name: &str, config: Config) -> io::Result<Self> {
     if !valid(name) {
       return Err(bad(format!("not a VM name: {name}")));
     }
 
     // The config made only if there is none, so of two creates of a name one fails.
-    let dir = home().join(name);
-    socket_fits(&dir)?;
-    fs::create_dir_all(&dir)?;
-    private(&dir)?;
-    match fs::OpenOptions::new().write(true).create_new(true).open(dir.join("config")) {
+    let vm = Self::at(name, config);
+    socket_fits(&vm.state_dir)?;
+    made(&vm.dir)?;
+    made(&vm.state_dir)?;
+    match fs::OpenOptions::new().write(true).create_new(true).open(vm.path("config")) {
       Ok(_) => {}
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
         return Err(bad(format!("{name} exists; trivm delete {name} first")));
@@ -153,13 +197,12 @@ impl Vm {
       Err(e) => return Err(e),
     }
 
-    let vm = Self { name: name.into(), dir, config };
     vm.save()?;
     Ok(vm)
   }
 
   pub fn all() -> io::Result<Vec<Self>> {
-    let mut names: Vec<String> = match fs::read_dir(home()) {
+    let mut names: Vec<String> = match fs::read_dir(data_dir()) {
       Ok(x) => x.filter_map(|x| x.ok()?.file_name().into_string().ok()).collect(),
       Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
       Err(e) => return Err(e),
@@ -169,7 +212,7 @@ impl Vm {
     Ok(
       names
         .iter()
-        .filter(|x| home().join(x).join("config").exists())
+        .filter(|x| data_dir().join(x).join("config").exists())
         .flat_map(|x| Self::open(x))
         .collect(),
     )
@@ -177,25 +220,42 @@ impl Vm {
 
   pub fn save(&self) -> io::Result<()> {
     // A file of this process's own: two `start`s may save at once.
-    let tmp = self.dir.join(format!("config.{}", std::process::id()));
+    let tmp = self.path(&format!("config.{}", std::process::id()));
     fs::write(&tmp, self.config.text())?;
-    fs::rename(tmp, self.dir.join("config"))
+    fs::rename(tmp, self.path("config"))
   }
 
+  /// Removes the VM's folders, its data first: the state folder, with the lock, goes last.
+  pub fn remove(&self) -> io::Result<()> {
+    for dir in [&self.dir, &self.state_dir] {
+      match fs::remove_dir_all(dir) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
+      }
+    }
+
+    Ok(())
+  }
+
+  /// A file in the VM's data folder.
   pub fn path(&self, file: &str) -> PathBuf {
     self.dir.join(file)
+  }
+
+  /// A file in the VM's state folder.
+  pub fn state(&self, file: &str) -> PathBuf {
+    self.state_dir.join(file)
   }
 
   /// The pid of the VM's process while it runs: the process holds a lock on its `pid` file, so a
   /// file left by a dead one doesn't count, though its pid may be another process's by now.
   pub fn pid(&self) -> Option<i32> {
-    pid_of(&fs::File::open(self.path("pid")).ok()?)
+    pid_of(&fs::File::open(self.state("pid")).ok()?)
   }
 
   /// Marks the VM as running, with this process's pid, for as long as the file returned is open.
   pub fn lock(&self) -> io::Result<fs::File> {
-    let f =
-      fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.path("pid"))?;
+    let f = self.pid_file()?;
     match f.try_lock() {
       Ok(()) => {}
       Err(fs::TryLockError::WouldBlock) => {
@@ -212,8 +272,7 @@ impl Vm {
   /// which the VM's process takes exclusive, so clones of a VM made at once don't wait for each
   /// other.
   pub fn hold(&self) -> io::Result<fs::File> {
-    let f =
-      fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.path("pid"))?;
+    let f = self.pid_file()?;
     match f.try_lock_shared() {
       Ok(()) => Ok(f),
       Err(fs::TryLockError::WouldBlock) => {
@@ -221,6 +280,12 @@ impl Vm {
       }
       Err(fs::TryLockError::Error(e)) => Err(e),
     }
+  }
+
+  /// `pid`, its folder made again if a person deleted it, as the spec lets them.
+  fn pid_file(&self) -> io::Result<fs::File> {
+    made(&self.state_dir)?;
+    fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.state("pid"))
   }
 
   /// The guest's address: from its newest DHCP lease, or the host's own for a VM on QEMU's user
@@ -236,9 +301,8 @@ impl Vm {
   }
 }
 
-/// trivm's own files beside the VMs' folders.
-const OWN: &[&str] =
-  &["cache", "entitlements.plist", "id_ed25519", "id_ed25519.pub", "id_ed25519.lock"];
+/// trivm's own files beside the VMs' folders: the SSH key in data, the locks in state.
+const OWN: &[&str] = &["id_ed25519", "id_ed25519.pub", "locks"];
 
 /// A VM's name: a folder in trivm's, not a path out of it or one of trivm's own files, in any case
 /// (APFS ignores it), nor a flag to the commands trivm runs with it (`_run <vm>`).
@@ -248,14 +312,9 @@ pub fn valid(name: &str) -> bool {
   chars && !name.is_empty() && !name.starts_with(['.', '-']) && !own
 }
 
-/// Makes a VM's folder its owner's only: the guest's disk holds its user's files, and the Mac's
-/// other users share the home folder's group.
-pub fn private(dir: &Path) -> io::Result<()> {
-  fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-}
-
-/// Checks that the VM's `ctl.sock` fits a Unix socket's path, which macOS caps at 104 bytes with
-/// the NUL: a VM whose doesn't can't start.
+/// Checks that the VM's `ctl.sock` in its state folder fits a Unix socket's path, which macOS
+/// caps at 104 bytes with the NUL: a VM whose doesn't can't start. QEMU's `qmp.sock` and
+/// `tpm.sock` are as long.
 pub fn socket_fits(dir: &Path) -> io::Result<()> {
   match dir.join("ctl.sock").as_os_str().len() < 104 {
     true => Ok(()),
@@ -455,10 +514,18 @@ mod tests {
       assert!(valid(x), "{x}");
     }
 
-    assert!(socket_fits(Path::new("/Users/user/.trivm/macos-27-run-1")).is_ok());
-    assert!(socket_fits(&Path::new("/Users/user/.trivm").join("x".repeat(80))).is_err());
+    // 63 bytes of a name in this Mac's state folder.
+    let state = Path::new("/Users/user/.local/state/trivm");
+    assert!(socket_fits(&state.join("macos-27-run-1")).is_ok());
+    assert!(socket_fits(&state.join("x".repeat(63))).is_ok());
+    assert!(socket_fits(&state.join("x".repeat(64))).is_err());
 
-    let own = ["cache", "CACHE", "id_ed25519.pub", "Entitlements.plist"];
+    // Their own files no longer beside the VMs' folders.
+    for x in ["cache", "entitlements.plist", "id_ed25519.lock"] {
+      assert!(valid(x), "{x}");
+    }
+
+    let own = ["id_ed25519", "ID_ED25519.pub", "locks", "Locks"];
     for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "-a", "--help"].into_iter().chain(own) {
       assert!(!valid(x), "{x}");
       assert!(Vm::open(x).is_err(), "{x}");
@@ -466,22 +533,34 @@ mod tests {
   }
 
   #[test]
+  fn folders() {
+    let home = Path::new("/Users/u");
+    let var = |x: &str| Some(OsString::from(x));
+    assert_eq!(base(var("/x/data"), home, ".local/share"), Path::new("/x/data"));
+    // Unset, empty or relative: ignored, as the spec says.
+    for x in [None, var(""), var("data"), var("./data")] {
+      assert_eq!(base(x, home, ".local/share"), Path::new("/Users/u/.local/share"));
+    }
+  }
+
+  #[test]
   fn owner_only() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = std::env::temp_dir().join(format!("trivm-private-{}", std::process::id()));
-    fs::create_dir(&dir).unwrap();
-    fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
-    private(&dir).unwrap();
-    let mode = fs::metadata(&dir).unwrap().permissions().mode();
-    fs::remove_dir(&dir).unwrap();
-    assert_eq!(mode & 0o777, 0o700);
+    made(&dir.join("a/b")).unwrap();
+    made(&dir.join("a/b")).unwrap();
+    let mode = |x: &str| fs::metadata(dir.join(x)).unwrap().permissions().mode() & 0o777;
+    let modes = [mode(""), mode("a"), mode("a/b")];
+    fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(modes, [0o700; 3]);
   }
 
   #[test]
   fn lock() {
     let dir = std::env::temp_dir().join(format!("trivm-lock-{}", std::process::id()));
-    fs::create_dir_all(&dir).unwrap();
     let config = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\n").unwrap();
-    let vm = Vm { name: "a".into(), dir: dir.clone(), config };
+    // The state folder made by the lock.
+    let vm = Vm { name: "a".into(), dir: dir.join("data"), state_dir: dir.join("state"), config };
     assert_eq!(vm.pid(), None);
 
     let lock = vm.lock().unwrap();
@@ -491,7 +570,7 @@ mod tests {
     write_pid(&lock, 42).unwrap();
     assert_eq!(vm.pid(), Some(42));
     write_pid(&lock, 1234567).unwrap();
-    assert_eq!(fs::read_to_string(vm.path("pid")).unwrap(), "1234567   ");
+    assert_eq!(fs::read_to_string(vm.state("pid")).unwrap(), "1234567   ");
     assert_eq!(&pid_text(0), b"0         ");
     assert_eq!(&pid_text(u32::MAX), b"4294967295");
     // The test's own binary is `trivm-<hash>`; launchd is root's, its name not ours to read.

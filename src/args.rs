@@ -63,7 +63,9 @@ at the first use (on macOS with its Accessibility grant, which needs SIP off):
                           its window raised first
 
 The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
-Files live in ~/.trivm (TRIVM_HOME).
+Files, by the XDG Base Directory spec: each VM's disks and settings in ~/.local/share/trivm
+(XDG_DATA_HOME), downloads in ~/.cache/trivm (XDG_CACHE_HOME), logs, locks and sockets in
+~/.local/state/trivm (XDG_STATE_HOME).
 ";
 
 #[derive(Debug, PartialEq)]

@@ -129,7 +129,16 @@ screen to Screen Sharing (VNC on 127.0.0.1, password `1234`). Windows isn't acti
 
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
 shot. The guest's user is `user`, password `1234`, sudo without a password (an administrator on
-Windows). VMs live in `~/.trivm` (`TRIVM_HOME`), downloads in `~/.trivm/cache`.
+Windows).
+
+## Files
+
+trivm keeps its files as Linux tools do, by the XDG Base Directory spec, each folder moved by its
+variable:
+
+- `~/.local/share/trivm` (`XDG_DATA_HOME`): each VM's disks and settings, trivm's SSH key.
+- `~/.cache/trivm` (`XDG_CACHE_HOME`): downloads and the disks made from them.
+- `~/.local/state/trivm` (`XDG_STATE_HOME`): each VM's log, lock and sockets.
 
 ## License
 

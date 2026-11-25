@@ -175,8 +175,8 @@ fn signed() -> io::Result<()> {
     )));
   }
 
-  let plist = vm::home().join("entitlements.plist");
-  fs::create_dir_all(vm::home())?;
+  let plist = vm::cache_dir().join("entitlements.plist");
+  vm::made(&vm::cache_dir())?;
   fs::write(&plist, ENTITLEMENTS)?;
   let copy = exe.with_extension(format!("signing{}", std::process::id()));
   fs::copy(&exe, &copy)?;
@@ -243,7 +243,8 @@ fn boot(name: &str) -> io::Result<Vm> {
 /// waits until the VM runs, in it or in another `start`'s, whose lock makes this one exit.
 pub fn spawn(vm: &Vm, recovery: bool) -> io::Result<()> {
   let name = &vm.name;
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  vm::made(&vm.state_dir)?;
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let mut cmd = Command::new(env::current_exe()?);
   cmd
     .args(["_run", name])
@@ -260,7 +261,7 @@ pub fn spawn(vm: &Vm, recovery: bool) -> io::Result<()> {
     if let Some(code) = child.try_wait()?
       && vm.pid().is_none()
     {
-      let log = fs::read_to_string(vm.path("log")).unwrap_or_default();
+      let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
       let tail: Vec<_> = log.lines().rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{name} didn't start ({code}):\n{}", tail.join("\n"))));
@@ -273,7 +274,7 @@ pub fn spawn(vm: &Vm, recovery: bool) -> io::Result<()> {
     if t.elapsed() > Duration::from_secs(120) {
       return Err(bad(format!(
         "{name} didn't start in 2 minutes; see {}",
-        vm.path("log").display()
+        vm.state("log").display()
       )));
     }
 
@@ -409,7 +410,7 @@ fn shut_down(vm: &Vm) -> io::Result<()> {
 pub fn delete(vm: &Vm) -> io::Result<()> {
   stop(vm, true)?;
   let _lock = vm.lock()?;
-  fs::remove_dir_all(&vm.dir)
+  vm.remove()
 }
 
 fn list() -> io::Result<()> {

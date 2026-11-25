@@ -175,15 +175,11 @@ pub fn find(name: &str) -> io::Result<&'static System> {
   SYSTEMS.iter().find(|x| x.name == name).ok_or_else(err)
 }
 
-fn cache() -> PathBuf {
-  vm::home().join("cache")
-}
-
 /// The file at `url` in the cache, downloaded (resumed after a break) and checked first.
 pub fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
   let name = url.rsplit('/').next().unwrap_or(url);
-  let path = cache().join(name);
-  fs::create_dir_all(cache())?;
+  let path = vm::cache_dir().join(name);
+  vm::made(&vm::cache_dir())?;
   let _lock = lock(&path)?;
   if path.exists() {
     return Ok(path);
@@ -219,7 +215,7 @@ fn check(path: &Path, sha256: &str) -> io::Result<()> {
 
 /// The CDs of a Windows VM being set up: Microsoft's ISO and the seed.
 pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
-  let cds = [cache().join(WINDOWS_ISO), vm.path("seed.iso")];
+  let cds = [vm::cache_dir().join(WINDOWS_ISO), vm.path("seed.iso")];
   match vm.config.setup {
     true => cds.into_iter().filter(|x| x.exists()).collect(),
     false => Vec::new(),
@@ -228,8 +224,8 @@ pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
 
 /// Windows' ISO in the cache, cloned there from `iso` once its SHA-256 is Microsoft's.
 fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
-  let path = cache().join(WINDOWS_ISO);
-  fs::create_dir_all(cache())?;
+  let path = vm::cache_dir().join(WINDOWS_ISO);
+  vm::made(&vm::cache_dir())?;
   let _lock = lock(&path)?;
   if path.exists() {
     return Ok(path);
@@ -254,10 +250,12 @@ fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
   Ok(path)
 }
 
-/// A lock beside a file in the cache, held until it is dropped: a second create of the same system
-/// waits for the first one's download or conversion instead of writing the same file.
+/// A lock for a file in the cache, in trivm's locks, held until it is dropped: a second create of
+/// the same system waits for the first one's download or conversion instead of writing the same
+/// file.
 fn lock(path: &Path) -> io::Result<fs::File> {
-  let f = fs::File::create(path.with_extension("lock"))?;
+  let name = path.with_extension("lock");
+  let f = fs::File::create(vm::locks_dir()?.join(name.file_name().unwrap_or_default()))?;
   f.lock()?;
   Ok(f)
 }
@@ -272,7 +270,7 @@ pub fn create(
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
-  if vm::home().join(&name).join("config").exists() {
+  if vm::data_dir().join(&name).join("config").exists() {
     return Err(bad(format!("{name} exists; trivm delete {name} first")));
   }
 
@@ -305,7 +303,7 @@ pub fn create(
 
   // A VM whose install failed is no use: it goes, its downloads stay.
   if let Err(e) = made {
-    let _ = fs::remove_dir_all(&vm.dir);
+    let _ = vm.remove();
     return Err(e);
   }
 
@@ -325,7 +323,7 @@ fn sparse(path: &Path, bytes: u64) -> io::Result<()> {
 // MARK: macOS
 
 fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
-  // VZ finds no IPSW through a symlink on its path, such as a cache shared by another home.
+  // VZ finds no IPSW through a symlink on its path, such as a cache folder linked to another.
   let ipsw = &fs::canonicalize(ipsw)?;
   sparse(&vm.path("disk.img"), vm.config.disk_bytes())?;
   vz::mac_platform(vm, ipsw)?;

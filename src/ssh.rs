@@ -18,14 +18,14 @@ pub const ASKPASS: &str = "TRIVM_ASKPASS";
 /// trivm's key, made on first use beside its place, then moved there, the public half last: a
 /// public half there is whole.
 pub fn key() -> io::Result<PathBuf> {
-  let path = vm::home().join("id_ed25519");
+  let path = vm::data_dir().join("id_ed25519");
   if path.with_extension("pub").exists() {
     return Ok(path);
   }
 
   // Two first uses at once make one key.
-  fs::create_dir_all(vm::home())?;
-  let lock = fs::File::create(path.with_extension("lock"))?;
+  vm::made(&vm::data_dir())?;
+  let lock = fs::File::create(vm::locks_dir()?.join("id_ed25519.lock"))?;
   lock.lock()?;
   if !path.with_extension("pub").exists() {
     let new = path.with_extension(format!("new{}", process::id()));
@@ -194,7 +194,7 @@ pub fn wait(vm: &Vm, timeout: Duration) -> io::Result<()> {
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if vm.ip().is_some() {
@@ -221,7 +221,7 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if let Some(ip) = vm.ip() {
