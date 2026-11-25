@@ -692,20 +692,23 @@ mod tests {
     assert!(vm.lock().is_err());
     assert!(vm.hold().is_err());
     drop(lock);
-    // A process another test forks meanwhile shares the lock until it execs: 8 ms here.
-    let t = std::time::Instant::now();
-    while vm.pid().is_some() && t.elapsed().as_secs() < 1 {
-      std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    // A process another test forks meanwhile shares a lock let go until it execs: 8 ms here.
+    let soon = |x: &dyn Fn() -> bool| {
+      let t = std::time::Instant::now();
+      while !x() && t.elapsed().as_secs() < 1 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+      }
 
-    assert_eq!(vm.pid(), None);
+      x()
+    };
+    assert!(soon(&|| vm.pid().is_none()));
 
     // Two holds at once, which keep the VM from running and don't count as it running.
     let (a, b) = (vm.hold().unwrap(), vm.hold().unwrap());
     assert_eq!(vm.pid(), None);
     assert!(vm.lock().is_err());
     drop((a, b));
-    assert!(vm.lock().is_ok());
+    assert!(soon(&|| vm.lock().is_ok()));
     fs::remove_dir_all(&dir).unwrap();
   }
 
