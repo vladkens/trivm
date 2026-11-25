@@ -25,7 +25,7 @@ pub fn key() -> io::Result<PathBuf> {
 
   // Two first uses at once make one key.
   vm::made(&vm::data_dir())?;
-  let lock = fs::File::create(vm::locks_dir()?.join("id_ed25519.lock"))?;
+  let lock = fs::File::create(path.with_extension("lock"))?;
   lock.lock()?;
   if !path.with_extension("pub").exists() {
     let new = path.with_extension(format!("new{}", process::id()));

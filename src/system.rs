@@ -250,12 +250,11 @@ fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
   Ok(path)
 }
 
-/// A lock for a file in the cache, in trivm's locks, held until it is dropped: a second create of
-/// the same system waits for the first one's download or conversion instead of writing the same
-/// file.
+/// A lock beside a file in the cache, held until it is dropped: a second create of the same system,
+/// with the same state folder or not, waits for the first one's download or conversion instead of
+/// writing the same file.
 fn lock(path: &Path) -> io::Result<fs::File> {
-  let name = path.with_extension("lock");
-  let f = fs::File::create(vm::locks_dir()?.join(name.file_name().unwrap_or_default()))?;
+  let f = fs::File::create(path.with_extension("lock"))?;
   f.lock()?;
   Ok(f)
 }

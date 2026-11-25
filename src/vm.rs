@@ -33,16 +33,9 @@ pub fn cache_dir() -> PathBuf {
   xdg("XDG_CACHE_HOME", ".cache")
 }
 
-/// What VMs and trivm write as they run: logs, locks, sockets.
+/// What VMs write as they run: logs, locks, sockets.
 pub fn state_dir() -> PathBuf {
   xdg("XDG_STATE_HOME", ".local/state")
-}
-
-/// trivm's own locks but the VMs': the SSH key's, the cache's files'.
-pub fn locks_dir() -> io::Result<PathBuf> {
-  let dir = state_dir().join("locks");
-  made(&dir)?;
-  Ok(dir)
 }
 
 fn xdg(var: &str, default: &str) -> PathBuf {
@@ -376,8 +369,8 @@ fn gone(res: io::Result<()>) -> io::Result<()> {
   }
 }
 
-/// trivm's own files beside the VMs' folders: the SSH key in data, the locks in state.
-const OWN: &[&str] = &["id_ed25519", "id_ed25519.pub", "locks"];
+/// trivm's own files beside the VMs' folders in data: the SSH key and its lock.
+const OWN: &[&str] = &["id_ed25519", "id_ed25519.pub", "id_ed25519.lock"];
 
 /// A VM's name: a folder in trivm's, not a path out of it or one of trivm's own files, in any case
 /// (APFS ignores it), nor a flag to the commands trivm runs with it (`_run <vm>`).
@@ -638,11 +631,11 @@ mod tests {
     assert!(socket_fits(&state.join("x".repeat(64))).is_err());
 
     // Their own files no longer beside the VMs' folders.
-    for x in ["cache", "entitlements.plist", "id_ed25519.lock"] {
+    for x in ["cache", "entitlements.plist", "locks"] {
       assert!(valid(x), "{x}");
     }
 
-    let own = ["id_ed25519", "ID_ED25519.pub", "locks", "Locks"];
+    let own = ["id_ed25519", "ID_ED25519.pub", "id_ed25519.lock"];
     for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "-a", "--help"].into_iter().chain(own) {
       assert!(!valid(x), "{x}");
       assert!(Vm::open(x).is_err(), "{x}");
