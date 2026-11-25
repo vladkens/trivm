@@ -362,7 +362,7 @@ fn put(path: &Path, text: &str) -> io::Result<()> {
 }
 
 /// A removal that found nothing to remove is done.
-fn gone(res: io::Result<()>) -> io::Result<()> {
+pub fn gone(res: io::Result<()>) -> io::Result<()> {
   match res {
     Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
     x => x,

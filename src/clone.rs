@@ -186,10 +186,14 @@ fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   }
 
   let _lock = lock?;
-  match ours() {
-    true => vm.remove(),
-    false => Ok(()),
+  if !ours() {
+    return Ok(());
   }
+
+  // Its data folder, by which it is known, last: a removal cut short, the reaper finishes it.
+  vm::gone(fs::remove_file(&vm.conf))?;
+  vm::gone(fs::remove_dir_all(&vm.state_dir))?;
+  fs::remove_dir_all(&vm.dir)
 }
 
 /// Kills the process that holds an open `pid` file's lock, and waits until it lets go.
@@ -244,6 +248,11 @@ mod tests {
     discard(&vm, ino).unwrap();
     assert!(!dir.exists() && !state_dir.exists() && !conf.exists());
     assert_eq!(child.wait().unwrap().signal(), Some(9));
+
+    // One whose removal was cut short, its config and state gone: its data goes too.
+    fs::create_dir(&dir).unwrap();
+    discard(&vm, fs::metadata(&dir).unwrap().ino()).unwrap();
+    assert!(!dir.exists() && !state_dir.exists());
     fs::remove_dir_all(qemu.parent().unwrap()).unwrap();
   }
 }

@@ -23,6 +23,7 @@ mod vz;
 mod windows;
 
 use std::cell::Cell;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -408,8 +409,16 @@ fn shut_down(vm: &Vm) -> io::Result<()> {
 
 /// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile.
 pub fn delete(vm: &Vm) -> io::Result<()> {
+  // Its data folder, none if a delete cut short removed it, is the same under the lock unless
+  // another removed the VM meanwhile, and maybe made one of its name, which stays.
+  let ino = || fs::metadata(&vm.dir).map(|x| x.ino()).ok();
+  let was = ino();
   stop(vm, true)?;
   let _lock = vm.lock()?;
+  if ino() != was {
+    return Err(bad(format!("{} was deleted meanwhile; see trivm list", vm.name)));
+  }
+
   vm.remove()
 }
 
