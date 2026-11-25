@@ -296,8 +296,21 @@ unsafe extern "C" {
 /// A pid over the one in a locked `pid` file in one write, padded and not truncated first: a
 /// reader sees one pid or the other, never an empty file or a mix.
 pub fn write_pid(f: &fs::File, pid: u32) -> io::Result<()> {
-  f.write_all_at(format!("{pid:<10}").as_bytes(), 0)?;
+  f.write_all_at(&pid_text(pid), 0)?;
   f.set_len(10)
+}
+
+/// A pid as the `pid` file holds it, its digits padded with spaces to 10 bytes; made with no
+/// allocation, as a child between fork and exec writes its own.
+pub fn pid_text(pid: u32) -> [u8; 10] {
+  let mut b = [b' '; 10];
+  let (mut n, len) = (pid, pid.checked_ilog10().unwrap_or(0) as usize + 1);
+  for x in b[..len].iter_mut().rev() {
+    *x = b'0' + (n % 10) as u8;
+    n /= 10;
+  }
+
+  b
 }
 
 /// The pid in an open `pid` file while its process holds the lock on it.
@@ -323,13 +336,6 @@ pub fn pid_of(f: &fs::File) -> Option<i32> {
 pub fn signal(pid: i32, sig: i32) {
   // SAFETY: a plain syscall on a pid.
   unsafe { kill(pid, sig) };
-}
-
-/// Whether a process of that pid runs: one of another user's can't be signalled (EPERM) but runs.
-pub fn alive(pid: i32) -> bool {
-  // SAFETY: signal 0 only checks the pid.
-  let res = unsafe { kill(pid, 0) };
-  res == 0 || io::Error::last_os_error().raw_os_error() == Some(1)
 }
 
 /// Where macOS's bootpd, which VZ's NAT network uses, writes its leases.
@@ -444,15 +450,6 @@ mod tests {
   }
 
   #[test]
-  fn processes() {
-    assert!(alive(std::process::id() as i32));
-    assert!(alive(1), "launchd, root's");
-    let mut child = std::process::Command::new("true").spawn().unwrap();
-    child.wait().unwrap();
-    assert!(!alive(child.id() as i32));
-  }
-
-  #[test]
   fn lock() {
     let dir = std::env::temp_dir().join(format!("trivm-lock-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
@@ -468,6 +465,8 @@ mod tests {
     assert_eq!(vm.pid(), Some(42));
     write_pid(&lock, 1234567).unwrap();
     assert_eq!(fs::read_to_string(vm.path("pid")).unwrap(), "1234567   ");
+    assert_eq!(&pid_text(0), b"0         ");
+    assert_eq!(&pid_text(u32::MAX), b"4294967295");
     write_pid(&lock, std::process::id()).unwrap();
 
     assert!(vm.lock().is_err());

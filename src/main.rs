@@ -296,17 +296,21 @@ unsafe extern "C" {
 /// A guest with no address yet gets its power button pressed.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
-  // Gone once its process no longer holds the lock. A starting Windows VM's process is trivm's
-  // until QEMU's replaces it, while trivm's still runs; a pid replacing a dead one's is the VM
-  // started again, not this one.
-  let pid = Cell::new(pid);
+  // Gone once its process no longer holds the lock. A starting Windows VM's lock is trivm's until
+  // QEMU, which it starts, takes it on; a pid replacing another is otherwise the VM started
+  // again, not this one.
+  let starting = |x: i32| vm.config.os() == Os::Windows && !qemu::is_qemu(x);
+  let (pid, launcher) = (Cell::new(pid), Cell::new(starting(pid)));
   let gone = |secs: u64| {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
       match vm.pid() {
         None => return true,
         Some(x) if x == pid.get() => {}
-        Some(x) if vm::alive(pid.get()) => pid.set(x),
+        Some(x) if launcher.get() => {
+          pid.set(x);
+          launcher.set(starting(x));
+        }
         Some(_) => return true,
       }
 
@@ -334,9 +338,14 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
       None => None,
     };
 
-    // Windows's SSH may not be up yet either; macOS asks first.
+    // Windows's SSH may not be up yet either; macOS asks first. A VM process busy with a long
+    // request answers late.
     if ip.is_none() || vm.config.os() == Os::Windows {
-      let _ = ask(vm, "stop", "");
+      let _ = match vm.config.os() {
+        Os::Windows => qemu::ask(vm, "stop", ""),
+        _ => vz::ask_within(vm, "stop", "", Duration::from_secs(5)),
+      };
+
       if vm.config.os() == Os::Macos {
         let _ = shut_down(vm);
       }
@@ -373,12 +382,13 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
 /// click while the dialog fades in is lost.
 fn shut_down(vm: &Vm) -> io::Result<()> {
   let shot = env::temp_dir().join(format!("trivm-{}-stop.png", vm.name));
+  let ask = |req: &str, body: &str| vz::ask_within(vm, req, body, Duration::from_secs(5));
   let (t, mut clicked) = (Instant::now(), false);
   while t.elapsed() < Duration::from_secs(30) {
-    vz::ask(vm, "shot", &shot.to_string_lossy())?;
+    ask("shot", &shot.to_string_lossy())?;
     match vision::find_text(&shot, "Shut Down")? {
       Some((x, y)) => {
-        vz::ask(vm, &format!("click {x} {y} left 1"), "")?;
+        ask(&format!("click {x} {y} left 1"), "")?;
         clicked = true;
         thread::sleep(Duration::from_secs(3));
       }

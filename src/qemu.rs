@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{self, Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
@@ -120,13 +120,24 @@ fn free_port() -> io::Result<u16> {
 unsafe extern "C" {
   fn setsid() -> i32;
   fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+  fn pwrite(fd: i32, buf: *const u8, len: usize, off: i64) -> isize;
+  fn ftruncate(fd: i32, len: i64) -> i32;
+  fn proc_name(pid: i32, buf: *mut u8, size: u32) -> i32;
+}
+
+/// Whether the process of that pid is QEMU, not the trivm that starts it.
+pub fn is_qemu(pid: i32) -> bool {
+  let mut b = [0u8; 64];
+  // SAFETY: a buffer of the size given.
+  let n = unsafe { proc_name(pid, b.as_mut_ptr(), b.len() as u32) };
+  n > 0 && b[..n as usize].starts_with(b"qemu")
 }
 
 const F_SETFD: i32 = 2;
 
 /// Starts `swtpm`, then QEMU as the VM's process in a session of its own, the CDs attached;
 /// waits until it runs. QEMU inherits the locked `pid` file, so the VM runs exactly while QEMU
-/// does.
+/// does, and writes its pid in it before it runs: the file never names a trivm that's gone.
 pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
@@ -162,17 +173,20 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
   let mut cmd = Command::new(&bin);
   cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
-  // SAFETY: setsid and fcntl are async-signal-safe; the lock's fd stays open in QEMU.
+  // SAFETY: setsid, fcntl, getpid, pwrite and ftruncate are async-signal-safe, `pid_text`
+  // allocates nothing; the lock's fd stays open in QEMU.
   unsafe {
-    cmd.pre_exec(move || match setsid() < 0 || fcntl(fd, F_SETFD, 0) < 0 {
-      true => Err(io::Error::last_os_error()),
-      false => Ok(()),
+    cmd.pre_exec(move || {
+      let pid = vm::pid_text(process::id());
+      let failed = setsid() < 0
+        || fcntl(fd, F_SETFD, 0) < 0
+        || pwrite(fd, pid.as_ptr(), pid.len(), 0) != pid.len() as isize
+        || ftruncate(fd, pid.len() as i64) < 0;
+      if failed { Err(io::Error::last_os_error()) } else { Ok(()) }
     })
   };
 
   let mut child = cmd.spawn().inspect_err(|_| tpm_kill(vm))?;
-
-  vm::write_pid(&lock, child.id())?;
   drop(lock);
   let _ = Command::new("caffeinate").args(["-i", "-w", &child.id().to_string()]).spawn();
 
@@ -539,6 +553,22 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
 mod tests {
   use super::*;
   use crate::vm::Config;
+
+  #[test]
+  fn qemu_told() {
+    let dir = env::temp_dir().join(format!("trivm-qemu-{}", process::id()));
+    fs::create_dir_all(&dir).unwrap();
+    let exe = dir.join("qemu-system-aarch64");
+    fs::copy("/bin/sleep", &exe).unwrap();
+    let mut child = Command::new(&exe).arg("10").spawn().unwrap();
+    let told = is_qemu(child.id() as i32);
+    let _ = child.kill();
+    let _ = child.wait();
+    fs::remove_dir_all(&dir).unwrap();
+    assert!(told);
+    assert!(!is_qemu(process::id() as i32));
+    assert!(!is_qemu(-1));
+  }
 
   #[test]
   fn command_line() {
