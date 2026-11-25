@@ -76,8 +76,17 @@ trivm grant macos-27 /usr/local/bin/tool screen input
 ```
 
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
-shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
-(`TRIVM_HOME`), downloads in `~/.trivm/cache`.
+shot. The guest's user is `user`, password `1234`, sudo without a password.
+
+## Files
+
+trivm keeps its files as Linux tools do, by the XDG Base Directory spec, each folder moved by its
+variable:
+
+- `~/.config/trivm` (`XDG_CONFIG_HOME`): each VM's settings, `<vm>.conf`.
+- `~/.local/share/trivm` (`XDG_DATA_HOME`): each VM's disks and machine, trivm's SSH key.
+- `~/.cache/trivm` (`XDG_CACHE_HOME`): downloads and the disks made from them.
+- `~/.local/state/trivm` (`XDG_STATE_HOME`): each VM's log, lock and socket.
 
 ## License
 

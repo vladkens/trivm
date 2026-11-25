@@ -43,6 +43,8 @@ Each fact has one source, which this file points to: what trivm does is `readme.
 - Unit-test what breaks silently: QEMU's command line, the unattended-install files, a VM's
   configuration. The proof of a change to how a system is installed or driven is that system on
   this Mac: installed, started, a command run in it, a screenshot taken.
+- A scratch run of trivm, beside this Mac's VMs, sets `XDG_CONFIG_HOME`, `XDG_DATA_HOME` and
+  `XDG_STATE_HOME` to folders of its own and keeps `XDG_CACHE_HOME`, sharing its downloads.
 
 ## Workflow
 

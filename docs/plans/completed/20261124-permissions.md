@@ -67,3 +67,9 @@ the names of trivm's own files (`id_ed25519.pub`, `entitlements.plist`, ...) are
 names, in any case (APFS ignores it: `CACHE` was the cache). Folders made before keep their mode. Not changed: the reaper's stop of a clone another
 process replaced between its inode check and its kill request, a few milliseconds where a
 replacement takes seconds to make and start.
+
+Merged onto #2's final code, the XDG folders: the folders' mode, the reserved names and `stop`'s 2
+minutes are #1's versions now (each folder made 0700; the reserved names are the SSH key's files
+beside the VMs in data, where `cache` and `entitlements.plist` no longer are), and a clone has no
+staging folder, its name claimed by its data folder. `stop`'s kill awaited 5 s at most and its VM
+gone once its own process is stay, as do `sip` and `grant`.

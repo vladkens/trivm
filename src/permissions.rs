@@ -24,7 +24,7 @@ fn macos(name: &str) -> io::Result<Vm> {
     return Err(bad(format!("{name} runs Linux: SIP and TCC grants are macOS's")));
   }
 
-  if vm.config.setup {
+  if vm.setup {
     return Err(bad(format!("{name} isn't set up yet; trivm start {name} finishes it")));
   }
 
