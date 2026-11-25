@@ -158,9 +158,18 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     .status()
 }
 
+/// A path in an `scp://` URL is percent-decoded: each byte but the unreserved ones, `/`, `:` and
+/// `@` is encoded.
 fn url(ip: &str, port: Option<u16>, path: &str) -> String {
+  let encode = |x: &u8| match x.is_ascii_alphanumeric() || b"-._~/:@".contains(x) {
+    true => (*x as char).to_string(),
+    false => format!("%{x:02X}"),
+  };
   match port {
-    Some(port) => format!("scp://{}@{ip}:{port}/{path}", vm::USER),
+    Some(port) => {
+      let path: String = path.as_bytes().iter().map(encode).collect();
+      format!("scp://{}@{ip}:{port}/{path}", vm::USER)
+    }
     None => format!("{}@{ip}:{path}", vm::USER),
   }
 }
@@ -250,5 +259,7 @@ mod tests {
     assert_eq!(url("192.168.64.2", None, "/tmp/"), "user@192.168.64.2:/tmp/");
     assert_eq!(url("127.0.0.1", Some(50022), "C:/x"), "scp://user@127.0.0.1:50022/C:/x");
     assert_eq!(url("127.0.0.1", Some(50022), ""), "scp://user@127.0.0.1:50022/");
+    let x = url("127.0.0.1", Some(50022), "a%b c/é");
+    assert_eq!(x, "scp://user@127.0.0.1:50022/a%25b%20c/%C3%A9");
   }
 }
