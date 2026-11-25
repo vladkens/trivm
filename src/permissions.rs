@@ -1,7 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
-//! Permissions for the app under test in a macOS guest: SIP turned off (or on) from recoveryOS,
-//! whose screens trivm reads with Vision's text recognition and drives from the host, and the TCC
-//! grants written for an app into the guest's databases, which root may do with SIP off.
+//! `os grant` and `os sip`, permissions for the app under test in a macOS guest: the TCC grants
+//! written for an app into the guest's databases, which root may do with SIP off, and SIP turned
+//! off (or on) from recoveryOS, whose screens trivm reads with Vision's text recognition and drives
+//! from the host.
 
 use std::ffi::{CStr, c_char, c_void};
 use std::io::{self, Read};
@@ -17,11 +18,11 @@ use objc2_foundation::{NSArray, NSDictionary, NSError, NSRange, NSRect, NSString
 use crate::vm::{Os, PASSWORD, Vm};
 use crate::{bad, ssh, vz};
 
-/// A macOS VM that is set up: SIP and TCC are macOS's.
-fn macos(name: &str) -> io::Result<Vm> {
+/// A macOS VM that is set up, for the `os` command `cmd`: SIP and TCC are macOS's.
+fn macos(name: &str, cmd: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
   if vm.config.os() != Os::Macos {
-    return Err(bad(format!("{name} runs Linux: SIP and TCC grants are macOS's")));
+    return Err(bad(format!("os {cmd}: not supported on {}", vm.config.system)));
   }
 
   if vm.setup {
@@ -53,37 +54,44 @@ fn sip_on(vm: &Vm) -> io::Result<bool> {
 
 // MARK: SIP
 
-/// `sip <vm> on|off`: SIP as asked, from recoveryOS's Terminal, then the VM up again and its
-/// state checked. A VM that is stopped is started first, to see if there's anything to do.
+/// `os sip <vm> on|off`: SIP as asked. A VM that is stopped is started first, to see if there's
+/// anything to do; it is up after.
 pub fn sip(name: &str, on: bool) -> io::Result<()> {
-  let vm = macos(name)?;
-  let word = if on { "on" } else { "off" };
+  let vm = macos(name, "sip")?;
+  let word = word(on);
   if vm.pid().is_none() {
     crate::start(name)?;
   }
 
-  if sip_on(&vm)? == on {
-    eprintln!("SIP is {word} in {name}");
-    return Ok(());
-  }
-
-  eprintln!("turning SIP {word} in {name} from recoveryOS (about a minute)");
-  crate::stop(&vm, false)?;
-  crate::spawn(&vm, true)?;
-  let shot = env::temp_dir().join(format!("trivm-{name}-recovery.png"));
-  if let Err(e) = recovery(&vm, on, &shot) {
-    let _ = crate::stop(&vm, true);
-    return Err(bad(format!("recoveryOS: {e}; its screen: {}", shot.display())));
-  }
-
-  let _ = fs::remove_file(&shot);
-  crate::start(name)?;
   if sip_on(&vm)? != on {
-    return Err(bad(format!("SIP isn't {word} in {name} after recoveryOS")));
+    eprintln!("turning SIP {word} in {name} from recoveryOS (about a minute)");
+    turn(&vm, on)?;
   }
 
   eprintln!("SIP is {word} in {name}");
   Ok(())
+}
+
+fn word(on: bool) -> &'static str {
+  if on { "on" } else { "off" }
+}
+
+/// SIP turned on or off from recoveryOS's Terminal, then the VM up again and its state checked.
+fn turn(vm: &Vm, on: bool) -> io::Result<()> {
+  crate::stop(vm, false)?;
+  crate::spawn(vm, true)?;
+  let shot = env::temp_dir().join(format!("trivm-{}-recovery.png", vm.name));
+  if let Err(e) = recovery(vm, on, &shot) {
+    let _ = crate::stop(vm, true);
+    return Err(bad(format!("recoveryOS: {e}; its screen: {}", shot.display())));
+  }
+
+  let _ = fs::remove_file(&shot);
+  crate::start(&vm.name)?;
+  match sip_on(vm)? == on {
+    true => Ok(()),
+    false => Err(bad(format!("SIP isn't {} in {} after recoveryOS", word(on), vm.name))),
+  }
 }
 
 /// Drives recoveryOS of macOS 27 from its startup options to `csrutil` in its Terminal, which
@@ -149,7 +157,7 @@ unsafe extern "C" {
 }
 
 /// Where `want` shows in a PNG, by Vision's text recognition: the middle of it, in the PNG's
-/// pixels. Vision is loaded at the first use: only `sip` reads text.
+/// pixels. Vision is loaded at the first use: only recoveryOS's steps read text.
 pub fn find_text(png: &Path, want: &str) -> io::Result<Option<(f64, f64)>> {
   let lib = c"/System/Library/Frameworks/Vision.framework/Vision";
   // SAFETY: a system framework, whose initializers are Apple's; RTLD_LAZY.
@@ -222,8 +230,8 @@ fn png_size(png: &Path) -> io::Result<(f64, f64)> {
 
 // MARK: TCC grants
 
-/// A service `grant` takes: its name, TCC's services for it, and whether the user's database keeps
-/// them, not the system's.
+/// A service `os grant` takes: its name, TCC's services for it, and whether the user's database
+/// keeps them, not the system's.
 struct Service {
   name: &'static str,
   tcc: &'static [&'static str],
@@ -242,10 +250,9 @@ const SERVICES: &[Service] = &[
   Service { name: "microphone", tcc: &["kTCCServiceMicrophone"], user: true },
 ];
 
-/// Prints SIP's state, then the app's TCC client: a bundle by its identifier (type 0), which is
-/// what tccd looks a bundle's executable up by, anything else by its path (type 1).
+/// Prints the app's TCC client: a bundle by its identifier (type 0), which is what tccd looks a
+/// bundle's executable up by, anything else by its path (type 1).
 const APP: &str = r#"set -e
-csrutil status
 if [ -f "$1/Contents/Info.plist" ]; then
   echo 0
   /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Contents/Info.plist"
@@ -278,29 +285,31 @@ fi
 sudo -n killall -9 tccd
 "#;
 
-/// `grant <vm> <app> [<service>...]`: the services, all by default, allowed for the app at a
-/// path in the running guest, which needs SIP off.
+/// `os grant <vm> <app> [<service>...]`: the services, all by default, allowed for the app at a
+/// path in the guest. A VM that is stopped is started first and is up after; SIP, which keeps
+/// TCC's databases from root, is turned off first if it's on, once the app is found.
 pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
-  let vm = macos(name)?;
+  let vm = macos(name, "grant")?;
   let services = services(names)?;
   if !app.starts_with('/') {
     return Err(bad(format!("{app}: the app's path in the guest, from /")));
   }
 
   if vm.pid().is_none() {
-    return Err(bad(format!("{name} isn't running; trivm start {name}")));
+    crate::start(name)?;
   }
 
+  // Asked first: it waits out a guest just booted that drops the SSH session.
+  let sip = sip_on(&vm)?;
   let out = ssh::output(&vm, &format!("sh -c {} app {}", ssh::quote(APP), ssh::quote(app)))?;
   let lines: Vec<&str> = out.lines().collect();
-  let [status, kind, client] = lines[..] else {
+  let [kind, client] = lines[..] else {
     return Err(bad(format!("{app} in {name}: {out}")));
   };
 
-  if !status.contains("status: disabled") {
-    return Err(bad(format!(
-      "SIP is on in {name}, which keeps TCC's databases from root; trivm sip {name} off"
-    )));
+  if sip {
+    eprintln!("SIP is on in {name}: turning it off from recoveryOS first (about a minute)");
+    turn(&vm, false)?;
   }
 
   let kind: u8 = kind.parse().map_err(|_| bad(format!("{app} in {name}: {out}")))?;

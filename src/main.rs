@@ -2,7 +2,7 @@
 //! trivm: macOS and Linux VMs on Apple silicon for coding agents to test apps in. A VM runs in a
 //! process of its own (`vz.rs`), commands and files go through SSH (`ssh.rs`), the screen is read
 //! and driven from the host (`display.rs`), `create` installs a system (`system.rs`), `clone`
-//! and `run` copy one (`clone.rs`), and `sip` and `grant` give the app under test its macOS
+//! and `run` copy one (`clone.rs`), and `os grant` and `os sip` give the app under test its macOS
 //! permissions (`permissions.rs`).
 
 mod args;
