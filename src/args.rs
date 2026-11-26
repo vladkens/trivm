@@ -25,13 +25,13 @@ Clones of a stopped VM, made in a second with APFS and sharing its disk until wr
                           TRIVM_VM, then delete the clone; exit with the command's code. One
                           argument is a shell line, more are run as they are
 
-macOS permissions for the app under test:
-  sip <vm> on|off         turn System Integrity Protection on or off from recoveryOS, which trivm
-                          drives (about a minute); the VM is up after
-  grant <vm> <app> [<service>...]
+The guest system's own integrations, macOS's so far (not supported on Linux):
+  os grant <vm> <app> [<service>...]
                           allow an app, by its path in the guest, the services, all by default:
-                          accessibility, screen (recording), input (monitoring), microphone.
-                          Needs SIP off; a running app sees them once relaunched
+                          accessibility, screen (recording), input (monitoring), microphone;
+                          turns SIP off first if it's on. A running app sees them once relaunched
+  os sip <vm> on|off      turn System Integrity Protection on or off from recoveryOS, which trivm
+                          drives (about a minute); the VM is up after
 
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
@@ -57,8 +57,11 @@ The desktop's elements, read by agent-desktop, which trivm puts in the guest at 
                           click the element of that name, else the one whose name holds it,
                           its window raised first
 
-The guest's user is `user`, password `1234`, sudo without one. Files live in ~/.trivm
-(TRIVM_HOME).
+The guest's user is `user`, password `1234`, sudo without one.
+Files, by the XDG Base Directory spec: each VM's settings in ~/.config/trivm/<vm>.conf
+(XDG_CONFIG_HOME), its disks in ~/.local/share/trivm (XDG_DATA_HOME), downloads in
+~/.cache/trivm (XDG_CACHE_HOME), logs, locks and sockets in ~/.local/state/trivm
+(XDG_STATE_HOME).
 ";
 
 #[derive(Debug, PartialEq)]
@@ -143,16 +146,18 @@ pub enum Cmd {
     vm: String,
     cmd: Vec<String>,
   },
+  /// `os sip`.
   Sip {
     vm: String,
     on: bool,
   },
+  /// `os grant`.
   Grant {
     vm: String,
     app: String,
     services: Vec<String>,
   },
-  /// The process that runs a VM, started by `start`; macOS's from recoveryOS for `sip`.
+  /// The process that runs a VM, started by `start`; macOS's from recoveryOS for `os sip`.
   Serve {
     vm: String,
     recovery: bool,
@@ -165,6 +170,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
   let mut args = args.into_iter();
   let Some(cmd) = args.next() else { return Ok(Cmd::Help) };
   let rest: Vec<String> = args.collect();
+
+  // `os` holds the guest system's own integrations, each a command of its own: `os grant`.
+  let (cmd, rest) = match rest.split_first() {
+    Some((sub, rest)) if cmd == "os" && !sub.starts_with('-') => {
+      (format!("os {sub}"), rest.to_vec())
+    }
+    _ => (cmd, rest),
+  };
 
   if cmd == "exec" || cmd == "run" {
     let mut rest = rest.into_iter();
@@ -255,20 +268,21 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
       want(2, "<vm> <name>")?;
       Cmd::Clone { vm: pos[0].clone(), name: pos[1].clone() }
     }
-    "sip" => {
+    "os" => return Err(bad("usage: trivm os grant|sip <vm> ...; see trivm help")),
+    "os grant" => match pos.len() {
+      2.. => Cmd::Grant { vm: pos[0].clone(), app: pos[1].clone(), services: pos[2..].to_vec() },
+      _ => return Err(bad("usage: trivm os grant <vm> <app> [<service>...]")),
+    },
+    "os sip" => {
       want(2, "<vm> on|off")?;
       let on = match pos[1].as_str() {
         "on" => true,
         "off" => false,
-        _ => return Err(bad("usage: trivm sip <vm> on|off")),
+        _ => return Err(bad("usage: trivm os sip <vm> on|off")),
       };
 
       Cmd::Sip { vm: pos[0].clone(), on }
     }
-    "grant" => match pos.len() {
-      2.. => Cmd::Grant { vm: pos[0].clone(), app: pos[1].clone(), services: pos[2..].to_vec() },
-      _ => return Err(bad("usage: trivm grant <vm> <app> [<service>...]")),
-    },
     "cp" => {
       want(2, "<src> <dst>")?;
       Cmd::Cp { src: pos[0].clone(), dst: pos[1].clone() }
@@ -378,17 +392,19 @@ mod tests {
     assert_eq!(args("cp a:/x .").unwrap(), Cmd::Cp { src: "a:/x".into(), dst: ".".into() });
     assert_eq!(args("clone a b").unwrap(), Cmd::Clone { vm: "a".into(), name: "b".into() });
 
-    assert_eq!(args("sip a off").unwrap(), Cmd::Sip { vm: "a".into(), on: false });
-    assert_eq!(args("sip a on").unwrap(), Cmd::Sip { vm: "a".into(), on: true });
+    assert_eq!(args("os sip a off").unwrap(), Cmd::Sip { vm: "a".into(), on: false });
+    assert_eq!(args("os sip a on").unwrap(), Cmd::Sip { vm: "a".into(), on: true });
     assert_eq!(
-      args("grant a /x").unwrap(),
+      args("os grant a /x").unwrap(),
       Cmd::Grant { vm: "a".into(), app: "/x".into(), services: vec![] }
     );
     let services = vec!["screen".into(), "input".into()];
     assert_eq!(
-      args("grant a /x screen input").unwrap(),
+      args("os grant a /x screen input").unwrap(),
       Cmd::Grant { vm: "a".into(), app: "/x".into(), services }
     );
+    assert_eq!(args("os --help").unwrap(), Cmd::Help);
+    assert_eq!(args("os grant --help").unwrap(), Cmd::Help);
     assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into(), recovery: false });
     assert_eq!(args("_run a --recovery").unwrap(), Cmd::Serve { vm: "a".into(), recovery: true });
     assert_eq!(args("type a --x").unwrap(), Cmd::Type { vm: "a".into(), text: "--x".into() });
@@ -423,9 +439,6 @@ mod tests {
     assert!(args("start").is_err());
     assert!(args("start a b").is_err());
     assert!(args("clone a").is_err());
-    assert!(args("sip a").is_err());
-    assert!(args("sip a no").is_err());
-    assert!(args("grant a").is_err());
     assert!(args("create x --cpus many").is_err());
     assert!(args("click a -1 2").is_err());
 
@@ -435,5 +448,19 @@ mod tests {
     assert!(args("ui a --app").is_err());
     assert!(args("start a --what").is_err());
     assert!(args("frobnicate").is_err());
+  }
+
+  #[test]
+  fn os() {
+    assert!(args("os sip a").is_err());
+    assert!(args("os sip a no").is_err());
+    assert!(args("os grant a").is_err());
+    assert_eq!(args("os sip a").unwrap_err().to_string(), "usage: trivm os sip <vm> on|off");
+    assert!(args("os").is_err());
+    assert!(args("os what a").is_err());
+
+    // No longer commands of their own.
+    assert!(args("sip a off").is_err());
+    assert!(args("grant a /x").is_err());
   }
 }

@@ -3,7 +3,7 @@
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
@@ -13,24 +13,30 @@ use crate::{bad, run};
 /// Set when trivm runs as `ssh`'s askpass program: it prints the guest's password.
 pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
-/// trivm's key, made on first use; `ssh-keygen` writes the public half last.
+/// trivm's key, made on first use beside its place, then moved there, the public half last: a
+/// public half there is whole.
 pub fn key() -> io::Result<PathBuf> {
-  let path = vm::home().join("id_ed25519");
+  let path = vm::data_dir().join("id_ed25519");
   if path.with_extension("pub").exists() {
     return Ok(path);
   }
 
   // Two first uses at once make one key.
-  fs::create_dir_all(vm::home())?;
+  vm::made(&vm::data_dir())?;
   let lock = fs::File::create(path.with_extension("lock"))?;
   lock.lock()?;
   if !path.with_extension("pub").exists() {
-    let _ = fs::remove_file(&path);
+    let new = path.with_extension(format!("new{}", process::id()));
+    let public = |x: &Path| PathBuf::from(format!("{}.pub", x.display()));
+    let _ = fs::remove_file(&new);
+    let _ = fs::remove_file(public(&new));
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
-        .arg(&path),
+        .arg(&new),
     )?;
+    fs::rename(&new, &path)?;
+    fs::rename(public(&new), public(&path))?;
   }
 
   Ok(path)
@@ -124,7 +130,7 @@ pub fn wait(vm: &Vm, timeout: Duration) -> io::Result<()> {
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if vm.ip().is_some() {
@@ -150,7 +156,7 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if let Some(ip) = vm.ip() {

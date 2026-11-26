@@ -62,17 +62,17 @@ trivm run ubuntu-24.04 'trivm exec "$TRIVM_VM" -- uname -a'
 trivm clone macos-27 macos-27-clean   # a clone to keep, with its own address
 ```
 
-An app that needs macOS's permissions gets them with no one clicking Allow: trivm turns System
-Integrity Protection off from recoveryOS, which it drives itself (about a minute, once per VM),
-then writes the grants for the app, by its path in the guest, into macOS's TCC databases.
+An app that needs macOS's permissions gets them with no one clicking Allow: `os grant` writes the
+grants for the app, by its path in the guest, into macOS's TCC databases, first turning System
+Integrity Protection off from recoveryOS, which trivm drives itself (about a minute, once per VM).
 Accessibility, Screen Recording, Input Monitoring and the microphone, or the ones named; an app
-that runs sees them once relaunched. A VM's clones have its grants:
+that runs sees them once relaunched. A VM's clones have its grants. `os` holds the guest system's
+own integrations; on a system without one, it says it's not supported there:
 
 ```sh
-trivm sip macos-27 off
-trivm exec macos-27 -- csrutil status   # disabled
-trivm grant macos-27 /Applications/Wavo.app
-trivm grant macos-27 /usr/local/bin/tool screen input
+trivm os grant macos-27 /Applications/Wavo.app
+trivm os grant macos-27 /usr/local/bin/tool screen input
+trivm os sip macos-27 on                # SIP back on, if a test needs it
 ```
 
 An agent can read the screen as named elements and click them by name: `ui` lists the windows on
@@ -95,8 +95,17 @@ trivm click macos-27 --name Models   # raises Wavo's window first if another is 
 ```
 
 `create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
-shot. The guest's user is `user`, password `1234`, sudo without a password. VMs live in `~/.trivm`
-(`TRIVM_HOME`), downloads in `~/.trivm/cache`.
+shot. The guest's user is `user`, password `1234`, sudo without a password.
+
+## Files
+
+trivm keeps its files as Linux tools do, by the XDG Base Directory spec, each folder moved by its
+variable:
+
+- `~/.config/trivm` (`XDG_CONFIG_HOME`): each VM's settings, `<vm>.conf`.
+- `~/.local/share/trivm` (`XDG_DATA_HOME`): each VM's disks and machine, trivm's SSH key.
+- `~/.cache/trivm` (`XDG_CACHE_HOME`): downloads and the disks made from them.
+- `~/.local/state/trivm` (`XDG_STATE_HOME`): each VM's log, lock and socket.
 
 ## License
 

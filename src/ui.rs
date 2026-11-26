@@ -398,7 +398,7 @@ fn install(vm: &Vm) -> io::Result<()> {
   Ok(())
 }
 
-/// Accessibility for agent-desktop by its path, as `grant` gives it, which needs SIP off. The
+/// Accessibility for agent-desktop by its path, as `os grant` gives it, with SIP off. The
 /// grant has no code requirement, so another version keeps it.
 fn grant(vm: &Vm) -> io::Result<()> {
   let services = permissions::services(&["accessibility".into()])?;
