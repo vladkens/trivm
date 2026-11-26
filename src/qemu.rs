@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -154,33 +154,34 @@ pub fn started(vm: &Vm) -> bool {
   true
 }
 
-/// Ends a start stuck before QEMU runs: its trivm, then QEMU if forked meanwhile, then swtpm.
+/// Ends a start stuck before QEMU runs: its trivm, stopped first so it makes no more processes,
+/// then those it made (swtpm, QEMU forked or running) and trivm.
 pub fn cancel(vm: &Vm) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
-  // Read while the start holds the lock: no other start's.
-  let tpm = tpm_pid(vm);
-  let until = |done: &dyn Fn() -> bool| {
-    let t = Instant::now();
-    while !done() {
-      if t.elapsed() > Duration::from_secs(5) {
-        return Err(bad(format!("{} didn't stop; its process is {pid}", vm.name)));
-      }
-
-      thread::sleep(Duration::from_millis(100));
-    }
-
-    Ok(())
-  };
-
-  crate::vm::signal(pid, 9);
-  until(&|| vm.pid() != Some(pid))?;
-  // QEMU, forked before trivm ended, holds the lock with its own pid, written before it runs.
-  if let Some(x) = vm.pid().filter(|&x| runs(x, QEMU)) {
-    crate::vm::signal(x, 9);
-    until(&|| vm.pid() != Some(x))?;
+  // Started meanwhile: stopped as a running VM.
+  if runs(pid, QEMU) {
+    return Ok(());
   }
 
-  tpm_kill(tpm);
+  crate::vm::signal(pid, 17);
+  let out = Command::new("pgrep").args(["-P", &pid.to_string()]).output()?;
+  let out = String::from_utf8_lossy(&out.stdout);
+  let mut pids: Vec<i32> = out.lines().filter_map(|x| x.trim().parse().ok()).collect();
+  pids.push(pid);
+  for &x in &pids {
+    crate::vm::signal(x, 9);
+  }
+
+  // Gone once none of them holds the lock: a start after isn't this one.
+  let t = Instant::now();
+  while vm.pid().is_some_and(|x| pids.contains(&x)) {
+    if t.elapsed() > Duration::from_secs(5) {
+      return Err(bad(format!("{} didn't stop; its process is {pid}", vm.name)));
+    }
+
+    thread::sleep(Duration::from_millis(100));
+  }
+
   Ok(())
 }
 
@@ -204,8 +205,6 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
   let lock = vm.lock()?;
-  // The last swtpm's pid isn't this start's, which `stop --force` ends.
-  let _ = fs::remove_file(vm.state("tpm.pid"));
   let port = match vm.port {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
@@ -224,20 +223,32 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let _ = fs::remove_file(vm.state("tpm.log"));
 
   let path = |x: &str| vm.state(x).to_string_lossy().into_owned();
+  // swtpm's socket, listened on before swtpm runs, so QEMU's connection waits for it.
+  let sock = UnixListener::bind(vm.state("tpm.sock"))?;
+  let sfd = sock.as_raw_fd();
   let mut swtpm = Command::new("swtpm");
-  swtpm.args(["socket", "--tpm2", "--daemon", "--terminate"]);
+  swtpm.args(["socket", "--tpm2"]);
   swtpm.args(["--tpmstate", &format!("dir={}", vm.path("tpm").display())]);
-  swtpm.args(["--ctrl", &format!("type=unixio,path={}", path("tpm.sock"))]);
-  swtpm.args(["--pid", &format!("file={}", path("tpm.pid"))]);
+  // Ends when QEMU's connection does.
+  swtpm.args(["--ctrl", &format!("type=unixio,fd={sfd},terminate")]);
   swtpm.args(["--log", &format!("file={}", path("tpm.log"))]);
-  // swtpm's errors go to its log.
-  if let Err(e) = run(&mut swtpm) {
-    let log = fs::read_to_string(vm.state("tpm.log")).unwrap_or_default();
-    return Err(bad(format!("{} {}", e.to_string().trim_end(), log.trim())));
-  }
+  swtpm.stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?);
+  // SAFETY: setsid and fcntl are async-signal-safe; the socket's fd stays open in swtpm.
+  unsafe {
+    swtpm.pre_exec(move || match setsid() < 0 || fcntl(sfd, F_SETFD, 0) < 0 {
+      true => Err(io::Error::last_os_error()),
+      false => Ok(()),
+    })
+  };
 
-  // Read while the lock is held: a start after this one ends writes its own.
-  let tpm = tpm_pid(vm);
+  // trivm's child, not a daemon, so `stop --force` finds it while the start is stuck.
+  let mut tpm = swtpm.spawn()?;
+  drop(sock);
+  let mut tpm_kill = || {
+    let _ = tpm.kill();
+    let _ = tpm.wait();
+  };
+
   let fd = lock.as_raw_fd();
   let mut cmd = Command::new(&bin);
   cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(out).stderr(log);
@@ -269,7 +280,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let mut child = match cmd.spawn() {
     Ok(x) => x,
     Err(e) => {
-      tpm_kill(tpm);
+      tpm_kill();
       return Err(e);
     }
   };
@@ -280,9 +291,10 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   let t = Instant::now();
   loop {
     if let Some(code) = child.try_wait()? {
-      tpm_kill(tpm);
+      tpm_kill();
       let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
-      let tail: Vec<_> = log.lines().rev().take(5).collect();
+      let tpm = fs::read_to_string(vm.state("tpm.log")).unwrap_or_default();
+      let tail: Vec<_> = log.lines().chain(tpm.lines()).rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{} didn't start ({code}):\n{}", vm.name, tail.join("\n"))));
     }
@@ -296,17 +308,6 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     }
 
     thread::sleep(Duration::from_millis(200));
-  }
-}
-
-fn tpm_pid(vm: &Vm) -> Option<i32> {
-  fs::read_to_string(vm.state("tpm.pid")).ok().and_then(|x| x.trim().parse().ok())
-}
-
-/// `swtpm` ends with QEMU's connection; one that QEMU never connected to is ended here.
-fn tpm_kill(pid: Option<i32>) {
-  if let Some(pid) = pid.filter(|&x| runs(x, "swtpm")) {
-    crate::vm::signal(pid, 15);
   }
 }
 
