@@ -6,13 +6,14 @@ use std::io;
 use crate::bad;
 
 pub const HELP: &str = "\
-trivm: macOS and Linux VMs on Apple silicon for coding agents to test apps in.
+trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test apps in.
 
 Usage: trivm <command> [args]
 
 VMs:
   create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]
-                          install a system unattended and start it; systems: macos-27, ubuntu-24.04
+                          install a system unattended and start it; systems: macos-27,
+                          ubuntu-24.04, windows-11 (needs brew install qemu swtpm wimlib)
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
@@ -25,7 +26,7 @@ Clones of a stopped VM, made in a second with APFS and sharing its disk until wr
                           TRIVM_VM, then delete the clone; exit with the command's code. One
                           argument is a shell line, more are run as they are
 
-The guest system's own integrations, macOS's so far (not supported on Linux):
+The guest system's own integrations, macOS's so far (not supported on Linux or Windows):
   os grant <vm> <app> [<service>...]
                           allow an app, by its path in the guest, the services, all by default:
                           accessibility, screen (recording), input (monitoring), microphone;
@@ -35,7 +36,9 @@ The guest system's own integrations, macOS's so far (not supported on Linux):
 
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
-                          are passed as they are
+                          are passed as they are; on Windows PowerShell 5.1, which drops a
+                          program's empty arguments and the double quotes in them, and where
+                          `desktop <program>` starts a program on the desktop
   ssh <vm>                an interactive shell
   cp <src> <dst>          copy files, `<vm>:<path>` on either side, folders too
   ip <vm>                 the guest's address
@@ -48,7 +51,7 @@ The screen, from the host:
   type <vm> <text>        type text (US layout)
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
-The guest's user is `user`, password `1234`, sudo without one.
+The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
 Files, by the XDG Base Directory spec: each VM's settings in ~/.config/trivm/<vm>.conf
 (XDG_CONFIG_HOME), its disks in ~/.local/share/trivm (XDG_DATA_HOME), downloads in
 ~/.cache/trivm (XDG_CACHE_HOME), logs, locks and sockets in ~/.local/state/trivm
@@ -320,9 +323,10 @@ mod tests {
         name: Some("m".into()),
         cpus: None,
         memory: None,
-        disk: Some(80)
+        disk: Some(80),
       }
     );
+    assert!(args("create windows-11 --iso /x/w.iso").is_err());
     assert_eq!(
       args("click a 10 20.5 --double").unwrap(),
       Cmd::Click { vm: "a".into(), x: 10.0, y: 20.5, right: false, double: true }

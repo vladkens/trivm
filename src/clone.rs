@@ -12,7 +12,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 use std::{env, fs, thread};
 
-use crate::vm::{self, Config, Vm};
+use crate::vm::{self, Config, Os, Vm};
 use crate::{bad, vz};
 
 /// A clone of a stopped VM that is set up, with the MAC address given and a new machine
@@ -44,7 +44,7 @@ pub fn clone(
 }
 
 /// The VM's data into `vm`'s folder but its `mac`, which the clone has its own of, then a new
-/// machine identifier.
+/// machine identifier, which a VM on QEMU hasn't.
 fn copy(src: &Path, vm: &Vm) -> io::Result<()> {
   for x in fs::read_dir(src)? {
     let x = x?;
@@ -56,7 +56,10 @@ fn copy(src: &Path, vm: &Vm) -> io::Result<()> {
     clone_file(&x.path(), &vm.dir.join(&name))?;
   }
 
-  fs::write(vm.path("machine.bin"), vz::machine_id(vm.config.os()))
+  match vm.config.os() {
+    Os::Windows => Ok(()),
+    os => fs::write(vm.path("machine.bin"), vz::machine_id(os)),
+  }
 }
 
 unsafe extern "C" {
