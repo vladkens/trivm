@@ -277,11 +277,15 @@ unsafe extern "C" {
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
-  // A starting Windows VM's pid and port are its start's until QEMU runs: read once it does.
+  // A starting Windows VM's pid and port are its start's until QEMU runs: read once it does. One
+  // stuck starting is killed only with --force.
   let started;
   let vm = match vm.config.os() {
     Os::Windows if vm.pid().is_some() => {
-      qemu::started(vm)?;
+      if !qemu::started(vm)? && !force {
+        return Err(bad(format!("{} is still starting; stop it with --force", vm.name)));
+      }
+
       started = Vm::open(&vm.name)?;
       &started
     }
