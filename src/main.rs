@@ -375,11 +375,12 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
 }
 
 /// Answers macOS's question at its power button: Shut Down, clicked again while it shows, as a
-/// click while the dialog fades in is lost.
+/// click while the dialog fades in is lost. Up to 30 reads, not a time: Vision's first read in a
+/// newly installed trivm takes half a minute, while it prepares its model.
 fn shut_down(vm: &Vm) -> io::Result<()> {
   let shot = env::temp_dir().join(format!("trivm-{}-stop.png", vm.name));
-  let (t, mut clicked) = (Instant::now(), false);
-  while t.elapsed() < Duration::from_secs(30) {
+  let mut clicked = false;
+  for _ in 0..30 {
     vz::ask(vm, "shot", &shot.to_string_lossy())?;
     match permissions::find_text(&shot, "Shut Down")? {
       Some((x, y)) => {
