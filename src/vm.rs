@@ -250,15 +250,19 @@ impl Vm {
     }
   }
 
-  /// Saves the machine state: `mac` and the `setup` mark in the data folder, `port` in the state
-  /// folder. A file is written beside its place and renamed there: two `start`s may save at once.
+  /// Saves the machine state: `mac` and the `setup` mark in the data folder. A file is written
+  /// beside its place and renamed there: two `start`s may save at once.
   pub fn save(&self) -> io::Result<()> {
     put(&self.path("mac"), &format!("{}\n", self.mac))?;
     match self.setup {
-      true => fs::write(self.path(SETUP), "")?,
-      false => gone(fs::remove_file(self.path(SETUP)))?,
+      true => fs::write(self.path(SETUP), ""),
+      false => gone(fs::remove_file(self.path(SETUP))),
     }
+  }
 
+  /// Saves `port` in the state folder, only by the start holding the VM: a start that saved one
+  /// earlier may have another by now.
+  pub fn save_port(&self) -> io::Result<()> {
     match self.port {
       Some(x) => put(&self.state("port"), &format!("{x}\n")),
       None => gone(fs::remove_file(self.state("port"))),
@@ -537,6 +541,7 @@ mod tests {
     vm.setup = false;
     vm.port = Some(50022);
     vm.save().unwrap();
+    vm.save_port().unwrap();
     assert_eq!(fs::read_to_string(vm.state("port")).unwrap(), "50022\n");
     let mut read = Vm { mac: String::new(), ..at("a") };
     read.read().unwrap();

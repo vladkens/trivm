@@ -213,7 +213,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
 
   if vm.port != Some(port) {
     vm.port = Some(port);
-    vm.save()?;
+    vm.save_port()?;
   }
 
   write!(lock, "{}", std::process::id())?;
