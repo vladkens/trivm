@@ -26,6 +26,14 @@ Clones of a stopped VM, made in a second with APFS and sharing its disk until wr
                           TRIVM_VM, then delete the clone; exit with the command's code. One
                           argument is a shell line, more are run as they are
 
+The guest system's own integrations, macOS's so far (not supported on Linux or Windows):
+  os grant <vm> <app> [<service>...]
+                          allow an app, by its path in the guest, the services, all by default:
+                          accessibility, screen (recording), input (monitoring), microphone;
+                          turns SIP off first if it's on. A running app sees them once relaunched
+  os sip <vm> on|off      turn System Integrity Protection on or off from recoveryOS, which trivm
+                          drives (about a minute); the VM is up after
+
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
                           are passed as they are; on Windows PowerShell 5.1, which drops a
@@ -121,9 +129,21 @@ pub enum Cmd {
     vm: String,
     cmd: Vec<String>,
   },
-  /// The process that runs a VM, started by `start`.
+  /// `os sip`.
+  Sip {
+    vm: String,
+    on: bool,
+  },
+  /// `os grant`.
+  Grant {
+    vm: String,
+    app: String,
+    services: Vec<String>,
+  },
+  /// The process that runs a VM, started by `start`; macOS's from recoveryOS for `os sip`.
   Serve {
     vm: String,
+    recovery: bool,
   },
   /// The process that deletes a `run`'s clone if `run` ends without doing it.
   Reap,
@@ -133,6 +153,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
   let mut args = args.into_iter();
   let Some(cmd) = args.next() else { return Ok(Cmd::Help) };
   let rest: Vec<String> = args.collect();
+
+  // `os` holds the guest system's own integrations, each a command of its own: `os grant`.
+  let (cmd, rest) = match rest.split_first() {
+    Some((sub, rest)) if cmd == "os" && !sub.starts_with('-') => {
+      (format!("os {sub}"), rest.to_vec())
+    }
+    _ => (cmd, rest),
+  };
 
   if cmd == "exec" || cmd == "run" {
     let mut rest = rest.into_iter();
@@ -163,7 +191,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         let value = it.next().ok_or_else(|| bad(format!("{x}: no value given")))?;
         flags.push((x, Some(value)));
       }
-      "--force" | "--right" | "--double" | "-h" | "--help" => flags.push((x, None)),
+      "--force" | "--right" | "--double" | "--recovery" | "-h" | "--help" => flags.push((x, None)),
       _ if x.starts_with("--") => return Err(bad(format!("unknown flag {x}"))),
       _ => pos.push(x),
     }
@@ -213,7 +241,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         "open" => Cmd::Open { vm },
         "ssh" => Cmd::Ssh { vm },
         "ip" => Cmd::Ip { vm },
-        _ => Cmd::Serve { vm },
+        _ => Cmd::Serve { vm, recovery: flag("--recovery") },
       }
     }
 
@@ -222,6 +250,21 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     "clone" => {
       want(2, "<vm> <name>")?;
       Cmd::Clone { vm: pos[0].clone(), name: pos[1].clone() }
+    }
+    "os" => return Err(bad("usage: trivm os grant|sip <vm> ...; see trivm help")),
+    "os grant" => match pos.len() {
+      2.. => Cmd::Grant { vm: pos[0].clone(), app: pos[1].clone(), services: pos[2..].to_vec() },
+      _ => return Err(bad("usage: trivm os grant <vm> <app> [<service>...]")),
+    },
+    "os sip" => {
+      want(2, "<vm> on|off")?;
+      let on = match pos[1].as_str() {
+        "on" => true,
+        "off" => false,
+        _ => return Err(bad("usage: trivm os sip <vm> on|off")),
+      };
+
+      Cmd::Sip { vm: pos[0].clone(), on }
     }
     "cp" => {
       want(2, "<src> <dst>")?;
@@ -291,7 +334,22 @@ mod tests {
     assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None });
     assert_eq!(args("cp a:/x .").unwrap(), Cmd::Cp { src: "a:/x".into(), dst: ".".into() });
     assert_eq!(args("clone a b").unwrap(), Cmd::Clone { vm: "a".into(), name: "b".into() });
-    assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into() });
+
+    assert_eq!(args("os sip a off").unwrap(), Cmd::Sip { vm: "a".into(), on: false });
+    assert_eq!(args("os sip a on").unwrap(), Cmd::Sip { vm: "a".into(), on: true });
+    assert_eq!(
+      args("os grant a /x").unwrap(),
+      Cmd::Grant { vm: "a".into(), app: "/x".into(), services: vec![] }
+    );
+    let services = vec!["screen".into(), "input".into()];
+    assert_eq!(
+      args("os grant a /x screen input").unwrap(),
+      Cmd::Grant { vm: "a".into(), app: "/x".into(), services }
+    );
+    assert_eq!(args("os --help").unwrap(), Cmd::Help);
+    assert_eq!(args("os grant --help").unwrap(), Cmd::Help);
+    assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into(), recovery: false });
+    assert_eq!(args("_run a --recovery").unwrap(), Cmd::Serve { vm: "a".into(), recovery: true });
     assert_eq!(args("type a --x").unwrap(), Cmd::Type { vm: "a".into(), text: "--x".into() });
     assert_eq!(args("type a --help").unwrap(), Cmd::Type { vm: "a".into(), text: "--help".into() });
   }
@@ -328,5 +386,19 @@ mod tests {
     assert!(args("click a -1 2").is_err());
     assert!(args("start a --what").is_err());
     assert!(args("frobnicate").is_err());
+  }
+
+  #[test]
+  fn os() {
+    assert!(args("os sip a").is_err());
+    assert!(args("os sip a no").is_err());
+    assert!(args("os grant a").is_err());
+    assert_eq!(args("os sip a").unwrap_err().to_string(), "usage: trivm os sip <vm> on|off");
+    assert!(args("os").is_err());
+    assert!(args("os what a").is_err());
+
+    // No longer commands of their own.
+    assert!(args("sip a off").is_err());
+    assert!(args("grant a /x").is_err());
   }
 }

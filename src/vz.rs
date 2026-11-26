@@ -377,8 +377,9 @@ fn provisioning() -> io::Result<Retained<VZMacOSVirtualMachineStartOptions>> {
   }
 }
 
-/// `trivm _run <vm>`: starts the VM and serves `ctl.sock` until the VM stops.
-pub fn serve(vm: Vm) -> io::Result<()> {
+/// `trivm _run <vm>`: starts the VM, macOS's from recoveryOS with `recovery`, and serves
+/// `ctl.sock` until the VM stops.
+pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   let _lock = vm.lock()?;
   let mtm = MainThreadMarker::new().ok_or_else(|| bad("not on the main thread"))?;
   let app = NSApplication::sharedApplication(mtm);
@@ -396,8 +397,14 @@ pub fn serve(vm: Vm) -> io::Result<()> {
   // SAFETY: the VM runs on the main queue, which `app.run()` runs.
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
-  match (vm.config.os(), vm.setup) {
-    (Os::Macos, true) => {
+  match (vm.config.os(), vm.setup, recovery) {
+    (Os::Linux, _, true) => return Err(bad(format!("{} runs Linux: no recoveryOS", vm.name))),
+    (Os::Macos, _, true) => unsafe {
+      let opts = VZMacOSVirtualMachineStartOptions::new();
+      opts.setStartUpFromMacOSRecovery(true);
+      machine.startWithOptions_completionHandler(&opts, &block)
+    },
+    (Os::Macos, true, false) => {
       let opts = provisioning()?;
       unsafe { machine.startWithOptions_completionHandler(&opts, &block) }
     }
@@ -528,6 +535,11 @@ fn handle(req: &str) -> io::Result<String> {
 
 /// Sends a request to the VM's process and returns its answer.
 pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
+  ask_within(vm, req, body, Duration::from_secs(300))
+}
+
+/// [ask], waiting for the answer at most `wait`.
+pub fn ask_within(vm: &Vm, req: &str, body: &str, wait: Duration) -> io::Result<String> {
   let sock = vm.state("ctl.sock");
   let not_running = || bad(format!("{} isn't running; trivm start {}", vm.name, vm.name));
   if vm.pid().is_none() {
@@ -535,7 +547,7 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
   }
 
   let mut s = UnixStream::connect(&sock).map_err(|_| not_running())?;
-  s.set_read_timeout(Some(Duration::from_secs(300)))?;
+  s.set_read_timeout(Some(wait))?;
   s.write_all(format!("{req}\n{body}").as_bytes())?;
   s.shutdown(std::net::Shutdown::Write)?;
 

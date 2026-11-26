@@ -65,6 +65,19 @@ trivm run ubuntu-24.04 'trivm exec "$TRIVM_VM" -- uname -a'
 trivm clone macos-27 macos-27-clean   # a clone to keep, with its own address
 ```
 
+An app that needs macOS's permissions gets them with no one clicking Allow: `os grant` writes the
+grants for the app, by its path in the guest, into macOS's TCC databases, first turning System
+Integrity Protection off from recoveryOS, which trivm drives itself (about a minute, once per VM).
+Accessibility, Screen Recording, Input Monitoring and the microphone, or the ones named; an app
+that runs sees them once relaunched. A VM's clones have its grants. `os` holds the guest system's
+own integrations; on a system without one, it says it's not supported there:
+
+```sh
+trivm os grant macos-27 /Applications/Wavo.app
+trivm os grant macos-27 /usr/local/bin/tool screen input
+trivm os sip macos-27 on                # SIP back on, if a test needs it
+```
+
 ### Windows
 
 ```sh
