@@ -109,6 +109,11 @@ fn recovery(vm: &Vm, on: bool, shot: &Path) -> io::Result<()> {
   screen("Utilities", 300)?;
   vz::ask(vm, "key cmd+shift+t", "")?;
   screen("bash", 60)?;
+  // Its font made bigger, which Vision reads: at its 11 points 15's `[y/n]` read as `[v/nl`.
+  for _ in 0..4 {
+    vz::ask(vm, "key cmd+=", "")?;
+  }
+
   typing(&format!("csrutil {}\n", if on { "enable" } else { "disable" }))?;
   screen("y/n", 60)?;
   typing("y\n")?;
