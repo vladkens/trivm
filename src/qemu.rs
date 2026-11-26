@@ -127,10 +127,23 @@ unsafe extern "C" {
 
 const F_SETFD: i32 = 2;
 
+/// Checks that the VM's folders can be given to swtpm, which splits its options at commas, with
+/// no escape for one in a path.
+pub fn fits(vm: &Vm) -> io::Result<()> {
+  for dir in [&vm.dir, &vm.state_dir] {
+    if dir.to_string_lossy().contains(',') {
+      return Err(bad(format!("{}: swtpm takes no path with a comma", dir.display())));
+    }
+  }
+
+  Ok(())
+}
+
 /// Starts `swtpm`, then QEMU as the VM's process in a session of its own, the CDs attached;
 /// waits until it runs. QEMU inherits the locked `pid` file, so the VM runs exactly while QEMU
 /// does.
 pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
+  fits(vm)?;
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
   let mut lock = vm.lock()?;
@@ -582,6 +595,10 @@ mod tests {
     }
 
     assert!(!args(&vm, Path::new("/q"), &[]).join(" ").contains("usb-storage"));
+
+    // QEMU's paths take a comma doubled; swtpm's none.
+    assert!(fits(&vm).is_err());
+    assert!(fits(&Vm { dir: "/v/a".into(), state_dir: "/s/a".into(), ..vm }).is_ok());
   }
 
   #[test]

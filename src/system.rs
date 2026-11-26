@@ -145,6 +145,7 @@ pub fn create(
   let file = match sys.os {
     Os::Windows => {
       tools()?;
+      qemu::fits(&vm)?;
       windows_media(sys)?
     }
     _ => download(sys.url, sys.sha256)?,
