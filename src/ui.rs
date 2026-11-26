@@ -72,6 +72,9 @@ rm -rf "$d"
 /// `window <id> <x> <y> <width> <height>`, a client's in a window manager's frame, then the frame
 /// around it, GTK's shadow inside it, the window it's for and its title, as `xprop` prints them.
 const STACK: &str = r#"set -e
+for x in xprop xwininfo; do
+  command -v $x >/dev/null || { echo "click --name needs $x in the guest" >&2; exit 1; }
+done
 xprop -root -notype _NET_ACTIVE_WINDOW
 frames=$(for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
   echo "$(xwininfo -id "$id" -tree | awk '/Parent window id/ { print $4 }') $id"
