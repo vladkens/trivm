@@ -29,11 +29,11 @@ pub fn clone(
     return Err(bad(format!("{src} isn't set up yet; trivm start {src} finishes it")));
   }
 
-  // Held while copying, so the VM can't start in the middle.
+  // Held while copying, so the VM can't start in the middle; the clone held until it shows, and
+  // while a failed one goes.
   let _hold = vm.hold()?;
-  // QEMU's port is the clone's own once started.
   let new = Vm { mac, ..Vm::at(name, vm.config.clone()) };
-  new.claim()?;
+  let _made = new.claim()?;
   let res = made(&new.dir).and_then(|_| copy(&vm.dir, &new)).and_then(|_| new.commit());
   if let Err(e) = res {
     let _ = new.remove();
@@ -44,7 +44,7 @@ pub fn clone(
 }
 
 /// The VM's data into `vm`'s folder but its `mac`, which the clone has its own of, then a new
-/// machine identifier.
+/// machine identifier, which a VM on QEMU hasn't.
 fn copy(src: &Path, vm: &Vm) -> io::Result<()> {
   for x in fs::read_dir(src)? {
     let x = x?;
@@ -56,7 +56,6 @@ fn copy(src: &Path, vm: &Vm) -> io::Result<()> {
     clone_file(&x.path(), &vm.dir.join(&name))?;
   }
 
-  // QEMU's Windows has no identifier of trivm's.
   match vm.config.os() {
     Os::Windows => Ok(()),
     os => fs::write(vm.path("machine.bin"), vz::machine_id(os)),
@@ -162,8 +161,8 @@ pub fn reap() -> io::Result<()> {
 /// another.
 fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   let ours = || fs::metadata(&vm.dir).is_ok_and(|x| x.ino() == ino);
-  // Opened before the folder is checked, so it is the clone's even if the name is another VM's
-  // by the time it is read: APFS doesn't reuse inodes, and the state folder goes after the data.
+  // Opened before the folder is checked, so it is the clone's even if the name is another VM's by
+  // the time it is read: a removal takes the data folder first, and APFS doesn't reuse inodes.
   let pid = fs::File::open(vm.state("pid"));
   if !ours() {
     return Ok(());
@@ -174,15 +173,15 @@ fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
     kill(&f);
   }
 
-  // A clone of it being made holds the lock a moment.
-  let mut lock = vm.lock();
+  // A clone of it being made holds it a moment. Taken with no pid, as `delete` takes a VM.
+  let mut lock = vm.take();
   for _ in 0..60 {
     if lock.is_ok() {
       break;
     }
 
     thread::sleep(Duration::from_secs(1));
-    lock = vm.lock();
+    lock = vm.take();
   }
 
   let _lock = lock?;
@@ -198,7 +197,7 @@ fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
 
 /// Kills the process that holds an open `pid` file's lock, and waits until it lets go.
 fn kill(f: &fs::File) {
-  let Some(pid) = vm::pid_of(f).filter(|&x| vm::is_vm(x)) else { return };
+  let Some(pid) = vm::pid_of(f) else { return };
   vm::signal(pid, 9);
   for _ in 0..100 {
     if vm::pid_of(f) != Some(pid) {
@@ -211,6 +210,7 @@ fn kill(f: &fs::File) {
 
 #[cfg(test)]
 mod tests {
+  use std::os::unix::fs::FileExt;
   use std::os::unix::process::ExitStatusExt;
   use std::process;
 
@@ -218,41 +218,67 @@ mod tests {
 
   #[test]
   fn discards() {
-    let dir = env::temp_dir().join(format!("trivm-discard-{}", process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let (conf, state_dir) = (dir.with_extension("conf"), dir.with_extension("state"));
-    fs::write(&conf, "").unwrap();
+    let root = env::temp_dir().join(format!("trivm-discard-{}", process::id()));
     let vm = Vm {
-      conf: conf.clone(),
-      dir: dir.clone(),
-      state_dir: state_dir.clone(),
+      conf: root.join("a.conf"),
+      dir: root.join("data/a"),
+      state_dir: root.join("state/a"),
       ..Vm::at("a", Config::default())
     };
-    let ino = fs::metadata(&dir).unwrap().ino();
+    let make = || {
+      fs::create_dir_all(&vm.dir).unwrap();
+      fs::create_dir_all(&vm.state_dir).unwrap();
+      fs::write(&vm.conf, "").unwrap();
+      fs::metadata(&vm.dir).unwrap().ino()
+    };
 
-    // A process holding the clone's lock, as its VM's does, through its stdin, named as QEMU.
-    let qemu = env::temp_dir().join(format!("trivm-discard-bin-{}/qemu", process::id()));
-    fs::create_dir_all(qemu.parent().unwrap()).unwrap();
-    fs::copy("/bin/sleep", &qemu).unwrap();
+    // Another VM's folder by that name: left alone.
+    let ino = make();
+    discard(&vm, ino + 1).unwrap();
+    assert!(vm.dir.exists() && vm.state_dir.exists() && vm.conf.exists());
+
+    // Held, as by a clone of it being made: waited for.
+    let hold = vm.hold().unwrap();
+    let t = std::time::Instant::now();
+    thread::scope(|s| {
+      s.spawn(|| {
+        thread::sleep(Duration::from_millis(500));
+        drop(hold);
+      });
+      discard(&vm, ino).unwrap();
+    });
+    assert!(t.elapsed() >= Duration::from_millis(500));
+    assert!(!vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists());
+
+    // Its process, holding the lock through its stdin as QEMU does: left alone with another VM's
+    // folder by that name, else killed by its pid.
+    let ino = make();
     let lock = vm.lock().unwrap();
-    let mut child =
-      Command::new(&qemu).arg("30").stdin(Stdio::from(lock.try_clone().unwrap())).spawn().unwrap();
-    vm::write_pid(&lock, child.id()).unwrap();
+    let mut child = Command::new("sleep")
+      .arg("30")
+      .stdin(Stdio::from(lock.try_clone().unwrap()))
+      .spawn()
+      .unwrap();
+    let pid = format!("{:<10}", child.id());
+    lock.write_all_at(pid.as_bytes(), 0).unwrap();
     drop(lock);
 
-    // Another VM's folder by that name: left alone, its process too.
-    discard(&vm, ino + 1).unwrap();
-    assert!(dir.exists());
-    assert!(child.try_wait().unwrap().is_none());
+    // Read again through one handle, as `kill` waits.
+    let f = fs::File::open(vm.state("pid")).unwrap();
+    let id = Some(child.id() as i32);
+    assert_eq!((vm::pid_of(&f), vm::pid_of(&f)), (id, id));
+    drop(f);
 
+    discard(&vm, ino + 1).unwrap();
+    assert!(child.try_wait().unwrap().is_none() && vm.dir.exists());
     discard(&vm, ino).unwrap();
-    assert!(!dir.exists() && !state_dir.exists() && !conf.exists());
     assert_eq!(child.wait().unwrap().signal(), Some(9));
+    assert!(!vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists());
 
     // One whose removal was cut short, its config and state gone: its data goes too.
-    fs::create_dir(&dir).unwrap();
-    discard(&vm, fs::metadata(&dir).unwrap().ino()).unwrap();
-    assert!(!dir.exists() && !state_dir.exists());
-    fs::remove_dir_all(qemu.parent().unwrap()).unwrap();
+    fs::create_dir_all(&vm.dir).unwrap();
+    discard(&vm, fs::metadata(&vm.dir).unwrap().ino()).unwrap();
+    assert!(!vm.dir.exists() && !vm.state_dir.exists());
+    fs::remove_dir_all(&root).unwrap();
   }
 }

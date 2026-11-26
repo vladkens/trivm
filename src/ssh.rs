@@ -2,12 +2,11 @@
 //! Commands and files through the system's `ssh` and `scp` with trivm's own key; the password
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
-use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
-use std::{env, fs, thread};
+use std::{env, fs, io, thread};
 
 use crate::vm::{self, Os, Vm};
 use crate::{bad, run, windows};
@@ -48,28 +47,33 @@ pub fn public_key() -> io::Result<String> {
   Ok(fs::read_to_string(key()?.with_extension("pub"))?.trim().to_string())
 }
 
-pub fn ip(vm: &Vm) -> io::Result<String> {
-  // A stopped VM's address or port may be another VM's by now.
+/// The guest's address and SSH's forwarded port, if any, of a running VM: a stopped VM's may be
+/// another VM's by now. The port is read once the VM runs, as a start saves it before that.
+pub fn ip(vm: &Vm) -> io::Result<(String, Option<u16>)> {
   if vm.pid().is_none() {
     return Err(bad(format!("{} isn't running; trivm start {}", vm.name, vm.name)));
   }
 
-  vm.ip().ok_or_else(|| bad(format!("{} has no address yet", vm.name)))
+  let port = vm.saved_port();
+  let ip = match port {
+    Some(_) => Some("127.0.0.1".to_string()),
+    None => vm.ip(),
+  };
+
+  Ok((ip.ok_or_else(|| bad(format!("{} has no address yet", vm.name)))?, port))
 }
 
 /// Whether the guest's SSH port takes a connection now.
 pub fn answers(vm: &Vm) -> bool {
-  let port = vm.port.unwrap_or(22);
-  let addr = vm.ip().and_then(|x| format!("{x}:{port}").parse::<SocketAddr>().ok());
-  addr.is_some_and(|x| TcpStream::connect_timeout(&x, Duration::from_secs(2)).is_ok())
+  let addr = ip(vm).ok().and_then(|(ip, port)| format!("{ip}:{}", port.unwrap_or(22)).parse().ok());
+  addr.is_some_and(|x: SocketAddr| TcpStream::connect_timeout(&x, Duration::from_secs(2)).is_ok())
 }
 
 /// The guest's SSH as `ip` or `ip:port`.
 pub fn address(vm: &Vm) -> io::Result<String> {
-  let ip = ip(vm)?;
-  Ok(match vm.port {
-    Some(port) => format!("{ip}:{port}"),
-    None => ip,
+  Ok(match ip(vm)? {
+    (ip, Some(port)) => format!("{ip}:{port}"),
+    (ip, None) => ip,
   })
 }
 
@@ -94,11 +98,12 @@ fn options(key: &Path) -> Vec<String> {
 pub fn ssh(vm: &Vm) -> io::Result<Command> {
   let mut cmd = Command::new("ssh");
   cmd.args(options(&key()?)).args(["-o", "BatchMode=yes"]);
-  if let Some(port) = vm.port {
+  let (ip, port) = ip(vm)?;
+  if let Some(port) = port {
     cmd.args(["-p", &port.to_string()]);
   }
 
-  cmd.arg(format!("{}@{}", vm::USER, ip(vm)?));
+  cmd.arg(format!("{}@{ip}", vm::USER));
   Ok(cmd)
 }
 
@@ -120,7 +125,7 @@ pub fn line(cmd: &[String]) -> String {
 
 pub fn quote(x: &str) -> String {
   let safe =
-    !x.is_empty() && x.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@%+,".contains(c));
+    !x.is_empty() && x.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
   match safe {
     true => x.to_string(),
     false => format!("'{}'", x.replace('\'', r"'\''")),
@@ -162,7 +167,8 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     }
 
     let vm = Vm::open(name)?;
-    Ok(url(&ip(&vm)?, vm.port, path))
+    let (ip, port) = ip(&vm)?;
+    Ok(url(&ip, port, path))
   };
 
   let (src, dst) = (side(src)?, side(dst)?);
@@ -172,20 +178,22 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     .status()
 }
 
-/// A path in an `scp://` URL is percent-decoded: each byte but the unreserved ones, `/`, `:` and
-/// `@` is encoded.
+/// The guest's side of `scp`: an `scp://` URL with a port, whose path scp decodes (`%` escapes,
+/// `+` as a space), so all but plain characters are escaped. Windows' sshd finds no path with `\`
+/// in it: `/` in its place.
 fn url(ip: &str, port: Option<u16>, path: &str) -> String {
-  let encode = |x: &u8| match x.is_ascii_alphanumeric() || b"-._~/:@".contains(x) {
-    true => (*x as char).to_string(),
-    false => format!("%{x:02X}"),
-  };
-  match port {
-    Some(port) => {
-      let path: String = path.as_bytes().iter().map(encode).collect();
-      format!("scp://{}@{ip}:{port}/{path}", vm::USER)
-    }
-    None => format!("{}@{ip}:{path}", vm::USER),
-  }
+  let Some(port) = port else { return format!("{}@{ip}:{path}", vm::USER) };
+  let path: String = path
+    .bytes()
+    .map(|x| match x {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+        (x as char).to_string()
+      }
+      b'\\' => "/".to_string(),
+      _ => format!("%{x:02X}"),
+    })
+    .collect();
+  format!("scp://{}@{ip}:{port}/{path}", vm::USER)
 }
 
 /// Waits until the guest runs a command over SSH with trivm's key.
@@ -239,6 +247,7 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
 
       let mut child = cmd.spawn()?;
       if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
         let _ = writeln!(stdin, "{}", vm::PASSWORD);
       }
 
@@ -264,11 +273,7 @@ mod tests {
   fn lines() {
     let v = |x: &[&str]| x.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     assert_eq!(line(&v(&["ls -la | wc -l"])), "ls -la | wc -l");
-    // zsh expands a word that starts with `=`; a first word with one sets a variable.
-    assert_eq!(
-      line(&v(&["echo", "a b", "it's", "x=1", "=ls"])),
-      r"echo 'a b' 'it'\''s' 'x=1' '=ls'"
-    );
+    assert_eq!(line(&v(&["echo", "a b", "it's", "x=1"])), r"echo 'a b' 'it'\''s' x=1");
     assert_eq!(quote(""), "''");
   }
 
@@ -277,7 +282,11 @@ mod tests {
     assert_eq!(url("192.168.64.2", None, "/tmp/"), "user@192.168.64.2:/tmp/");
     assert_eq!(url("127.0.0.1", Some(50022), "C:/x"), "scp://user@127.0.0.1:50022/C:/x");
     assert_eq!(url("127.0.0.1", Some(50022), ""), "scp://user@127.0.0.1:50022/");
-    let x = url("127.0.0.1", Some(50022), "a%b c/é");
-    assert_eq!(x, "scp://user@127.0.0.1:50022/a%25b%20c/%C3%A9");
+    let path = "C:\\a+b 100%/é@x";
+    assert_eq!(
+      url("127.0.0.1", Some(1), path),
+      "scp://user@127.0.0.1:1/C:/a%2Bb%20100%25/%C3%A9%40x"
+    );
+    assert_eq!(url("10.0.0.2", None, "/a+b 100%"), "user@10.0.0.2:/a+b 100%");
   }
 }

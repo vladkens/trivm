@@ -71,8 +71,7 @@ struct Volume {
   root: u64,
   xid: u64,
   uuid: [u8; 16],
-  /// Encrypted, as macOS 13 and 14 leave their Data volume: locked to anyone without its keys,
-  /// which are the guest's.
+  /// Encrypted: its tree is locked to anyone without its keys, which are the guest's.
   encrypted: bool,
 }
 
@@ -371,9 +370,14 @@ impl<'a> Node<'a> {
 
   /// The offsets of entry `i`'s key and value.
   fn entry(&self, i: usize) -> (usize, usize) {
-    let (size, value) = if self.fixed { (4, 2) } else { (8, 4) };
-    let at = self.toc + i * size;
-    (le16(self.b, at) as usize, le16(self.b, at + value) as usize)
+    match self.fixed {
+      true => {
+        (le16(self.b, self.toc + i * 4) as usize, le16(self.b, self.toc + i * 4 + 2) as usize)
+      }
+      false => {
+        (le16(self.b, self.toc + i * 8) as usize, le16(self.b, self.toc + i * 8 + 4) as usize)
+      }
+    }
   }
 
   fn key(&self, off: usize, len: usize) -> io::Result<usize> {
@@ -410,11 +414,6 @@ pub fn uuid(disk: &Path, role: u16) -> io::Result<String> {
   let u = Container::open(disk, false)?.volume(role)?.uuid;
   let hex: String = u.iter().map(|x| format!("{x:02X}")).collect();
   Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
-}
-
-/// Whether the volume with `role` in the disk image is encrypted.
-pub fn encrypted(disk: &Path, role: u16) -> io::Result<bool> {
-  Ok(Container::open(disk, false)?.volume(role)?.encrypted)
 }
 
 /// Sets the owner of `paths`, relative to the volume's root, to root:wheel; each was written by a
@@ -489,7 +488,6 @@ mod tests {
     // Root's already: nothing to do.
     chown_root(&img, 0, &["a b/file.plist"]).unwrap();
     assert_eq!(uuid(&img, 0).unwrap().len(), 36);
-    assert!(!encrypted(&img, 0).unwrap());
     assert!(uuid(&img, DATA).is_err());
 
     let out = run(Command::new("hdiutil").args(["attach", "-nomount"]).arg(&img)).unwrap();

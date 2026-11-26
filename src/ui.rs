@@ -6,6 +6,7 @@
 use std::process::Stdio;
 use std::{fmt, fs, io};
 
+use crate::system::Desktop;
 use crate::vm::{Os, Vm};
 use crate::{bad, permissions, run, ssh, system, vz};
 
@@ -72,6 +73,9 @@ rm -rf "$d"
 /// `window <id> <x> <y> <width> <height>`, a client's in a window manager's frame, then the frame
 /// around it, GTK's shadow inside it, the window it's for and its title, as `xprop` prints them.
 const STACK: &str = r#"set -e
+for x in xprop xwininfo; do
+  command -v $x >/dev/null || { echo "click --name needs $x in the guest" >&2; exit 1; }
+done
 xprop -root -notype _NET_ACTIVE_WINDOW
 frames=$(for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
   echo "$(xwininfo -id "$id" -tree | awk '/Parent window id/ { print $4 }') $id"
@@ -99,7 +103,7 @@ const A11Y: &str = "gsettings set org.gnome.desktop.interface toolkit-accessibil
 
 /// `ui <vm> [--app <name>]`: the visible windows, all apps' or one's, and their elements.
 pub fn ui(name: &str, app: Option<&str>) -> io::Result<()> {
-  let vm = running(name)?;
+  let vm = running(name, "ui")?;
   let nodes = tree(&vm, &windows(&vm)?, app)?;
   if nodes.is_empty() {
     eprintln!("no windows on {name}'s desktop");
@@ -122,38 +126,31 @@ pub fn click(
   right: bool,
   double: bool,
 ) -> io::Result<()> {
-  let vm = running(name)?;
-  let all = windows(&vm)?;
-  let nodes = tree(&vm, &all, app)?;
-  let node = match find(&nodes, text)[..] {
-    [one] => one,
-    [] => return Err(bad(format!("no element named {text:?} in {name}"))),
-    ref found => {
-      let lines: String = found.iter().map(|x| format!("\n  {}", x.line())).collect();
-      let n = found.len();
-      return Err(bad(format!(
-        "{n} elements named {text:?} in {name}; click one by its frame:{lines}"
-      )));
-    }
-  };
+  let vm = running(name, "click --name")?;
+  let (mut nodes, mut at) = element(&vm, text, app, None)?;
 
+  // The menu bar, with no id, is in front of every window.
+  let window = window_of(&nodes, &nodes[at]);
+  let focused = |w: &Node| w.states.iter().any(|x| x == "focused");
+  if !window.id.is_empty() && !focused(window) {
+    // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
+    let id = window.id.clone();
+    let raised = agent_desktop(&vm, &["focus-window", "--window-id", &id]);
+    if let Err(e) = raised
+      && !windows(&vm)?.iter().any(|w| w.id == id && focused(w))
+    {
+      return Err(e);
+    }
+
+    // Read again, that window only: it may lay its elements out anew once it has the focus.
+    (nodes, at) = element(&vm, text, app, Some(&id))?;
+  }
+
+  let (node, window) = (&nodes[at], window_of(&nodes, &nodes[at]));
   // Past the right or the bottom, the display refuses the click: it knows its size now.
   let (x, y) = node.middle();
   if x < 0.0 || y < 0.0 {
     return Err(bad(format!("{} is off the screen", node.line())));
-  }
-
-  // The menu bar, with no id, is in front of every window.
-  let window = window_of(&nodes, node);
-  let focused = |w: &Node| w.states.iter().any(|x| x == "focused");
-  if !window.id.is_empty() && !focused(window) {
-    // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
-    let raised = agent_desktop(&vm, &["focus-window", "--window-id", &window.id]);
-    if let Err(e) = raised
-      && !windows(&vm)?.iter().any(|w| w.id == window.id && focused(w))
-    {
-      return Err(e);
-    }
   }
 
   // agent-desktop lists the focused window first, but X keeps a dialog or an always-on-top window
@@ -188,14 +185,70 @@ pub fn click(
   Ok(())
 }
 
-/// The running macOS or Linux VM: agent-desktop has no Windows build trivm runs yet.
-fn running(name: &str) -> io::Result<Vm> {
-  let vm = Vm::open(name)?;
-  match (vm.config.os(), vm.pid()) {
-    (Os::Windows, _) => Err(bad(format!("{name} runs Windows: ui is macOS's and Linux's for now"))),
-    (_, Some(_)) => Ok(vm),
-    (_, None) => Err(bad(format!("{name} isn't running; trivm start {name}"))),
+/// The windows' elements, all apps' or one's, and where the one named `text` is among them, or
+/// among the elements of the window with the id given: an error when none or more than one is.
+fn element(
+  vm: &Vm,
+  text: &str,
+  app: Option<&str>,
+  window: Option<&str>,
+) -> io::Result<(Vec<Node>, usize)> {
+  let nodes = tree(vm, &windows(vm)?, app)?;
+  let (mut name, mut some) = (vm.name.clone(), &nodes[..]);
+  if let Some(id) = window {
+    some = in_window(&nodes, id).ok_or_else(|| bad(format!("{text:?}: its window left {name}")))?;
+    name = some[0].line();
   }
+
+  let at = match find(some, text)[..] {
+    [one] => nodes.iter().position(|x| std::ptr::eq(x, one)).unwrap_or(0),
+    [] => return Err(bad(format!("no element named {text:?} in {name}"))),
+    ref found => {
+      let lines: Vec<String> = found.iter().map(|x| format!("\n  {}", x.line())).collect();
+      let (n, lines) = (found.len(), lines.concat());
+      return Err(bad(format!(
+        "{n} elements named {text:?} in {name}; click one by its frame:{lines}"
+      )));
+    }
+  };
+
+  Ok((nodes, at))
+}
+
+/// The window with the id and its elements, as `tree` lists them.
+fn in_window<'a>(nodes: &'a [Node], id: &str) -> Option<&'a [Node]> {
+  let start = nodes.iter().position(|x| x.depth == 0 && x.id == id)?;
+  let rest = nodes[start + 1..].iter().position(|x| x.depth == 0);
+  Some(&nodes[start..rest.map_or(nodes.len(), |n| start + 1 + n)])
+}
+
+/// The running VM for `cmd`, refused on a system agent-desktop doesn't work in.
+fn running(name: &str, cmd: &str) -> io::Result<Vm> {
+  let vm = Vm::open(name)?;
+  if !supported(&vm)? {
+    return Err(unsupported(&vm, cmd));
+  }
+
+  match vm.pid() {
+    Some(_) => Ok(vm),
+    None => Err(bad(format!("{name} isn't running; trivm start {name}"))),
+  }
+}
+
+/// Whether trivm puts agent-desktop in the VM's system: not in Windows, though it has a build for
+/// it (UI Automation); nor in Ubuntu 22.04's Plasma: agent-desktop needs 24.04's AT-SPI, and found
+/// no X window to raise for Konsole's.
+fn supported(vm: &Vm) -> io::Result<bool> {
+  Ok(match vm.config.os() {
+    Os::Macos => true,
+    Os::Linux => system::find(&vm.config.system)?.desktop != Desktop::Plasma,
+    Os::Windows => false,
+  })
+}
+
+/// `cmd` refused on a system agent-desktop isn't put in by trivm.
+fn unsupported(vm: &Vm, cmd: &str) -> io::Error {
+  bad(format!("{cmd}: not supported on {}", vm.config.system))
 }
 
 /// The visible windows, front to back, as agent-desktop lists them.
@@ -259,7 +312,7 @@ fn stack(out: &str) -> (String, Vec<Client>) {
       "WM_TRANSIENT_FOR" => c.owner = id(value),
       "_NET_WM_NAME" => {
         let name = value.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or_default();
-        c.window.name = name.replace("\\\"", "\"").replace("\\\\", "\\");
+        c.window.name = unescape(name);
       }
       _ => {}
     }
@@ -268,22 +321,43 @@ fn stack(out: &str) -> (String, Vec<Client>) {
   (active, all)
 }
 
+/// A string as `xprop` prints it, quoted: `\\`, `\"`, `\n`, `\t` and other control characters as
+/// `\` and three octal digits.
+fn unescape(x: &str) -> String {
+  let (mut out, mut chars) = (String::new(), x.chars());
+  while let Some(c) = chars.next() {
+    let next = if c == '\\' { chars.next() } else { None };
+    match next {
+      None => out.push(c),
+      Some('n') => out.push('\n'),
+      Some('t') => out.push('\t'),
+      Some(d @ '0'..='7') => {
+        let digits: String = [Some(d), chars.next(), chars.next()].into_iter().flatten().collect();
+        out.push(u8::from_str_radix(&digits, 8).map_or('\u{fffd}', char::from));
+      }
+      Some(x) => out.push(x),
+    }
+  }
+
+  out
+}
+
 /// The windows, all apps' or one's, each followed by its elements, after the menu bar on macOS,
 /// the frontmost app's: agent-desktop reads their trees in one batch.
 fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
   let wanted = |x: &str| app.is_none_or(|a| x.eq_ignore_ascii_case(a));
   let windows: Vec<&Node> = all.iter().filter(|w| wanted(&w.app)).collect();
 
-  let snapshot = |scope: &str| {
+  let snapshot = |scope: String| {
     format!(
       r#"{{"command":"snapshot","args":{{{scope},"include_bounds":true,"compact":true,"max_depth":{DEPTH}}}}}"#
     )
   };
-  let window = |w: &&Node| snapshot(&format!(r#""window_id":{}"#, json_str(&w.id)));
+  let window = |w: &&Node| snapshot(format!(r#""window_id":{}"#, json_str(&w.id)));
   let mut batch: Vec<String> = windows.iter().map(window).collect();
   let menubar = vm.config.os() == Os::Macos;
   if menubar {
-    batch.push(snapshot(r#""surface":"menubar""#));
+    batch.push(snapshot(r#""surface":"menubar""#.into()));
   }
 
   let mut out = Vec::new();
@@ -337,15 +411,13 @@ fn add(out: &mut Vec<Node>, head: Node, snapshot: &Json) {
 /// agent-desktop's answer to the arguments in the running guest, its `data`. It is installed
 /// first when it isn't there, and on macOS granted Accessibility when it lacks it.
 fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
-  let os = vm.config.os();
-  let script = match os {
-    Os::Macos => format!("{HAS}{ALLOWED}{MACOS_RUN}"),
-    Os::Linux | Os::Windows => format!("{HAS}shift\nexec {BIN} \"$@\"\n"),
-  };
-
-  let rest = match os {
-    Os::Macos => ssh::quote(&plist_strings(args)),
-    Os::Linux | Os::Windows => args.iter().map(|x| ssh::quote(x)).collect::<Vec<_>>().join(" "),
+  let (script, rest) = match vm.config.os() {
+    Os::Macos => (format!("{HAS}{ALLOWED}{MACOS_RUN}"), ssh::quote(&plist_strings(args))),
+    Os::Linux => {
+      let args: Vec<_> = args.iter().map(|x| ssh::quote(x)).collect();
+      (format!("{HAS}shift\nexec {BIN} \"$@\"\n"), args.join(" "))
+    }
+    Os::Windows => return Err(unsupported(vm, "agent-desktop")),
   };
 
   let line = format!("sh -c {} ui {VERSION} {rest}", ssh::quote(&script));
@@ -383,24 +455,20 @@ fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
 
 /// Puts agent-desktop in the guest from trivm's cache; on Linux switches accessibility on.
 fn install(vm: &Vm) -> io::Result<()> {
-  let os = vm.config.os();
-  let (url, sha256) = match os {
-    Os::Macos => MACOS,
-    Os::Linux | Os::Windows => LINUX,
+  let ((url, sha256), script) = match vm.config.os() {
+    Os::Macos => (MACOS, INSTALL.to_string()),
+    Os::Linux => (LINUX, format!("{INSTALL}{A11Y}")),
+    Os::Windows => return Err(unsupported(vm, "agent-desktop")),
   };
 
   let archive = system::download(url, sha256)?;
   eprintln!("installing agent-desktop {VERSION} in {}", vm.name);
-  let script = match os {
-    Os::Macos => INSTALL.to_string(),
-    Os::Linux | Os::Windows => format!("{INSTALL}{A11Y}"),
-  };
 
   run(ssh::ssh(vm)?.arg("--").arg(script).stdin(fs::File::open(&archive)?))?;
   Ok(())
 }
 
-/// Accessibility for agent-desktop by its path, as `grant` gives it, which needs SIP off. The
+/// Accessibility for agent-desktop by its path, as `os grant` gives it, with SIP off. The
 /// grant has no code requirement, so another version keeps it.
 fn grant(vm: &Vm) -> io::Result<()> {
   let services = permissions::services(&["accessibility".into()])?;
@@ -534,33 +602,34 @@ fn frame(bounds: &Json) -> Option<[f64; 4]> {
   (frame[2] > 0.0 && frame[3] > 0.0).then_some(frame)
 }
 
-/// The elements whose name is `text`, else those whose name holds it, ignoring case; windows
-/// are not elements to click.
+/// The elements whose name is `text`, else is it ignoring case, else holds it ignoring case;
+/// windows are not elements to click.
 fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
-  let found = outermost(nodes, |x| x.name == text);
-  if !found.is_empty() {
-    return found;
-  }
-
   let low = text.to_lowercase();
-  outermost(nodes, |x| x.name.to_lowercase().contains(&low))
+  let tiers: [&dyn Fn(&Node) -> bool; 3] =
+    [&|x| x.name == text, &|x| x.name.to_lowercase() == low, &|x| {
+      x.name.to_lowercase().contains(&low)
+    }];
+  tiers.iter().map(|f| outermost(nodes, f)).find(|x| !x.is_empty()).unwrap_or_default()
 }
 
-/// The elements that match and aren't inside one that does: GTK 4 gives a cell, a cell in it and
-/// its label one name, one element to click.
-fn outermost(nodes: &[Node], hit: impl Fn(&Node) -> bool) -> Vec<&Node> {
-  let mut out = Vec::new();
-  // The depth of the match the elements now are in.
-  let mut inside = None;
-  for x in nodes {
-    if inside.is_some_and(|depth| x.depth <= depth) {
-      inside = None;
+/// The elements that match, a match counted once with the matches inside it when they all have its
+/// name: GTK 4 names a file's cell or row, a cell in it, its icon and its label alike, one element
+/// to click. Else each is counted, it too.
+fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node> {
+  let (mut out, mut i) = (Vec::new(), 0);
+  while i < nodes.len() {
+    let x = &nodes[i];
+    if x.depth == 0 || !hit(x) {
+      i += 1;
+      continue;
     }
 
-    if x.depth > 0 && inside.is_none() && hit(x) {
-      out.push(x);
-      inside = Some(x.depth);
-    }
+    out.push(x);
+    let inside = &nodes[i + 1..];
+    let last = i + 1 + inside.iter().position(|y| y.depth <= x.depth).unwrap_or(inside.len());
+    let same = nodes[i + 1..last].iter().filter(|y| hit(y)).all(|y| y.name == x.name);
+    i = if same { last } else { i + 1 };
   }
 
   out
@@ -891,7 +960,17 @@ mod tests {
     assert!(names("Hidden").is_empty());
     assert_eq!(names("e").len(), 4);
 
-    // GTK 4's cell, its twin and its label in Files are one; the next is another.
+    // The whole name ignoring case before a part of another's.
+    let button = |name: &str| Node { depth: 1, name: name.into(), ..Node::default() };
+    let saves = [button("Save as"), button("Save"), button("SAVE")];
+    let found = |x: &str| -> Vec<&str> { find(&saves, x).iter().map(|x| &x.name[..]).collect() };
+    assert_eq!(
+      (found("Save"), found("save"), found("sav")),
+      (vec!["Save"], vec!["Save", "SAVE"], vec!["Save as", "Save", "SAVE"])
+    );
+
+    // GTK 4's cell, its twin and its label in Files are one, as a row, its icon and its label are;
+    // the next is another. A group whose name holds that of the buttons in it is one more element.
     let el = |depth: usize, role: &str, name: &str| Node {
       depth,
       role: role.into(),
@@ -905,9 +984,21 @@ mod tests {
       el(3, "statictext", "Videos"),
       el(1, "cell", "Music"),
       el(1, "statictext", "Videos"),
+      el(1, "row", "Templates"),
+      el(2, "image", "Templates"),
+      el(2, "statictext", "Templates"),
+      el(1, "group", "Delete options"),
+      el(2, "button", "Delete permanently"),
+      el(3, "statictext", "Delete permanently"),
+      el(2, "button", "Delete to Trash"),
+      el(1, "group", "Remove all"),
+      el(2, "button", "Remove one"),
     ];
     let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
     assert_eq!(roles("Videos"), ["cell", "statictext"]);
+    assert_eq!(roles("Templates"), ["row"]);
+    assert_eq!(roles("Delete"), ["group", "button", "button"]);
+    assert_eq!(roles("Remove"), ["group", "button"]);
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;
@@ -917,6 +1008,14 @@ mod tests {
     nodes.insert(0, window("w-1"));
     let of = |x: &str| window_of(&nodes, find(&nodes, x)[0]).id.clone();
     assert_eq!((of("General"), of("Microphone")), ("w-1".into(), "w-2".into()));
+
+    // A window's own: "e" in the second's only, after a raise.
+    let names = |id: &str| -> Vec<String> {
+      find(in_window(&nodes, id).unwrap(), "e").iter().map(|x| x.line()).collect()
+    };
+    assert_eq!(names("w-1").len() + names("w-2").len(), 4);
+    assert!(names("w-2").iter().all(|x| !x.contains("General")));
+    assert!(in_window(&nodes, "w-3").is_none());
   }
 
   #[test]
@@ -935,7 +1034,7 @@ _NET_WM_NAME = "a \"b\" \\"
 window 0x2a00004 -26 7 870 568
 _NET_FRAME_EXTENTS = 0, 0, 0, 0
 _GTK_FRAME_EXTENTS = 26, 26, 23, 29
-_NET_WM_NAME = "Shadow"
+_NET_WM_NAME = "Shadow\\n\n\t\001"
 window 0x800036 -1 0 1 1080
 _NET_WM_NAME:  not found."#;
     let (active, all) = stack(out);
@@ -947,7 +1046,7 @@ _NET_WM_NAME:  not found."#;
       [
         r#"0x120029a 0x1200007 window "Thunar" 640,350 284x258"#,
         r#"0x1200007  window "a \"b\" \\" 635,296 650x514"#,
-        r#"0x2a00004  window "Shadow" 0,30 818x516"#,
+        r#"0x2a00004  window "Shadow\\n\n\t\u{1}" 0,30 818x516"#,
         "0x800036  window -1,0 1x1080"
       ]
     );

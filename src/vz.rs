@@ -398,9 +398,7 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
   match (vm.config.os(), vm.setup, recovery) {
-    (Os::Linux | Os::Windows, _, true) => {
-      return Err(bad(format!("{} isn't macOS: no recoveryOS", vm.name)));
-    }
+    (Os::Linux, _, true) => return Err(bad(format!("{} runs Linux: no recoveryOS", vm.name))),
     (Os::Macos, _, true) => unsafe {
       let opts = VZMacOSVirtualMachineStartOptions::new();
       opts.setStartUpFromMacOSRecovery(true);

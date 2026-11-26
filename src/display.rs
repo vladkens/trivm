@@ -140,12 +140,14 @@ impl Display {
     let rep = self.image(64.0 / (self.screen.width * self.screen.scale))?;
     let rgb = NSColorSpace::deviceRGBColorSpace();
     let (w, h) = (rep.pixelsWide(), rep.pixelsHigh());
-    let bright = |(x, y): (isize, isize)| {
-      let color = rep.colorAtX_y(x, y).and_then(|x| x.colorUsingColorSpace(&rgb));
-      color.is_some_and(|x| x.brightnessComponent() > 0.15)
-    };
+    let mut n = 0;
+    for y in 0..h {
+      for x in 0..w {
+        let color = rep.colorAtX_y(x, y).and_then(|x| x.colorUsingColorSpace(&rgb));
+        n += color.is_some_and(|x| x.brightnessComponent() > 0.15) as isize;
+      }
+    }
 
-    let n = (0..h).flat_map(|y| (0..w).map(move |x| (x, y))).filter(|&p| bright(p)).count();
     Ok(n as f64 / (w * h).max(1) as f64)
   }
 

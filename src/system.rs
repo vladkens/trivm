@@ -2,14 +2,14 @@
 //! The systems trivm installs, each from its own source pinned by SHA-256, and `create`: the
 //! download, the VM's files, the install, and the first boot that makes the user.
 
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
-use crate::{apfs, assistant, bad, qcow2, qemu, run, ssh, vz, windows};
+use crate::{apfs, bad, qcow2, qemu, run, ssh, vz, windows};
 
 pub struct System {
   pub name: &'static str,
@@ -22,8 +22,7 @@ pub struct System {
   /// GiB.
   pub disk: u32,
   pub desktop: Desktop,
-  /// A Linux system's packages for its desktop, installed by cloud-init on the first boot; with
-  /// `xprop` and `xwininfo`, which `click --name` reads X's windows with.
+  /// A Linux system's packages for its desktop, installed by cloud-init on the first boot.
   pub packages: &'static [&'static str],
 }
 
@@ -77,30 +76,12 @@ pub const SYSTEMS: &[System] = &[
     "https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw",
     "3d87686b691ac765eb6a6b3082b2334e2af9710096a00432dd519af89ff2ea78",
   ),
-  System::macos(
-    "macos-14",
-    "https://updates.cdn-apple.com/2024SummerFCS/fullrestores/062-52859/932E0A8F-6644-4759-82DA-F8FA8DEA806A/UniversalMac_14.6.1_23G93_Restore.ipsw",
-    "e387251e63387150ba76cf784bdb97d2016e5d43c6f809c90a115eb067a097b8",
-  ),
-  System::macos(
-    "macos-13",
-    "https://updates.cdn-apple.com/2023FallFCS/fullrestores/042-55833/C0830847-A2F8-458F-B680-967991820931/UniversalMac_13.6_22G120_Restore.ipsw",
-    "9bf095739b8b2d5ebd20f7e8de938f10bc449f9843de21c4a41ae54d73526728",
-  ),
   System::linux(
     "ubuntu-24.04",
     "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img",
     "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
     Desktop::Xfce,
-    &[
-      "xfce4",
-      "xfce4-terminal",
-      "lightdm",
-      "lightdm-gtk-greeter",
-      "xserver-xorg",
-      "dbus-x11",
-      "x11-utils",
-    ],
+    &["xfce4", "xfce4-terminal", "lightdm", "lightdm-gtk-greeter", "xserver-xorg", "dbus-x11"],
   ),
   System::linux(
     "ubuntu-22.04",
@@ -130,23 +111,16 @@ pub const SYSTEMS: &[System] = &[
     "https://dl.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/aarch64/images/Fedora-Cloud-Base-Generic-45-1.4.aarch64.qcow2",
     "1632acc8bc14d45b6c9596a0acc71b070d3748d1abdcf1a519be5c983bb0286c",
     Desktop::Xfce,
-    &[
-      "@xfce-desktop",
-      "lightdm",
-      "lightdm-gtk",
-      "xorg-x11-server-Xorg",
-      "dbus-x11",
-      "xprop",
-      "xwininfo",
-    ],
+    &["@xfce-desktop", "lightdm", "lightdm-gtk", "xorg-x11-server-Xorg", "dbus-x11", "xwininfo"],
   ),
   System {
     name: "windows-11",
     os: Os::Windows,
-    // Its page's flow gives a link only to a browser: the person downloads the ISO, `--iso`.
-    url: "https://www.microsoft.com/en-us/software-download/windows11arm64",
-    // The page's list, English: Windows 11 26H2 (26300.9457) Arm64.
-    sha256: "8992f2d2cfd2fa647e579e9eb31fc21f34da8333c29b6170fde17d2ed6623e9c",
+    // Windows 11 24H2's consumer editions for arm64 in English, from the catalog of Microsoft's
+    // Media Creation Tool (go.microsoft.com/fwlink/?LinkId=2156292). Its CDN has no certificate
+    // for its name: HTTP, checked by the SHA-256.
+    url: "http://dl.delivery.mp.microsoft.com/filestreamingservice/files/37acc189-7f4f-4e07-976c-1cf0a099ec79/26100.4349.250607-1500.ge_release_svc_refresh_CLIENTCONSUMER_RET_A64FRE_en-us.esd",
+    sha256: "c01b6f474c772093159b63fb3a168d2666556b223d288f67efc37c4fbaeddd25",
     cpus: 4,
     memory: 6,
     disk: 64,
@@ -155,8 +129,8 @@ pub const SYSTEMS: &[System] = &[
   },
 ];
 
-/// Windows' ISO in the cache, cloned there from `--iso`.
-const WINDOWS_ISO: &str = "Win11_26H2_English_Arm64.iso";
+/// Windows 11 Pro's image in the ESD, after Setup's media, Windows PE and Setup, 1 to 3.
+const WINDOWS_PRO: u32 = 6;
 
 /// Fedora's virtio-win, for NetKVM, the driver of the VM's virtio-net.
 const VIRTIO: (&str, &str) = (
@@ -175,7 +149,7 @@ pub fn find(name: &str) -> io::Result<&'static System> {
   SYSTEMS.iter().find(|x| x.name == name).ok_or_else(err)
 }
 
-/// The file at `url` in the cache, downloaded (resumed after a break) and checked first.
+/// A file in the cache, downloaded (resumed after a break) and checked first.
 pub fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
   let name = url.rsplit('/').next().unwrap_or(url);
   let path = vm::cache_dir().join(name);
@@ -213,46 +187,8 @@ fn check(path: &Path, sha256: &str) -> io::Result<()> {
   }
 }
 
-/// The CDs of a Windows VM being set up: Microsoft's ISO and the seed.
-pub fn windows_cds(vm: &Vm) -> Vec<PathBuf> {
-  let cds = [vm::cache_dir().join(WINDOWS_ISO), vm.path("seed.iso")];
-  match vm.setup {
-    true => cds.into_iter().filter(|x| x.exists()).collect(),
-    false => Vec::new(),
-  }
-}
-
-/// Windows' ISO in the cache, cloned there from `iso` once its SHA-256 is Microsoft's.
-fn windows_download(sys: &System, iso: Option<&str>) -> io::Result<PathBuf> {
-  let path = vm::cache_dir().join(WINDOWS_ISO);
-  vm::made(&vm::cache_dir())?;
-  let _lock = lock(&path)?;
-  if path.exists() {
-    return Ok(path);
-  }
-
-  let Some(iso) = iso else {
-    return Err(bad(format!(
-      "Microsoft gives its ISO only to a browser: download Windows 11 (multi-edition ISO for \
-      Arm64), English, from {}, then: trivm create {} --iso <path>",
-      sys.url, sys.name
-    )));
-  };
-
-  check(Path::new(iso), sys.sha256)
-    .map_err(|e| bad(format!("{e}: not Microsoft's English Arm64 ISO of 26H2")))?;
-  let part = path.with_extension("part");
-  if run(Command::new("cp").arg("-c").arg(iso).arg(&part)).is_err() {
-    run(Command::new("cp").arg(iso).arg(&part))?;
-  }
-
-  fs::rename(&part, &path)?;
-  Ok(path)
-}
-
-/// A lock beside a file in the cache, held until it is dropped: a second create of the same system,
-/// with the same state folder or not, waits for the first one's download or conversion instead of
-/// writing the same file.
+/// A lock beside a file in the cache, held until it is dropped: a second create of the same system
+/// waits for the first one's download or conversion instead of writing the same file.
 fn lock(path: &Path) -> io::Result<fs::File> {
   let f = fs::File::create(path.with_extension("lock"))?;
   f.lock()?;
@@ -265,7 +201,6 @@ pub fn create(
   cpus: Option<u32>,
   memory: Option<u32>,
   disk: Option<u32>,
-  iso: Option<String>,
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
@@ -281,34 +216,30 @@ pub fn create(
   }
 
   let file = match sys.os {
-    Os::Windows => windows_download(sys, iso.as_deref())?,
-    _ if iso.is_some() => {
-      return Err(bad(format!("--iso: {} installs from its own image", sys.name)));
+    Os::Windows => {
+      tools()?;
+      qemu::fits(&vm)?;
+      windows_media(sys)?
     }
     _ => download(sys.url, sys.sha256)?,
   };
 
-  // Held while installing, so the VM isn't deleted or started in the middle; listed as new.
-  vm.claim()?;
-  let made = vm.hold().and_then(|hold| {
-    vm.commit()?;
-    match sys.os {
-      Os::Macos => macos(&vm, &file)?,
-      Os::Linux => linux(&vm, sys, &file)?,
-      Os::Windows => windows(&vm)?,
-    }
-
-    Ok(hold)
+  // Held while installing, and while a failed install goes, so the VM isn't deleted or started in
+  // the middle; listed as new.
+  let hold = vm.claim()?;
+  let made = vm.commit().and_then(|_| match sys.os {
+    Os::Macos => macos(&vm, &file),
+    Os::Linux => linux(&vm, sys, &file),
+    Os::Windows => windows(&vm),
   });
 
   // A VM whose install failed is no use: it goes, its downloads stay.
-  match made {
-    Ok(hold) => drop(hold),
-    Err(e) => {
-      let _ = vm.remove();
-      return Err(e);
-    }
+  if let Err(e) = made {
+    let _ = vm.remove();
+    return Err(e);
   }
+
+  drop(hold);
 
   crate::start(&vm.name)
 }
@@ -325,7 +256,7 @@ fn sparse(path: &Path, bytes: u64) -> io::Result<()> {
 // MARK: macOS
 
 fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
-  // VZ finds no IPSW through a symlink on its path, such as a cache folder linked to another.
+  // VZ finds no IPSW through a symlink on its path, such as a cache shared by another home.
   let ipsw = &fs::canonicalize(ipsw)?;
   sparse(&vm.path("disk.img"), vm.config.disk_bytes())?;
   vz::mac_platform(vm, ipsw)?;
@@ -333,10 +264,6 @@ fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
   vz::install(vm, ipsw)?;
   match vm.config.provisioned() {
     true => Ok(()),
-    // Its first boot shows the Setup Assistant, which trivm answers.
-    false if apfs::encrypted(&vm.path("disk.img"), apfs::DATA)? => {
-      fs::write(vm.path(assistant::MARK), "")
-    }
     false => mac_data(vm),
   }
 }
@@ -509,8 +436,7 @@ printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' > /e
 
 /// No sleep, screen saver or lock, which would leave the screen dark; no automatic updates
 /// (macOS 27 kept checking regardless of some of these, as the old `vm` tool found); the host's
-/// time zone, `$2`, which macOS would otherwise guess as Cupertino's; the automatic login of `$4`
-/// by its `kcpassword`, `$3`, which the Setup Assistant leaves off.
+/// time zone, `$2`, which macOS would otherwise guess as Cupertino's.
 const MAC_TUNE: &str = r#"set -e
 sudo -n pmset -a displaysleep 0 sleep 0 disksleep 0 >/dev/null
 defaults -currentHost write com.apple.screensaver idleTime -int 0
@@ -521,26 +447,16 @@ done
 sudo -n defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false
 sudo -n defaults write /Library/Preferences/com.apple.timezone.auto Active -bool false
 sudo -n ln -sf "/var/db/timezone/zoneinfo/$2" /etc/localtime
-printf "$3" | sudo -n sh -c 'umask 077; cat > /etc/kcpassword'
-sudo -n defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$4"
 "#;
 
-/// The first boot of a new macOS VM, which made the user, or whose Setup Assistant trivm answers
-/// to make it: the key, then the tuning.
+/// The first boot of a new macOS VM, which made the user: the key, then the tuning.
 pub fn macos_setup(vm: &Vm) -> io::Result<()> {
-  if vm.path(assistant::MARK).exists() {
-    assistant::answer(vm)?;
-  }
-
   eprintln!("waiting for macOS to make the user and answer SSH (a few minutes)");
   let script =
     format!("sh -ec {} enroll {} {USER}", ssh::quote(MAC_ENROLL), ssh::quote(&ssh::public_key()?));
   ssh::with_password(vm, &script, Duration::from_secs(1800))?;
-  let _ = fs::remove_file(vm.path(assistant::MARK));
   ssh::wait(vm, Duration::from_secs(60))?;
-  let kc = ssh::quote(&kcpassword(PASSWORD));
-  let tune = format!("sh -ec {} tune {PASSWORD} {} {kc} {USER}", ssh::quote(MAC_TUNE), timezone());
-  ssh::output(vm, &tune)?;
+  ssh::output(vm, &format!("sh -ec {} tune {PASSWORD} {}", ssh::quote(MAC_TUNE), timezone()))?;
   Ok(())
 }
 
@@ -574,6 +490,16 @@ fn linux(vm: &Vm, sys: &System, qcow2: &Path) -> io::Result<()> {
 
 fn hostname(name: &str) -> String {
   name.chars().map(|x| if x.is_ascii_alphanumeric() { x } else { '-' }).collect()
+}
+
+/// The VM's name as Windows' computer name, which is 15 characters at most and not digits only.
+fn computer_name(name: &str) -> String {
+  let short = |x: &str| x.chars().take(15).collect::<String>().trim_matches('-').to_string();
+  let host = short(hostname(name).trim_matches('-'));
+  match host.chars().all(|x| x.is_ascii_digit()) {
+    true => short(&format!("win-{host}")),
+    false => host,
+  }
 }
 
 fn meta_data(name: &str, mac: &str) -> String {
@@ -766,6 +692,75 @@ pub fn linux_setup(vm: &Vm) -> io::Result<()> {
 
 // MARK: Windows
 
+/// Fails unless Homebrew's tools for Windows are on `PATH`, before the downloads they need.
+fn tools() -> io::Result<()> {
+  let path = env::var_os("PATH").unwrap_or_default();
+  for x in ["qemu-system-aarch64", "swtpm", "wimlib-imagex"] {
+    if !env::split_paths(&path).any(|p| p.join(x).is_file()) {
+      return Err(bad(format!("{x} not found; brew install qemu swtpm wimlib")));
+    }
+  }
+
+  Ok(())
+}
+
+/// Windows' install media in the cache, named after the ESD it is made from.
+fn media(sys: &System) -> PathBuf {
+  let name = sys.url.rsplit('/').next().unwrap_or(sys.name);
+  vm::cache_dir().join(name).with_extension("pro.iso")
+}
+
+/// Windows' install media, made once from the ESD with wimlib as the Media Creation Tool makes it:
+/// image 1's files, Windows PE and Setup (2, 3) as `sources/boot.wim`, Pro as `install.esd`, in an
+/// ISO booted by its El Torito image for UEFI, which asks for no key. The ESD goes then.
+fn windows_media(sys: &System) -> io::Result<PathBuf> {
+  let iso = media(sys);
+  vm::made(&vm::cache_dir())?;
+  let _lock = lock(&iso)?;
+  if iso.exists() {
+    return Ok(iso);
+  }
+
+  let esd = download(sys.url, sys.sha256)?;
+  eprintln!("making Windows' install media from {}", esd.display());
+  // A make cut short left its folder.
+  let dir = iso.with_extension("part");
+  let _ = fs::remove_dir_all(&dir);
+  let wimlib = |cmd: &str, image: u32, to: &Path, opts: &[&str]| -> io::Result<()> {
+    let mut c = Command::new("wimlib-imagex");
+    run(c.arg(cmd).arg(&esd).arg(image.to_string()).arg(to).args(opts)).map(|_| ())
+  };
+
+  wimlib("apply", 1, &dir, &[])?;
+  let boot = dir.join("sources/boot.wim");
+  wimlib("export", 2, &boot, &["--compress=LZX"])?;
+  wimlib("export", 3, &boot, &["--boot"])?;
+  wimlib("export", WINDOWS_PRO, &dir.join("sources/install.esd"), &["--solid"])?;
+
+  // UDF for install.esd, past ISO9660's 4 GiB; El Torito's image as its own sectors of 512 bytes.
+  let efi = dir.join("efi/microsoft/boot/efisys_noprompt.bin");
+  let sectors = fs::metadata(&efi)?.len() / 512;
+  let part = iso.with_extension("part.iso");
+  let mut hdiutil = Command::new("hdiutil");
+  hdiutil.args(["makehybrid", "-quiet", "-iso", "-udf", "-default-volume-name", "WIN11_ARM64"]);
+  hdiutil.arg("-eltorito-boot").arg(&efi).args(["-no-emul-boot", "-eltorito-platform", "0xEF"]);
+  hdiutil.args(["-boot-load-size", &sectors.to_string(), "-ov", "-o"]);
+  run(hdiutil.arg(&part).arg(&dir).stdin(Stdio::null()))?;
+  fs::rename(&part, &iso)?;
+  fs::remove_dir_all(&dir)?;
+  fs::remove_file(&esd)?;
+  Ok(iso)
+}
+
+/// The CDs of a Windows VM being set up: the install media and the seed.
+pub fn windows_cds(vm: &Vm) -> io::Result<Vec<PathBuf>> {
+  let cds = [media(find(&vm.config.system)?), vm.path("seed.iso")];
+  Ok(match vm.setup {
+    true => cds.into_iter().filter(|x| x.exists()).collect(),
+    false => Vec::new(),
+  })
+}
+
 /// The disk, the firmware's variables and the seed: `autounattend.xml`, the setup script its first
 /// logon runs, trivm's key, Win32-OpenSSH's MSI and virtio-net's driver from virtio-win.
 fn windows(vm: &Vm) -> io::Result<()> {
@@ -776,9 +771,7 @@ fn windows(vm: &Vm) -> io::Result<()> {
 
   let seed = vm.path("seed");
   fs::create_dir_all(&seed)?;
-  // Windows' computer names are 15 characters at most.
-  let host: String = hostname(&vm.name).chars().take(15).collect();
-  fs::write(seed.join("autounattend.xml"), windows::autounattend(host.trim_end_matches('-')))?;
+  fs::write(seed.join("autounattend.xml"), windows::autounattend(&computer_name(&vm.name)))?;
   fs::write(seed.join(windows::SETUP), windows::setup_script())?;
   fs::write(seed.join("key.pub"), ssh::public_key()? + "\n")?;
   fs::copy(&msi, seed.join("openssh.msi"))?;
@@ -797,26 +790,10 @@ fn windows(vm: &Vm) -> io::Result<()> {
   fs::remove_dir_all(&seed)
 }
 
-/// Whether a disk has a GPT, the first thing Windows Setup writes.
-fn partitioned(disk: &Path) -> io::Result<bool> {
-  let mut head = [0u8; 520];
-  fs::File::open(disk)?.read_exact(&mut head)?;
-  Ok(&head[512..] == b"EFI PART")
-}
-
-/// The first boot of a new Windows VM: the ISO's boot asks for a key first, then Setup installs
-/// unattended, and the first logon's script starts sshd last. The CDs go then.
+/// The first boot of a new Windows VM: Setup installs from the media unattended, restarting from
+/// the disk, and the first logon's script starts sshd last. The CDs go then.
 pub fn windows_setup(vm: &Vm) -> io::Result<()> {
-  // Once Setup has partitioned the disk, no key: the prompt times out and the disk boots, so a
-  // setup cut short goes on instead of wiping the disk again.
-  if !partitioned(&vm.path("disk.img"))? {
-    for _ in 0..40 {
-      let _ = qemu::ask(vm, "key enter", "");
-      thread::sleep(Duration::from_secs(1));
-    }
-  }
-
-  eprintln!("installing Windows on {}, unattended", vm.name);
+  eprintln!("installing Windows on {}, unattended (about 15 minutes)", vm.name);
   ssh::wait(vm, Duration::from_secs(5400))?;
   qemu::ask(vm, "eject", "")?;
   match fs::remove_file(vm.path("seed.iso")) {
@@ -831,8 +808,6 @@ pub fn windows_setup(vm: &Vm) -> io::Result<()> {
 /// half a minute more while it is busy starting.
 pub fn desktop(vm: &Vm) -> io::Result<()> {
   let names = match (vm.config.os(), find(&vm.config.system)?.desktop) {
-    // WallpaperAgent draws the desktop from macOS 14 on, the Dock before it.
-    (Os::Macos, _) if vm.config.macos().is_some_and(|x| x < 14) => "Dock Finder",
     (Os::Macos, _) => "Dock Finder WallpaperAgent",
     (_, Desktop::Xfce) => "xfce4-session xfce4-panel xfdesktop",
     (_, Desktop::Plasma) => "ksmserver kwin_x11 plasmashell",
@@ -876,19 +851,6 @@ mod tests {
   use super::*;
 
   #[test]
-  fn disks() {
-    let path = std::env::temp_dir().join(format!("trivm-disk-{}", std::process::id()));
-    let mut data = vec![0u8; 1024];
-    fs::write(&path, &data).unwrap();
-    assert!(!partitioned(&path).unwrap());
-
-    data[512..520].copy_from_slice(b"EFI PART");
-    fs::write(&path, &data).unwrap();
-    assert!(partitioned(&path).unwrap());
-    fs::remove_file(&path).unwrap();
-  }
-
-  #[test]
   fn systems() {
     assert_eq!(find("macos-27").unwrap().os, Os::Macos);
     assert_eq!(find("windows-11").unwrap().os, Os::Windows);
@@ -897,8 +859,16 @@ mod tests {
     for x in SYSTEMS.iter().map(|x| (x.url, x.sha256)).chain([VIRTIO, OPENSSH]) {
       assert_eq!(x.1.len(), 64, "{}", x.0);
       assert!(x.1.chars().all(|x| x.is_ascii_hexdigit() && !x.is_ascii_uppercase()), "{}", x.0);
-      assert!(x.0.starts_with("https://"), "{}", x.0);
+      let cdn = x.0.starts_with("http://dl.delivery.mp.microsoft.com/");
+      assert!(x.0.starts_with("https://") || cdn, "{}", x.0);
     }
+
+    // The media's lock isn't the ESD's, which its make takes too.
+    let (sys, lock) = (find("windows-11").unwrap(), |x: &Path| x.with_extension("lock"));
+    let esd = vm::cache_dir().join(sys.url.rsplit('/').next().unwrap());
+    assert_eq!(esd.extension().unwrap(), "esd");
+    assert_ne!(lock(&media(sys)), lock(&esd));
+    assert!(media(sys).to_string_lossy().ends_with("_A64FRE_en-us.pro.iso"));
   }
 
   fn lint(cmd: &str, args: &[&str], text: &str) -> bool {
@@ -958,5 +928,20 @@ mod tests {
     assert!(NETWORK_CONFIG.contains("driver: virtio_net\n"));
     assert!(NETWORK_CONFIG.contains("dhcp-identifier: mac\n"));
     assert!(!NETWORK_CONFIG.contains('\t'));
+  }
+
+  #[test]
+  fn computer_names() {
+    for (name, host) in [
+      ("windows-11", "windows-11"),
+      ("windows-11-run-1", "windows-11-run"),
+      ("my.test_vm-number-2", "my-test-vm-numb"),
+      ("123", "win-123"),
+      ("123456789012345a", "win-12345678901"),
+      ("_", "win"),
+      ("-x-", "x"),
+    ] {
+      assert_eq!(computer_name(name), host, "{name}");
+    }
   }
 }

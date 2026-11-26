@@ -4,11 +4,10 @@
 //! DHCP leases.
 
 use std::ffi::OsString;
-use std::io::{self, Read};
-use std::os::unix::fs::{DirBuilderExt, FileExt};
+use std::io::{self, Read, Seek, Write};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
-use std::{env, fs, process, thread};
+use std::{env, fs, process};
 
 use crate::bad;
 
@@ -86,8 +85,7 @@ impl Config {
   }
 
   /// Whether VZ makes the guest's user on its first boot (`VZMacGuestProvisioningOptions`), as
-  /// for macOS 27 and later; an older macOS gets its user from files on its Data volume, or from
-  /// its Setup Assistant, which trivm answers, when that volume is encrypted.
+  /// for macOS 27 and later; an older macOS gets its user from files on its Data volume.
   pub fn provisioned(&self) -> bool {
     self.macos().is_some_and(|x| x >= 27)
   }
@@ -184,8 +182,13 @@ impl Vm {
     };
 
     self.setup = self.path(SETUP).exists();
-    self.port = fs::read_to_string(self.state("port")).ok().and_then(|x| x.trim().parse().ok());
+    self.port = self.saved_port();
     Ok(())
+  }
+
+  /// The forwarded SSH port its last start saved, read now: a running VM's current one.
+  pub fn saved_port(&self) -> Option<u16> {
+    fs::read_to_string(self.state("port")).ok().and_then(|x| x.trim().parse().ok())
   }
 
   pub fn all() -> io::Result<Vec<Self>> {
@@ -202,10 +205,10 @@ impl Vm {
     Ok(names.iter().flat_map(|x| Self::open(x)).collect())
   }
 
-  /// Claims the VM's name by making its data folder, which fails if there is one, so of two VMs of
-  /// a name made at once one gets it; then its state folder, and its machine state saved. Nothing
-  /// opens it until `commit` writes its config.
-  pub fn claim(&self) -> io::Result<()> {
+  /// Claims the VM's name by making its data folder, which fails if there is one: of two VMs of a
+  /// name made at once one gets it. Its state follows, held while the file returned is open, and
+  /// nothing opens it until `commit` writes its config.
+  pub fn claim(&self) -> io::Result<fs::File> {
     let name = &self.name;
     if !valid(name) {
       return Err(bad(format!("not a VM name: {name}")));
@@ -233,7 +236,7 @@ impl Vm {
       x => x?,
     }
 
-    let res = made(&self.state_dir).and_then(|_| self.save());
+    let res = made(&self.state_dir).and_then(|_| self.save()).and_then(|_| self.hold());
     if res.is_err() {
       let _ = self.remove();
     }
@@ -258,15 +261,19 @@ impl Vm {
     }
   }
 
-  /// Saves the machine state: `mac` and the `setup` mark in the data folder, `port` in the state
-  /// folder. A file is written beside its place and renamed there: two `start`s may save at once.
+  /// Saves the machine state: `mac` and the `setup` mark in the data folder. A file is written
+  /// beside its place and renamed there: two `start`s may save at once.
   pub fn save(&self) -> io::Result<()> {
     put(&self.path("mac"), &format!("{}\n", self.mac))?;
     match self.setup {
-      true => fs::write(self.path(SETUP), "")?,
-      false => gone(fs::remove_file(self.path(SETUP)))?,
+      true => fs::write(self.path(SETUP), ""),
+      false => gone(fs::remove_file(self.path(SETUP))),
     }
+  }
 
+  /// Saves `port` in the state folder, only by the start holding the VM: a start that saved one
+  /// earlier may have another by now.
+  pub fn save_port(&self) -> io::Result<()> {
     match self.port {
       Some(x) => put(&self.state("port"), &format!("{x}\n")),
       None => gone(fs::remove_file(self.state("port"))),
@@ -299,30 +306,55 @@ impl Vm {
 
   /// Marks the VM as running, with this process's pid, for as long as the file returned is open.
   pub fn lock(&self) -> io::Result<fs::File> {
+    let mut f = self.take()?;
+    write!(f, "{}", process::id())?;
+    Ok(f)
+  }
+
+  /// Keeps the VM to this process for as long as the file returned is open, as `delete` does: the
+  /// lock on `pid`, emptied, so no other process takes this one for the VM's and kills it.
+  pub fn take(&self) -> io::Result<fs::File> {
     let f = self.pid_file()?;
     match f.try_lock() {
       Ok(()) => {}
       Err(fs::TryLockError::WouldBlock) => {
-        return Err(bad(format!("{} is in use: running, being made or cloned", self.name)));
+        return Err(bad(format!(
+          "{} is in use: running, being made, cloned or deleted",
+          self.name
+        )));
       }
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
 
-    write_pid(&f, process::id())?;
+    self.current(&f)?;
+    f.set_len(0)?;
     Ok(f)
   }
 
-  /// Keeps the VM from starting for as long as the file returned is open: a shared lock on `pid`,
-  /// which the VM's process takes exclusive, so clones of a VM made at once don't wait for each
-  /// other.
+  /// Keeps the VM from starting or being deleted for as long as the file returned is open: a
+  /// shared lock on `pid`, which the VM's process takes exclusive, so clones of a VM made at once
+  /// don't wait for each other.
   pub fn hold(&self) -> io::Result<fs::File> {
     let f = self.pid_file()?;
     match f.try_lock_shared() {
-      Ok(()) => Ok(f),
+      Ok(()) => {}
       Err(fs::TryLockError::WouldBlock) => {
-        Err(bad(format!("{} is running; trivm stop {} first", self.name, self.name)))
+        return Err(bad(format!("{} is running; trivm stop {} first", self.name, self.name)));
       }
-      Err(fs::TryLockError::Error(e)) => Err(e),
+      Err(fs::TryLockError::Error(e)) => return Err(e),
+    }
+
+    self.current(&f)?;
+    Ok(f)
+  }
+
+  /// Checks that the `pid` this process locked is still the VM's: a `delete` removes it, maybe
+  /// while another has it open, and a VM made again of the name has one of its own.
+  fn current(&self, f: &fs::File) -> io::Result<()> {
+    let ino = fs::metadata(self.state("pid")).map(|x| x.ino()).ok();
+    match ino == Some(f.metadata()?.ino()) {
+      true => Ok(()),
+      false => Err(bad(format!("{} was deleted meanwhile; see trivm list", self.name))),
     }
   }
 
@@ -374,15 +406,14 @@ const OWN: &[&str] = &["id_ed25519", "id_ed25519.pub", "id_ed25519.lock"];
 
 /// A VM's name: a folder in trivm's, not a path out of it or one of trivm's own files, in any case
 /// (APFS ignores it), nor a flag to the commands trivm runs with it (`_run <vm>`).
-pub fn valid(name: &str) -> bool {
+fn valid(name: &str) -> bool {
   let chars = name.chars().all(|x| x.is_ascii_alphanumeric() || "-_.".contains(x));
   let own = OWN.iter().any(|x| x.eq_ignore_ascii_case(name));
   chars && !name.is_empty() && !name.starts_with(['.', '-']) && !own
 }
 
-/// Checks that the VM's `ctl.sock` in its state folder fits a Unix socket's path, which macOS
-/// caps at 104 bytes with the NUL: a VM whose doesn't can't start. QEMU's `qmp.sock` and
-/// `tpm.sock` are as long.
+/// Checks that the VM's `ctl.sock` in its state folder fits a Unix socket's path, which macOS caps
+/// at 104 bytes with the NUL: a VM whose doesn't can't start.
 pub fn socket_fits(dir: &Path) -> io::Result<()> {
   match dir.join("ctl.sock").as_os_str().len() < 104 {
     true => Ok(()),
@@ -416,75 +447,25 @@ fn mac_text(b: &[u8; 6]) -> String {
   b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
 }
 
+/// The pid in an open `pid` file while its process holds the lock on it, read from its start each
+/// time, so it can be asked again.
+pub fn pid_of(mut f: &fs::File) -> Option<i32> {
+  match f.try_lock_shared() {
+    Err(fs::TryLockError::WouldBlock) => {}
+    // No holder: let go, as the file stays open and would keep others from taking it.
+    Ok(()) => {
+      let _ = f.unlock();
+      return None;
+    }
+    Err(_) => return None,
+  }
+
+  f.seek(io::SeekFrom::Start(0)).ok()?;
+  io::read_to_string(f).ok()?.trim().parse().ok()
+}
+
 unsafe extern "C" {
   fn kill(pid: i32, sig: i32) -> i32;
-  fn proc_name(pid: i32, buf: *mut u8, size: u32) -> i32;
-}
-
-/// The name of the program a process of that pid runs.
-pub fn process_name(pid: i32) -> Option<String> {
-  let mut b = [0u8; 64];
-  // SAFETY: a buffer of the size given.
-  let n = unsafe { proc_name(pid, b.as_mut_ptr(), b.len() as u32) };
-  (n > 0).then(|| String::from_utf8_lossy(&b[..n as usize]).into_owned())
-}
-
-/// Whether the process of that pid is a VM's, trivm's or QEMU, so not one that took a gone VM's
-/// pid since.
-pub fn is_vm(pid: i32) -> bool {
-  process_name(pid).is_some_and(|x| x.starts_with("trivm") || x.starts_with("qemu"))
-}
-
-/// A pid over the one in a locked `pid` file in one write, padded and not truncated first: a
-/// reader sees one pid or the other, never an empty file or a mix.
-pub fn write_pid(f: &fs::File, pid: u32) -> io::Result<()> {
-  f.write_all_at(&pid_text(pid), 0)?;
-  f.set_len(10)
-}
-
-/// A pid as the `pid` file holds it, its digits padded with spaces to 10 bytes; made with no
-/// allocation, as a child between fork and exec writes its own.
-pub fn pid_text(pid: u32) -> [u8; 10] {
-  let mut b = [b' '; 10];
-  let (mut n, len) = (pid, pid.checked_ilog10().unwrap_or(0) as usize + 1);
-  for x in b[..len].iter_mut().rev() {
-    *x = b'0' + (n % 10) as u8;
-    n /= 10;
-  }
-
-  b
-}
-
-/// The pid in an open `pid` file while its process holds the lock on it.
-pub fn pid_of(f: &fs::File) -> Option<i32> {
-  if !matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
-    return None;
-  }
-
-  // The process writes its pid just after taking the lock: until then the file is empty, or has
-  // the pid of the one before, gone.
-  let mut last = None;
-  for _ in 0..50 {
-    let mut buf = [0; 16];
-    let n = f.read_at(&mut buf, 0).ok()?;
-    last = std::str::from_utf8(&buf[..n]).ok().and_then(|x| x.trim().parse().ok()).or(last);
-    if let Some(pid) = last
-      && alive(pid)
-    {
-      return Some(pid);
-    }
-
-    thread::sleep(Duration::from_millis(10));
-  }
-
-  last
-}
-
-/// Whether a process of that pid runs: one of another user's can't be signalled (EPERM) but runs.
-fn alive(pid: i32) -> bool {
-  // SAFETY: signal 0 only checks the pid.
-  let res = unsafe { kill(pid, 0) };
-  res == 0 || io::Error::last_os_error().raw_os_error() == Some(1)
 }
 
 pub fn signal(pid: i32, sig: i32) {
@@ -530,7 +511,6 @@ fn parse_mac(x: &str) -> Option<[u8; 6]> {
 
 /// The space a sparse file takes on disk, as `12.3G`.
 pub fn size(path: &Path) -> String {
-  use std::os::unix::fs::MetadataExt;
   let bytes = fs::metadata(path).map(|x| x.blocks() * 512).unwrap_or(0);
   format!("{:.1}G", bytes as f64 / GIB as f64)
 }
@@ -539,19 +519,43 @@ pub fn size(path: &Path) -> String {
 mod tests {
   use super::*;
 
+  /// Tried again for up to a second: a process another test starts meanwhile shares the locks
+  /// open in this one until it execs, 8 ms here.
+  fn soon<T>(f: impl Fn() -> io::Result<T>) -> T {
+    let t = std::time::Instant::now();
+    loop {
+      match f() {
+        Ok(x) => return x,
+        Err(e) if t.elapsed().as_secs() >= 1 => panic!("{e}"),
+        Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+      }
+    }
+  }
+
+  /// No one runs the VM, once a process sharing its lock has exec'd.
+  fn stopped(vm: &Vm) -> bool {
+    soon(|| vm.pid().map_or(Ok(()), |x| Err(bad(format!("{x} runs it")))));
+    true
+  }
+
   #[test]
   fn config() {
     let c = Config { system: "macos-27".into(), cpus: 4, memory: 8, disk: 64 };
     assert_eq!(c.text(), "system = macos-27\ncpus = 4\nmemory = 8\ndisk = 64\n");
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
+    assert_eq!(c.memory_bytes(), 8 << 30);
+
+    // Made by VZ's provisioning from 27 on.
     assert!(c.provisioned());
     assert!(!Config { system: "macos-26".into(), ..c.clone() }.provisioned());
-    assert_eq!(c.memory_bytes(), 8 << 30);
+    assert!(!Config { system: "ubuntu-22.04".into(), ..c.clone() }.provisioned());
+
     assert!(Config::parse("system = x\n").is_err());
     // A line it doesn't know, such as the machine state the config used to hold, is left.
     let old = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\nsetup = true\n");
     assert_eq!(old.unwrap().text(), "system = a\ncpus = 1\nmemory = 2\ndisk = 3\n");
+    assert_eq!(Config { system: "ubuntu-24.04".into(), ..c.clone() }.os(), Os::Linux);
     assert_eq!(Config { system: "windows-11".into(), ..c }.os(), Os::Windows);
   }
 
@@ -559,7 +563,7 @@ mod tests {
   fn claim() {
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!("trivm-claim-{}", process::id()));
-    let config = Config { system: "windows-11".into(), cpus: 1, memory: 2, disk: 3 };
+    let config = Config { system: "ubuntu-24.04".into(), cpus: 1, memory: 2, disk: 3 };
     let mac = "02:00:00:00:00:01";
     let at = |name: &str| Vm {
       conf: root.join(format!("config/{name}.conf")),
@@ -572,10 +576,11 @@ mod tests {
 
     // Claimed: its folders, its owner's only, and its machine state; no config, so not opened.
     let mut vm = at("a");
-    vm.claim().unwrap();
+    let hold = vm.claim().unwrap();
     assert_eq!(fs::metadata(&vm.dir).unwrap().permissions().mode() & 0o777, 0o700);
     assert_eq!(fs::read_to_string(vm.path("mac")).unwrap(), format!("{mac}\n"));
     assert!(vm.path("setup").exists() && vm.state_dir.is_dir() && !vm.conf.exists());
+    assert!(vm.lock().is_err());
     assert_eq!(at("a").read().unwrap_err().kind(), io::ErrorKind::NotFound);
     assert_eq!(at("a").claim().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
 
@@ -584,17 +589,18 @@ mod tests {
     assert_eq!(vm.commit().unwrap_err().kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(at("a").claim().unwrap_err().to_string(), "a exists; trivm delete a first");
 
-    // Set up, then started on QEMU's network: read back as saved.
+    // Let go and set up: read back as saved.
+    drop(hold);
+    soon(|| vm.lock());
     vm.setup = false;
     vm.port = Some(50022);
     vm.save().unwrap();
+    vm.save_port().unwrap();
+    assert_eq!(fs::read_to_string(vm.state("port")).unwrap(), "50022\n");
     let mut read = Vm { mac: String::new(), ..at("a") };
     read.read().unwrap();
-    assert_eq!((&read.config, read.mac.as_str()), (&config, mac));
-    assert_eq!((read.setup, read.port), (false, Some(50022)));
-    vm.port = None;
-    vm.save().unwrap();
-    assert!(!vm.state("port").exists());
+    assert_eq!((&read.config, read.mac.as_str(), read.setup), (&config, mac, false));
+    assert_eq!((read.port, read.ip().as_deref()), (Some(50022), Some("127.0.0.1")));
 
     // Removed, the name is free; its data folder left with no config is in the way.
     vm.remove().unwrap();
@@ -620,7 +626,8 @@ mod tests {
 
   #[test]
   fn names() {
-    for x in ["macos-27", "ubuntu-24.04", "a_b"] {
+    // `cache` and `entitlements.plist` no longer beside the VMs' folders.
+    for x in ["macos-27", "ubuntu-24.04", "a_b", "cache", "entitlements.plist"] {
       assert!(valid(x), "{x}");
     }
 
@@ -629,11 +636,6 @@ mod tests {
     assert!(socket_fits(&state.join("macos-27-run-1")).is_ok());
     assert!(socket_fits(&state.join("x".repeat(63))).is_ok());
     assert!(socket_fits(&state.join("x".repeat(64))).is_err());
-
-    // Their own files no longer beside the VMs' folders.
-    for x in ["cache", "entitlements.plist", "locks"] {
-      assert!(valid(x), "{x}");
-    }
 
     let own = ["id_ed25519", "ID_ED25519.pub", "id_ed25519.lock"];
     for x in ["", ".", "..", "../x", "/tmp/x", "a/b", ".a", "-a", "--help"].into_iter().chain(own) {
@@ -656,7 +658,7 @@ mod tests {
   #[test]
   fn owner_only() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = std::env::temp_dir().join(format!("trivm-private-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("trivm-private-{}", process::id()));
     made(&dir.join("a/b")).unwrap();
     made(&dir.join("a/b")).unwrap();
     let mode = |x: &str| fs::metadata(dir.join(x)).unwrap().permissions().mode() & 0o777;
@@ -667,7 +669,7 @@ mod tests {
 
   #[test]
   fn lock() {
-    let dir = std::env::temp_dir().join(format!("trivm-lock-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("trivm-lock-{}", process::id()));
     let config = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\n").unwrap();
     // The state folder made by the lock.
     let (conf, data, state_dir) = (dir.join("a.conf"), dir.join("data"), dir.join("state"));
@@ -675,40 +677,32 @@ mod tests {
     assert_eq!(vm.pid(), None);
 
     let lock = vm.lock().unwrap();
-    assert_eq!(vm.pid(), Some(std::process::id() as i32));
-
-    // QEMU's pid over trivm's, shorter or longer.
-    write_pid(&lock, 42).unwrap();
-    assert_eq!(vm.pid(), Some(42));
-    write_pid(&lock, 1234567).unwrap();
-    assert_eq!(fs::read_to_string(vm.state("pid")).unwrap(), "1234567   ");
-    assert_eq!(&pid_text(0), b"0         ");
-    assert_eq!(&pid_text(u32::MAX), b"4294967295");
-    // The test's own binary is `trivm-<hash>`; launchd is root's, its name not ours to read.
-    assert!(is_vm(std::process::id() as i32));
-    assert!(!is_vm(1) && !is_vm(-1));
-    write_pid(&lock, std::process::id()).unwrap();
-
+    assert_eq!(vm.pid(), Some(process::id() as i32));
     assert!(vm.lock().is_err());
     assert!(vm.hold().is_err());
     drop(lock);
-    // A process another test forks meanwhile shares a lock let go until it execs: 8 ms here.
-    let soon = |x: &dyn Fn() -> bool| {
-      let t = std::time::Instant::now();
-      while !x() && t.elapsed().as_secs() < 1 {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-      }
+    assert!(stopped(&vm));
 
-      x()
-    };
-    assert!(soon(&|| vm.pid().is_none()));
+    // Taken, as by a `delete`: no pid to stop, and nothing else locks it.
+    let take = soon(|| vm.take());
+    assert_eq!(vm.pid(), None);
+    assert!(vm.take().is_err() && vm.lock().is_err() && vm.hold().is_err());
+    drop(take);
 
     // Two holds at once, which keep the VM from running and don't count as it running.
-    let (a, b) = (vm.hold().unwrap(), vm.hold().unwrap());
+    let (a, b) = (soon(|| vm.hold()), soon(|| vm.hold()));
     assert_eq!(vm.pid(), None);
     assert!(vm.lock().is_err());
     drop((a, b));
-    assert!(soon(&|| vm.lock().is_ok()));
+    soon(|| vm.lock());
+
+    // A `pid` removed while open, as by a `delete`, and one made again in its place aren't it.
+    let old = vm.pid_file().unwrap();
+    assert!(vm.current(&old).is_ok());
+    fs::remove_dir_all(&vm.state_dir).unwrap();
+    assert!(vm.current(&old).is_err());
+    let new = vm.pid_file().unwrap();
+    assert!(vm.current(&old).is_err() && vm.current(&new).is_ok());
     fs::remove_dir_all(&dir).unwrap();
   }
 
