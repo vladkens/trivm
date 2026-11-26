@@ -206,16 +206,14 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   // Held from here, so a second start finds the VM in use before touching its TPM; running once
   // its port is saved, so no command reaches the last one, which another VM may have now.
   let mut lock = vm.take()?;
-  let port = match vm.port {
+  // The saved one read again: a start before this one may have saved another since it was read.
+  let port = match vm.saved_port() {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
   };
 
-  if vm.port != Some(port) {
-    vm.port = Some(port);
-    vm.save_port()?;
-  }
-
+  vm.port = Some(port);
+  vm.save_port()?;
   write!(lock, "{}", std::process::id())?;
 
   // Opened before swtpm starts, as a failure after leaves it running.
