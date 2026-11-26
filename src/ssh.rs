@@ -125,7 +125,7 @@ pub fn line(cmd: &[String]) -> String {
 
 pub fn quote(x: &str) -> String {
   let safe =
-    !x.is_empty() && x.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:@%+,".contains(c));
+    !x.is_empty() && x.chars().all(|c| c.is_ascii_alphanumeric() || "-_./:@%+,".contains(c));
   match safe {
     true => x.to_string(),
     false => format!("'{}'", x.replace('\'', r"'\''")),
@@ -273,7 +273,11 @@ mod tests {
   fn lines() {
     let v = |x: &[&str]| x.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     assert_eq!(line(&v(&["ls -la | wc -l"])), "ls -la | wc -l");
-    assert_eq!(line(&v(&["echo", "a b", "it's", "x=1"])), r"echo 'a b' 'it'\''s' x=1");
+    // zsh expands a word that starts with `=`; a first word with one sets a variable.
+    assert_eq!(
+      line(&v(&["echo", "a b", "it's", "x=1", "=ls"])),
+      r"echo 'a b' 'it'\''s' 'x=1' '=ls'"
+    );
     assert_eq!(quote(""), "''");
   }
 

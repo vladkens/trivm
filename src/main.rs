@@ -20,6 +20,7 @@ mod vm;
 mod vz;
 mod windows;
 
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -402,9 +403,24 @@ fn shut_down(vm: &Vm) -> io::Result<()> {
 /// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
 /// and one being made or cloned isn't removed under it.
 fn delete(vm: &Vm) -> io::Result<()> {
+  let was = data_ino(vm);
   stop(vm, true)?;
+  remove(vm, was)
+}
+
+/// Removes the VM under its lock if its data folder is the one it had (`was`, none if a delete cut
+/// short removed it): another may have removed it meanwhile and made one of its name, which stays.
+fn remove(vm: &Vm, was: Option<u64>) -> io::Result<()> {
   let _lock = vm.take()?;
+  if data_ino(vm) != was {
+    return Err(bad(format!("{} was deleted meanwhile; see trivm list", vm.name)));
+  }
+
   vm.remove()
+}
+
+fn data_ino(vm: &Vm) -> Option<u64> {
+  fs::metadata(&vm.dir).map(|x| x.ino()).ok()
 }
 
 fn list() -> io::Result<()> {
@@ -435,4 +451,46 @@ fn list() -> io::Result<()> {
   }
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use std::process;
+
+  use super::*;
+  use crate::vm::Config;
+
+  #[test]
+  fn removes() {
+    let root = env::temp_dir().join(format!("trivm-remove-{}", process::id()));
+    let vm = Vm {
+      conf: root.join("a.conf"),
+      dir: root.join("data/a"),
+      state_dir: root.join("state/a"),
+      ..Vm::at("a", Config::default())
+    };
+    let make = || {
+      fs::create_dir_all(&vm.dir).unwrap();
+      fs::create_dir_all(&vm.state_dir).unwrap();
+      fs::write(&vm.conf, "").unwrap();
+    };
+    let none = || !vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists();
+
+    // Removed by another while it stopped, and one of its name made: that one stays.
+    make();
+    let was = data_ino(&vm);
+    vm.remove().unwrap();
+    make();
+    assert!(remove(&vm, was).unwrap_err().to_string().contains("was deleted meanwhile"));
+    assert!(vm.dir.exists() && vm.conf.exists());
+
+    // Its own, then one whose delete was cut short after its data folder.
+    remove(&vm, data_ino(&vm)).unwrap();
+    assert!(none());
+    fs::create_dir_all(&vm.state_dir).unwrap();
+    fs::write(&vm.conf, "").unwrap();
+    remove(&vm, None).unwrap();
+    assert!(none());
+    fs::remove_dir_all(&root).unwrap();
+  }
 }
