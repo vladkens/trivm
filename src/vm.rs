@@ -301,12 +301,7 @@ impl Vm {
   /// The pid of the VM's process while it runs: the process holds a lock on its `pid` file, so a
   /// file left by a dead one doesn't count, though its pid may be another process's by now.
   pub fn pid(&self) -> Option<i32> {
-    let f = fs::File::open(self.state("pid")).ok()?;
-    if !matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
-      return None;
-    }
-
-    io::read_to_string(f).ok()?.trim().parse().ok()
+    pid_of(&fs::File::open(self.state("pid")).ok()?)
   }
 
   /// Marks the VM as running, with this process's pid, for as long as the file returned is open.
@@ -450,6 +445,15 @@ pub fn clone_mac(mac: &str, name: &str) -> io::Result<String> {
 
 fn mac_text(b: &[u8; 6]) -> String {
   b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
+}
+
+/// The pid in an open `pid` file while its process holds the lock on it.
+pub fn pid_of(f: &fs::File) -> Option<i32> {
+  if !matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
+    return None;
+  }
+
+  io::read_to_string(f).ok()?.trim().parse().ok()
 }
 
 unsafe extern "C" {

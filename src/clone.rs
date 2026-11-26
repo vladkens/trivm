@@ -161,11 +161,18 @@ pub fn reap() -> io::Result<()> {
 /// another.
 fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   let ours = || fs::metadata(&vm.dir).is_ok_and(|x| x.ino() == ino);
+  // Opened before the folder is checked, so it is the clone's even if the name is another VM's by
+  // the time it is read: a removal takes the data folder first, and APFS doesn't reuse inodes.
+  let pid = fs::File::open(vm.state("pid"));
   if !ours() {
     return Ok(());
   }
 
-  crate::stop(vm, true)?;
+  // Nothing of the clone's is kept: its process killed by its pid, not reached by its name.
+  if let Ok(f) = pid {
+    kill(&f);
+  }
+
   // A clone of it being made holds it a moment. Taken with no pid, as `delete` takes a VM.
   let mut lock = vm.take();
   for _ in 0..60 {
@@ -188,8 +195,23 @@ fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   fs::remove_dir_all(&vm.dir)
 }
 
+/// Kills the process that holds an open `pid` file's lock, and waits until it lets go.
+fn kill(f: &fs::File) {
+  let Some(pid) = vm::pid_of(f) else { return };
+  vm::signal(pid, 9);
+  for _ in 0..100 {
+    if vm::pid_of(f) != Some(pid) {
+      return;
+    }
+
+    thread::sleep(Duration::from_millis(100));
+  }
+}
+
 #[cfg(test)]
 mod tests {
+  use std::os::unix::fs::FileExt;
+  use std::os::unix::process::ExitStatusExt;
   use std::process;
 
   use super::*;
@@ -226,6 +248,24 @@ mod tests {
       discard(&vm, ino).unwrap();
     });
     assert!(t.elapsed() >= Duration::from_millis(500));
+    assert!(!vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists());
+
+    // Its process, holding the lock through its stdin as QEMU does: left alone with another VM's
+    // folder by that name, else killed by its pid.
+    let ino = make();
+    let lock = vm.lock().unwrap();
+    let mut child = Command::new("sleep")
+      .arg("30")
+      .stdin(Stdio::from(lock.try_clone().unwrap()))
+      .spawn()
+      .unwrap();
+    let pid = format!("{:<10}", child.id());
+    lock.write_all_at(pid.as_bytes(), 0).unwrap();
+    drop(lock);
+    discard(&vm, ino + 1).unwrap();
+    assert!(child.try_wait().unwrap().is_none() && vm.dir.exists());
+    discard(&vm, ino).unwrap();
+    assert_eq!(child.wait().unwrap().signal(), Some(9));
     assert!(!vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists());
 
     // One whose removal was cut short, its config and state gone: its data goes too.
