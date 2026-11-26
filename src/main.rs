@@ -1,12 +1,14 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
 //! trivm: macOS and Linux VMs on Apple silicon for coding agents to test apps in. A VM runs in a
 //! process of its own (`vz.rs`), commands and files go through SSH (`ssh.rs`), the screen is read
-//! and driven from the host (`display.rs`), `create` installs a system (`system.rs`), and `clone`
-//! and `run` copy one (`clone.rs`).
+//! and driven from the host (`display.rs`), `create` installs a system (`system.rs`), `clone`
+//! and `run` copy one (`clone.rs`), and `os grant` and `os sip` give the app under test its macOS
+//! permissions (`permissions.rs`).
 
 mod args;
 mod clone;
 mod display;
+mod permissions;
 mod qcow2;
 mod ssh;
 mod system;
@@ -56,6 +58,8 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Delete { vm } => delete(&Vm::open(&vm)?)?,
     Cmd::Clone { vm, name } => _ = clone::clone(&vm, &name, vm::random_mac()?, |_| Ok(()))?,
     Cmd::Run { vm, cmd } => return Ok(status(clone::run(&vm, &cmd)?)),
+    Cmd::Sip { vm, on } => permissions::sip(&vm, on)?,
+    Cmd::Grant { vm, app, services } => permissions::grant(&vm, &app, &services)?,
     Cmd::Open { vm } => {
       if Vm::open(&vm)?.pid().is_none() {
         start(&vm)?;
@@ -84,9 +88,9 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = vz::ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = vz::ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = vz::ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
-    Cmd::Serve { vm } => {
+    Cmd::Serve { vm, recovery } => {
       signed()?;
-      vz::serve(Vm::open(&vm)?)?;
+      vz::serve(Vm::open(&vm)?, recovery)?;
     }
     Cmd::Reap => clone::reap()?,
   }
@@ -171,7 +175,7 @@ fn signed() -> io::Result<()> {
 pub fn start(name: &str) -> io::Result<()> {
   let mut vm = Vm::open(name)?;
   if vm.pid().is_none() {
-    spawn(&vm)?;
+    spawn(&vm, false)?;
   }
 
   match (vm.setup, vm.config.os()) {
@@ -191,15 +195,16 @@ pub fn start(name: &str) -> io::Result<()> {
   Ok(())
 }
 
-/// Runs the VM's process in a session of its own and waits until the VM runs, in it or in another
-/// `start`'s, whose lock makes this one exit.
-fn spawn(vm: &Vm) -> io::Result<()> {
+/// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and
+/// waits until the VM runs, in it or in another `start`'s, whose lock makes this one exit.
+pub fn spawn(vm: &Vm, recovery: bool) -> io::Result<()> {
   let name = &vm.name;
   vm::made(&vm.state_dir)?;
   let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let mut cmd = Command::new(env::current_exe()?);
   cmd
     .args(["_run", name])
+    .args(recovery.then_some("--recovery"))
     .env_remove("TRIVM_SIGNED")
     .stdin(Stdio::null())
     .stdout(log.try_clone()?)
@@ -245,12 +250,13 @@ unsafe extern "C" {
 }
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
-fn stop(vm: &Vm, force: bool) -> io::Result<()> {
+pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let Some(pid) = vm.pid() else { return Ok(()) };
+  // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.
   let gone = |secs: u64| {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
-      if vm.pid().is_none() {
+      if vm.pid() != Some(pid) {
         return true;
       }
 
@@ -281,7 +287,8 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     }
   }
 
-  let _ = vz::ask(vm, "kill", "");
+  // A VM process busy with a long request answers late; SIGKILL follows anyway.
+  let _ = vz::ask_within(vm, "kill", "", Duration::from_secs(5));
   if !gone(15) {
     vm::signal(pid, 9);
     if !gone(5) {
