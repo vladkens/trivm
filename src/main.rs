@@ -281,7 +281,8 @@ unsafe extern "C" {
   fn setsid() -> i32;
 }
 
-/// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
+/// Shuts the guest down from inside, or by its power button when its SSH doesn't answer, or with
+/// `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   // A starting Windows VM's pid and port are its start's until QEMU runs: read once it does. One
   // stuck starting is killed only with --force.
@@ -317,7 +318,7 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     false
   };
 
-  if !force && vm.ip().is_some() {
+  if !force {
     let cmd = match vm.config.os() {
       Os::Macos => "sudo -n shutdown -h now",
       Os::Linux => "sudo -n systemctl poweroff",
@@ -325,16 +326,29 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     };
 
     // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
-    let mut ssh = ssh::ssh(vm)?;
-    ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let child = ssh.spawn();
-    // The power button too, for a guest whose SSH isn't up.
-    if vm.config.os() == Os::Windows {
-      let _ = ask(vm, "stop", "");
+    let up = ssh::answers(vm);
+    let mut child = None;
+    if up {
+      let mut ssh = ssh::ssh(vm)?;
+      ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+      child = ssh.spawn().ok();
+    }
+
+    // The power button for a guest whose SSH doesn't answer, and for Windows, whose forwarded
+    // port answers before its SSH does. macOS asks first; a VM process busy answers late.
+    if !up || vm.config.os() == Os::Windows {
+      let _ = match vm.config.os() {
+        Os::Windows => ask(vm, "stop", ""),
+        _ => vz::ask_within(vm, "stop", "", Duration::from_secs(5)),
+      };
+
+      if vm.config.os() == Os::Macos {
+        let _ = shut_down(vm);
+      }
     }
 
     let down = gone(120);
-    if let Ok(mut x) = child {
+    if let Some(mut x) = child {
       let _ = x.kill();
       let _ = x.wait();
     }
@@ -357,6 +371,28 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     }
   }
 
+  Ok(())
+}
+
+/// Answers macOS's question at its power button: Shut Down, clicked again while it shows, as a
+/// click while the dialog fades in is lost.
+fn shut_down(vm: &Vm) -> io::Result<()> {
+  let shot = env::temp_dir().join(format!("trivm-{}-stop.png", vm.name));
+  let (t, mut clicked) = (Instant::now(), false);
+  while t.elapsed() < Duration::from_secs(30) {
+    vz::ask(vm, "shot", &shot.to_string_lossy())?;
+    match permissions::find_text(&shot, "Shut Down")? {
+      Some((x, y)) => {
+        vz::ask(vm, &format!("click {x} {y} left 1"), "")?;
+        clicked = true;
+        thread::sleep(Duration::from_secs(3));
+      }
+      None if clicked => break,
+      None => thread::sleep(Duration::from_secs(1)),
+    }
+  }
+
+  let _ = fs::remove_file(&shot);
   Ok(())
 }
 
