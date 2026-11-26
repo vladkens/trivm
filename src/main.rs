@@ -379,12 +379,14 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
 /// 30 s: Vision's first read in a newly installed trivm takes half a minute.
 fn shut_down(vm: &Vm) -> io::Result<()> {
   let shot = env::temp_dir().join(format!("trivm-{}-stop.png", vm.name));
+  // A VM process that doesn't answer is left to the kill after.
+  let ask = |req: &str, body: &str| vz::ask_within(vm, req, body, Duration::from_secs(10));
   let mut clicked = false;
   for _ in 0..30 {
-    vz::ask(vm, "shot", &shot.to_string_lossy())?;
+    ask("shot", &shot.to_string_lossy())?;
     match permissions::find_text(&shot, "Shut Down")? {
       Some((x, y)) => {
-        vz::ask(vm, &format!("click {x} {y} left 1"), "")?;
+        ask(&format!("click {x} {y} left 1"), "")?;
         clicked = true;
         thread::sleep(Duration::from_secs(3));
       }
