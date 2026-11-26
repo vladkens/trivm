@@ -610,10 +610,27 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
     [&|x| x.name == text, &|x| x.name.to_lowercase() == low, &|x| {
       x.name.to_lowercase().contains(&low)
     }];
-  let found = |f: &&dyn Fn(&Node) -> bool| -> Vec<&Node> {
-    nodes.iter().filter(|x| x.depth > 0 && f(x)).collect()
-  };
-  tiers.iter().map(found).find(|x| !x.is_empty()).unwrap_or_default()
+  tiers.iter().map(|f| outermost(nodes, f)).find(|x| !x.is_empty()).unwrap_or_default()
+}
+
+/// The elements that match and aren't inside one that does: GTK 4 gives a cell, a cell in it and
+/// its label one name, one element to click.
+fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node> {
+  let mut out = Vec::new();
+  // The depth of the match the elements now are in.
+  let mut inside = None;
+  for x in nodes {
+    if inside.is_some_and(|depth| x.depth <= depth) {
+      inside = None;
+    }
+
+    if x.depth > 0 && inside.is_none() && hit(x) {
+      out.push(x);
+      inside = Some(x.depth);
+    }
+  }
+
+  out
 }
 
 /// Whether the element is an item of an open menu whose items all lie in `frame`: the popup the
@@ -949,6 +966,24 @@ mod tests {
       (found("Save"), found("save"), found("sav")),
       (vec!["Save"], vec!["Save", "SAVE"], vec!["Save as", "Save", "SAVE"])
     );
+
+    // GTK 4's cell, its twin and its label in Files are one; the next is another.
+    let el = |depth: usize, role: &str, name: &str| Node {
+      depth,
+      role: role.into(),
+      name: name.into(),
+      ..Node::default()
+    };
+    let cells = [
+      el(0, "window", "Home"),
+      el(1, "cell", "Videos"),
+      el(2, "cell", "Videos"),
+      el(3, "statictext", "Videos"),
+      el(1, "cell", "Music"),
+      el(1, "statictext", "Videos"),
+    ];
+    let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
+    assert_eq!(roles("Videos"), ["cell", "statictext"]);
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;
