@@ -4,7 +4,7 @@
 //! DHCP leases.
 
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::{env, fs, process};
@@ -447,12 +447,20 @@ fn mac_text(b: &[u8; 6]) -> String {
   b.iter().map(|x| format!("{x:02x}")).collect::<Vec<_>>().join(":")
 }
 
-/// The pid in an open `pid` file while its process holds the lock on it.
-pub fn pid_of(f: &fs::File) -> Option<i32> {
-  if !matches!(f.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
-    return None;
+/// The pid in an open `pid` file while its process holds the lock on it, read from its start each
+/// time, so it can be asked again.
+pub fn pid_of(mut f: &fs::File) -> Option<i32> {
+  match f.try_lock_shared() {
+    Err(fs::TryLockError::WouldBlock) => {}
+    // No holder: let go, as the file stays open and would keep others from taking it.
+    Ok(()) => {
+      let _ = f.unlock();
+      return None;
+    }
+    Err(_) => return None,
   }
 
+  f.seek(io::SeekFrom::Start(0)).ok()?;
   io::read_to_string(f).ok()?.trim().parse().ok()
 }
 

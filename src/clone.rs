@@ -262,6 +262,13 @@ mod tests {
     let pid = format!("{:<10}", child.id());
     lock.write_all_at(pid.as_bytes(), 0).unwrap();
     drop(lock);
+
+    // Read again through one handle, as `kill` waits.
+    let f = fs::File::open(vm.state("pid")).unwrap();
+    let id = Some(child.id() as i32);
+    assert_eq!((vm::pid_of(&f), vm::pid_of(&f)), (id, id));
+    drop(f);
+
     discard(&vm, ino + 1).unwrap();
     assert!(child.try_wait().unwrap().is_none() && vm.dir.exists());
     discard(&vm, ino).unwrap();
