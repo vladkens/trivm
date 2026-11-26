@@ -272,6 +272,12 @@ Stop-Service sshd
 $keys = 'C:\ProgramData\ssh\administrators_authorized_keys'
 Copy-Item "$seed\key.pub" $keys
 icacls $keys /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F'
+# Keys only, as on the others: the forwarded port is the Mac's other users' to reach too. The
+# first of a setting counts; sshd made its config when the MSI started it.
+$config = 'C:\ProgramData\ssh\sshd_config'
+if (Test-Path $config) {{
+  Set-Content $config (@('PasswordAuthentication no', 'KbdInteractiveAuthentication no') + (Get-Content $config))
+}}
 if (-not (Get-NetFirewallRule -Name trivm-ssh -ErrorAction SilentlyContinue)) {{
   New-NetFirewallRule -Name trivm-ssh -DisplayName 'OpenSSH (trivm)' -Direction Inbound -Protocol TCP -LocalPort 22 -Action Allow -Profile Any | Out-Null
 }}
@@ -362,5 +368,6 @@ mod tests {
     assert!(ps.trim_end().ends_with("Start-Service sshd\nStop-Transcript"));
     // The MSI starts sshd: stopped until the end.
     assert!(ps.find("msiexec") < ps.find("Stop-Service sshd"));
+    assert!(ps.contains("@('PasswordAuthentication no', 'KbdInteractiveAuthentication no')"));
   }
 }
