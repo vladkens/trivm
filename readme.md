@@ -82,8 +82,9 @@ An agent can read the screen as named elements and click them by name: `ui` list
 the guest's desktop (and macOS's menu bar) with their elements, a line each with the role, name,
 value, state and frame in a shot's pixels, read through the system's accessibility by
 [agent-desktop](https://github.com/vercel-labs/agent-desktop), which trivm puts in the guest at
-the first use. On macOS it needs SIP off for its grant. An app shows what its toolkit gives
-accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the first `ui`.
+the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`). An app shows what its
+toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the
+first `ui`. On Windows `ui` and `click --name` aren't supported yet.
 
 ```sh
 trivm ui macos-27 --app Wavo

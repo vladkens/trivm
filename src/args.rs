@@ -52,7 +52,7 @@ The screen, from the host:
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
 The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
-(on macOS with its Accessibility grant, which needs SIP off):
+(on macOS with its Accessibility grant, which needs SIP off; not supported on Windows):
   ui <vm> [--app <name>]  the visible windows, all apps' or one's, and macOS's menu bar, with
                           their elements, a line each: role, \"name\", = \"value\", [states] and
                           frame (x,y wxh in a shot's pixels)
