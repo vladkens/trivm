@@ -2,11 +2,15 @@
 //! trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test apps in. A
 //! macOS or Linux VM runs in a process of its own (`vz.rs`), a Windows VM is QEMU's (`qemu.rs`);
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
-//! (`display.rs`, QMP for QEMU), and `create` installs a system (`system.rs`, `windows.rs`).
+//! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), `clone`
+//! and `run` copy one (`clone.rs`), and `os grant` and `os sip` give the app under test its macOS
+//! permissions (`permissions.rs`).
 
 mod apfs;
 mod args;
+mod clone;
 mod display;
+mod permissions;
 mod qcow2;
 mod qemu;
 mod ssh;
@@ -15,7 +19,7 @@ mod vm;
 mod vz;
 mod windows;
 
-use std::os::unix::process::CommandExt;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
@@ -39,28 +43,31 @@ fn main() -> ExitCode {
 }
 
 fn start_cli() -> io::Result<ExitCode> {
-  let status =
-    |x: std::process::ExitStatus| ExitCode::from(x.code().unwrap_or(1).clamp(0, 255) as u8);
+  // A command ended by a signal exits as a shell has it: 128 + the signal.
+  let status = |x: std::process::ExitStatus| {
+    let code = x.code().or(x.signal().map(|x| 128 + x)).unwrap_or(1);
+    ExitCode::from(code.clamp(0, 255) as u8)
+  };
 
   match args::parse(env::args().skip(1))? {
     Cmd::Help => print!("{}", args::HELP),
     Cmd::Version => println!("trivm {}", env!("CARGO_PKG_VERSION")),
-    Cmd::Create { system, name, cpus, memory, disk, iso } => {
+    Cmd::Create { system, name, cpus, memory, disk } => {
       signed()?;
-      system::create(&system, name, cpus, memory, disk, iso)?;
+      system::create(&system, name, cpus, memory, disk)?;
     }
     Cmd::Start { vm } => start(&vm)?,
     Cmd::Stop { vm, force } => stop(&Vm::open(&vm)?, force)?,
     Cmd::List => list()?,
-    Cmd::Delete { vm } => {
-      let vm = Vm::open(&vm)?;
-      stop(&vm, true)?;
-      fs::remove_dir_all(&vm.dir)?;
-    }
+    Cmd::Delete { vm } => delete(&Vm::open(&vm)?)?,
+    Cmd::Clone { vm, name } => _ = clone::clone(&vm, &name, vm::random_mac()?, |_| Ok(()))?,
+    Cmd::Run { vm, cmd } => return Ok(status(clone::run(&vm, &cmd)?)),
+    Cmd::Sip { vm, on } => permissions::sip(&vm, on)?,
+    Cmd::Grant { vm, app, services } => permissions::grant(&vm, &app, &services)?,
     Cmd::Open { vm } => {
       // One still being set up shows at once: an older macOS's Setup Assistant is answered in it.
       let vm = match Vm::open(&vm)? {
-        x if x.config.setup => boot(&vm)?,
+        x if x.setup => boot(&vm)?,
         x if x.pid().is_none() => start(&vm).and_then(|_| Vm::open(&vm))?,
         x => x,
       };
@@ -88,10 +95,11 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
-    Cmd::Run { vm } => {
+    Cmd::Serve { vm, recovery } => {
       signed()?;
-      vz::serve(Vm::open(&vm)?)?;
+      vz::serve(Vm::open(&vm)?, recovery)?;
     }
+    Cmd::Reap => clone::reap()?,
   }
 
   Ok(ExitCode::SUCCESS)
@@ -142,9 +150,10 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 "#;
 
 /// VZ runs only in a binary signed with the virtualization entitlement: trivm signs itself ad hoc
-/// the first time (a copy signed, then renamed over the running binary) and runs again.
+/// the first time (a copy signed, then renamed over the running binary) and runs again. The binary
+/// is the file a symlink to it names: `current_exe` is the path trivm was run by.
 fn signed() -> io::Result<()> {
-  let exe = env::current_exe()?;
+  let exe = env::current_exe()?.canonicalize()?;
   let out =
     Command::new("codesign").args(["-d", "--entitlements", "-", "--xml"]).arg(&exe).output()?;
   if String::from_utf8_lossy(&out.stdout).contains("com.apple.security.virtualization") {
@@ -158,8 +167,8 @@ fn signed() -> io::Result<()> {
     )));
   }
 
-  let plist = vm::home().join("entitlements.plist");
-  fs::create_dir_all(vm::home())?;
+  let plist = vm::cache_dir().join("entitlements.plist");
+  vm::made(&vm::cache_dir())?;
   fs::write(&plist, ENTITLEMENTS)?;
   let copy = exe.with_extension(format!("signing{}", std::process::id()));
   fs::copy(&exe, &copy)?;
@@ -180,20 +189,20 @@ fn signed() -> io::Result<()> {
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
   let mut vm = boot(name)?;
-  if vm.config.setup {
-    match vm.config.os() {
-      Os::Macos => system::macos_setup(&vm)?,
-      Os::Linux => system::linux_setup(&vm)?,
-      Os::Windows => system::windows_setup(&vm)?,
-    }
-
-    vm.config.setup = false;
-    vm.save()?;
-  } else {
-    ssh::wait(&vm, Duration::from_secs(300))?;
+  match (vm.setup, vm.config.os()) {
+    (true, Os::Macos) => system::macos_setup(&vm)?,
+    (true, Os::Linux) => system::linux_setup(&vm)?,
+    (true, Os::Windows) => system::windows_setup(&vm)?,
+    (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
   system::desktop(&vm)?;
+  // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
+  if vm.setup {
+    vm.setup = false;
+    vm.save()?;
+  }
+
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
 }
@@ -204,10 +213,10 @@ fn boot(name: &str) -> io::Result<Vm> {
   if vm.pid().is_none() {
     match vm.config.os() {
       Os::Windows => {
-        let cds = system::windows_cds(&vm);
+        let cds = system::windows_cds(&vm)?;
         qemu::spawn(&mut vm, &cds)?
       }
-      _ => spawn(&vm)?,
+      _ => spawn(&vm, false)?,
     }
 
     return Ok(vm);
@@ -222,20 +231,21 @@ fn boot(name: &str) -> io::Result<Vm> {
   Vm::open(name)
 }
 
-/// Runs the VM's process in a session of its own and waits until the VM runs, in it or in another
-/// `start`'s, whose lock makes this one exit.
-fn spawn(vm: &Vm) -> io::Result<()> {
+/// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and
+/// waits until the VM runs, in it or in another `start`'s, whose lock makes this one exit.
+pub fn spawn(vm: &Vm, recovery: bool) -> io::Result<()> {
   let name = &vm.name;
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  vm::made(&vm.state_dir)?;
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let mut cmd = Command::new(env::current_exe()?);
   cmd
     .args(["_run", name])
+    .args(recovery.then_some("--recovery"))
     .env_remove("TRIVM_SIGNED")
     .stdin(Stdio::null())
     .stdout(log.try_clone()?)
     .stderr(log);
-  // SAFETY: setsid is async-signal-safe.
-  unsafe { cmd.pre_exec(|| if setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }) };
+  detach(&mut cmd);
   let mut child = cmd.spawn()?;
 
   let t = Instant::now();
@@ -243,7 +253,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     if let Some(code) = child.try_wait()?
       && vm.pid().is_none()
     {
-      let log = fs::read_to_string(vm.path("log")).unwrap_or_default();
+      let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
       let tail: Vec<_> = log.lines().rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{name} didn't start ({code}):\n{}", tail.join("\n"))));
@@ -256,7 +266,7 @@ fn spawn(vm: &Vm) -> io::Result<()> {
     if t.elapsed() > Duration::from_secs(120) {
       return Err(bad(format!(
         "{name} didn't start in 2 minutes; see {}",
-        vm.path("log").display()
+        vm.state("log").display()
       )));
     }
 
@@ -264,17 +274,44 @@ fn spawn(vm: &Vm) -> io::Result<()> {
   }
 }
 
+/// Makes `cmd` run in a session of its own, out of the terminal's reach: Ctrl+C or the terminal
+/// closed don't end it.
+pub fn detach(cmd: &mut Command) {
+  // SAFETY: setsid is async-signal-safe.
+  unsafe { cmd.pre_exec(|| if setsid() < 0 { Err(io::Error::last_os_error()) } else { Ok(()) }) };
+}
+
 unsafe extern "C" {
   fn setsid() -> i32;
 }
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
-fn stop(vm: &Vm, force: bool) -> io::Result<()> {
+pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
+  // A starting Windows VM's pid and port are its start's until QEMU runs: read once it does. One
+  // stuck starting is killed only with --force.
+  let started;
+  let vm = match vm.config.os() {
+    Os::Windows if vm.pid().is_some() => {
+      if !qemu::started(vm) {
+        if !force {
+          return Err(bad(format!("{} is still starting; stop it with --force", vm.name)));
+        }
+
+        qemu::cancel(vm)?;
+      }
+
+      started = Vm::open(&vm.name)?;
+      &started
+    }
+    _ => vm,
+  };
+
   let Some(pid) = vm.pid() else { return Ok(()) };
+  // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.
   let gone = |secs: u64| {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
-      if vm.pid().is_none() {
+      if vm.pid() != Some(pid) {
         return true;
       }
 
@@ -291,21 +328,33 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
       Os::Windows => "shutdown /s /t 0",
     };
 
-    let _ = ssh::ssh(vm)?.args(["--", cmd]).stdin(Stdio::null()).output();
+    // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
+    let mut ssh = ssh::ssh(vm)?;
+    ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    let child = ssh.spawn();
     // The power button too, for a guest whose SSH isn't up.
     if vm.config.os() == Os::Windows {
       let _ = ask(vm, "stop", "");
     }
 
-    if gone(120) {
+    let down = gone(120);
+    if let Ok(mut x) = child {
+      let _ = x.kill();
+      let _ = x.wait();
+    }
+
+    if down {
       return Ok(());
     }
   }
 
-  let _ = ask(vm, "kill", "");
+  // A VM process busy with a long request answers late; SIGKILL follows anyway.
+  let _ = match vm.config.os() {
+    Os::Windows => ask(vm, "kill", ""),
+    _ => vz::ask_within(vm, "kill", "", Duration::from_secs(5)),
+  };
+
   if !gone(15) {
-    // The pid now: a starting Windows VM's is trivm's until QEMU's replaces it.
-    let pid = vm.pid().unwrap_or(pid);
     vm::signal(pid, 9);
     if !gone(5) {
       return Err(bad(format!("{} didn't stop; its process is {pid}", vm.name)));
@@ -313,6 +362,14 @@ fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   }
 
   Ok(())
+}
+
+/// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
+/// and one being made or cloned isn't removed under it.
+fn delete(vm: &Vm) -> io::Result<()> {
+  stop(vm, true)?;
+  let _lock = vm.take()?;
+  vm.remove()
 }
 
 fn list() -> io::Result<()> {
@@ -328,7 +385,7 @@ fn list() -> io::Result<()> {
   );
   for vm in vms {
     let c = &vm.config;
-    let state = match (vm.pid().is_some(), c.setup) {
+    let state = match (vm.pid().is_some(), vm.setup) {
       (true, _) => "running",
       (false, true) => "new",
       (false, false) => "stopped",

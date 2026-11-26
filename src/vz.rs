@@ -86,9 +86,8 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
     let net = VZVirtioNetworkDeviceConfiguration::new();
     net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
-    let mac =
-      VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&vm.config.mac));
-    let mac = mac.ok_or_else(|| bad(format!("config: not a MAC address: {}", vm.config.mac)))?;
+    let mac = VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&vm.mac));
+    let mac = mac.ok_or_else(|| bad(format!("{}: not a MAC address", vm.path("mac").display())))?;
     net.setMACAddress(&mac);
     c.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
 
@@ -176,7 +175,7 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
         let console = VZFileSerialPortAttachment::initWithURL_append_error(
           VZFileSerialPortAttachment::alloc(),
-          &url(&vm.path("console.log")),
+          &url(&vm.state("console.log")),
           true,
         )
         .map_err(ns)?;
@@ -261,20 +260,17 @@ pub fn mac_platform(vm: &Vm, ipsw: &Path) -> io::Result<()> {
       VZMacAuxiliaryStorageInitializationOptions::AllowOverwrite,
     )
     .map_err(ns)?;
-    fs::write(vm.path("machine.bin"), VZMacMachineIdentifier::new().dataRepresentation().to_vec())?;
   }
 
+  fs::write(vm.path("machine.bin"), machine_id(Os::Macos))?;
   fs::write(vm.path("hardware.bin"), hw)
 }
 
 /// Linux's `machine.bin` and `efi.bin`.
 pub fn linux_platform(vm: &Vm) -> io::Result<()> {
-  // SAFETY: plain objects; the store is made at a path in the VM's folder.
+  fs::write(vm.path("machine.bin"), machine_id(Os::Linux))?;
+  // SAFETY: a plain object, made at a path in the VM's folder.
   unsafe {
-    fs::write(
-      vm.path("machine.bin"),
-      VZGenericMachineIdentifier::new().dataRepresentation().to_vec(),
-    )?;
     VZEFIVariableStore::initCreatingVariableStoreAtURL_options_error(
       VZEFIVariableStore::alloc(),
       &url(&vm.path("efi.bin")),
@@ -284,6 +280,17 @@ pub fn linux_platform(vm: &Vm) -> io::Result<()> {
   }
 
   Ok(())
+}
+
+/// A new machine identifier, `machine.bin`: Apple asks VMs that run at once to have their own.
+pub fn machine_id(os: Os) -> Vec<u8> {
+  // SAFETY: plain objects.
+  unsafe {
+    match os {
+      Os::Macos => VZMacMachineIdentifier::new().dataRepresentation().to_vec(),
+      Os::Linux | Os::Windows => VZGenericMachineIdentifier::new().dataRepresentation().to_vec(),
+    }
+  }
 }
 
 /// Installs macOS from the IPSW on the VM's disk, printing the progress.
@@ -370,8 +377,9 @@ fn provisioning() -> io::Result<Retained<VZMacOSVirtualMachineStartOptions>> {
   }
 }
 
-/// `trivm _run <vm>`: starts the VM and serves `ctl.sock` until the VM stops.
-pub fn serve(vm: Vm) -> io::Result<()> {
+/// `trivm _run <vm>`: starts the VM, macOS's from recoveryOS with `recovery`, and serves
+/// `ctl.sock` until the VM stops.
+pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   let _lock = vm.lock()?;
   let mtm = MainThreadMarker::new().ok_or_else(|| bad("not on the main thread"))?;
   let app = NSApplication::sharedApplication(mtm);
@@ -389,8 +397,14 @@ pub fn serve(vm: Vm) -> io::Result<()> {
   // SAFETY: the VM runs on the main queue, which `app.run()` runs.
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
-  match (vm.config.os(), vm.config.setup) {
-    (Os::Macos, true) if vm.config.provisioned() => {
+  match (vm.config.os(), vm.setup, recovery) {
+    (Os::Linux, _, true) => return Err(bad(format!("{} runs Linux: no recoveryOS", vm.name))),
+    (Os::Macos, _, true) => unsafe {
+      let opts = VZMacOSVirtualMachineStartOptions::new();
+      opts.setStartUpFromMacOSRecovery(true);
+      machine.startWithOptions_completionHandler(&opts, &block)
+    },
+    (Os::Macos, true, false) if vm.config.provisioned() => {
       let opts = provisioning()?;
       unsafe { machine.startWithOptions_completionHandler(&opts, &block) }
     }
@@ -400,10 +414,10 @@ pub fn serve(vm: Vm) -> io::Result<()> {
   let display = Display::new(mtm, &machine, screen(vm.config.os()), &vm.name);
   STATE.with(|s| *s.borrow_mut() = Some(State { machine, display }));
 
-  let sock = vm.path("ctl.sock");
+  let sock = vm.state("ctl.sock");
   let _ = fs::remove_file(&sock);
   let listener = UnixListener::bind(&sock)?;
-  let dir = vm.dir.clone();
+  let dir = vm.state_dir.clone();
   thread::spawn(move || watch(&dir));
   thread::spawn(move || {
     for conn in listener.incoming().flatten() {
@@ -449,6 +463,8 @@ fn quit(dir: &Path, code: i32, why: &str) -> ! {
 /// A request is its first line and, for `type` and `shot`, the text after it (the text, the
 /// shot's path); the reply is `ok [info]` or `err <message>`.
 fn reply(mut conn: UnixStream) {
+  // Requests are served one at a time: one that never ends mustn't hold up the rest.
+  let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
   let mut req = String::new();
   if conn.read_to_string(&mut req).is_err() {
     return;
@@ -519,14 +535,19 @@ fn handle(req: &str) -> io::Result<String> {
 
 /// Sends a request to the VM's process and returns its answer.
 pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
-  let sock = vm.path("ctl.sock");
+  ask_within(vm, req, body, Duration::from_secs(300))
+}
+
+/// [ask], waiting for the answer at most `wait`.
+pub fn ask_within(vm: &Vm, req: &str, body: &str, wait: Duration) -> io::Result<String> {
+  let sock = vm.state("ctl.sock");
   let not_running = || bad(format!("{} isn't running; trivm start {}", vm.name, vm.name));
   if vm.pid().is_none() {
     return Err(not_running());
   }
 
   let mut s = UnixStream::connect(&sock).map_err(|_| not_running())?;
-  s.set_read_timeout(Some(Duration::from_secs(300)))?;
+  s.set_read_timeout(Some(wait))?;
   s.write_all(format!("{req}\n{body}").as_bytes())?;
   s.shutdown(std::net::Shutdown::Write)?;
 

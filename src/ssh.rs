@@ -3,7 +3,7 @@
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
 
@@ -13,16 +13,30 @@ use crate::{bad, run, windows};
 /// Set when trivm runs as `ssh`'s askpass program: it prints the guest's password.
 pub const ASKPASS: &str = "TRIVM_ASKPASS";
 
-/// trivm's key, made on first use.
+/// trivm's key, made on first use beside its place, then moved there, the public half last: a
+/// public half there is whole.
 pub fn key() -> io::Result<PathBuf> {
-  let path = vm::home().join("id_ed25519");
-  if !path.exists() {
-    fs::create_dir_all(vm::home())?;
+  let path = vm::data_dir().join("id_ed25519");
+  if path.with_extension("pub").exists() {
+    return Ok(path);
+  }
+
+  // Two first uses at once make one key.
+  vm::made(&vm::data_dir())?;
+  let lock = fs::File::create(path.with_extension("lock"))?;
+  lock.lock()?;
+  if !path.with_extension("pub").exists() {
+    let new = path.with_extension(format!("new{}", process::id()));
+    let public = |x: &Path| PathBuf::from(format!("{}.pub", x.display()));
+    let _ = fs::remove_file(&new);
+    let _ = fs::remove_file(public(&new));
     run(
       Command::new("ssh-keygen")
         .args(["-q", "-t", "ed25519", "-N", "", "-C", "trivm", "-f"])
-        .arg(&path),
+        .arg(&new),
     )?;
+    fs::rename(&new, &path)?;
+    fs::rename(public(&new), public(&path))?;
   }
 
   Ok(path)
@@ -32,21 +46,27 @@ pub fn public_key() -> io::Result<String> {
   Ok(fs::read_to_string(key()?.with_extension("pub"))?.trim().to_string())
 }
 
-pub fn ip(vm: &Vm) -> io::Result<String> {
-  // A stopped VM's address or port may be another VM's by now.
+/// The guest's address and SSH's forwarded port, if any, of a running VM: a stopped VM's may be
+/// another VM's by now. The port is read once the VM runs, as a start saves it before that.
+pub fn ip(vm: &Vm) -> io::Result<(String, Option<u16>)> {
   if vm.pid().is_none() {
     return Err(bad(format!("{} isn't running; trivm start {}", vm.name, vm.name)));
   }
 
-  vm.ip().ok_or_else(|| bad(format!("{} has no address yet", vm.name)))
+  let port = vm.saved_port();
+  let ip = match port {
+    Some(_) => Some("127.0.0.1".to_string()),
+    None => vm.ip(),
+  };
+
+  Ok((ip.ok_or_else(|| bad(format!("{} has no address yet", vm.name)))?, port))
 }
 
 /// The guest's SSH as `ip` or `ip:port`.
 pub fn address(vm: &Vm) -> io::Result<String> {
-  let ip = ip(vm)?;
-  Ok(match vm.config.port {
-    Some(port) => format!("{ip}:{port}"),
-    None => ip,
+  Ok(match ip(vm)? {
+    (ip, Some(port)) => format!("{ip}:{port}"),
+    (ip, None) => ip,
   })
 }
 
@@ -71,19 +91,20 @@ fn options(key: &Path) -> Vec<String> {
 pub fn ssh(vm: &Vm) -> io::Result<Command> {
   let mut cmd = Command::new("ssh");
   cmd.args(options(&key()?)).args(["-o", "BatchMode=yes"]);
-  if let Some(port) = vm.config.port {
+  let (ip, port) = ip(vm)?;
+  if let Some(port) = port {
     cmd.args(["-p", &port.to_string()]);
   }
 
-  cmd.arg(format!("{}@{}", vm::USER, ip(vm)?));
+  cmd.arg(format!("{}@{ip}", vm::USER));
   Ok(cmd)
 }
 
 /// A script as the guest runs it: Windows' as PowerShell, others' by the user's shell.
-fn remote(vm: &Vm, script: &str) -> String {
+fn remote(vm: &Vm, script: &str) -> io::Result<String> {
   match vm.config.os() {
     Os::Windows => windows::powershell(script),
-    _ => script.to_string(),
+    _ => Ok(script.to_string()),
   }
 }
 
@@ -110,12 +131,12 @@ pub fn exec(vm: &Vm, cmd: &[String]) -> io::Result<ExitStatus> {
     _ => line(cmd),
   };
 
-  ssh(vm)?.arg("--").arg(remote(vm, &line)).status()
+  ssh(vm)?.arg("--").arg(remote(vm, &line)?).status()
 }
 
 /// A shell script's output, which must succeed.
 pub fn output(vm: &Vm, script: &str) -> io::Result<String> {
-  let out = run(ssh(vm)?.arg("--").arg(remote(vm, script)).stdin(Stdio::null()))?;
+  let out = run(ssh(vm)?.arg("--").arg(remote(vm, script)?).stdin(Stdio::null()))?;
   Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
@@ -139,7 +160,8 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     }
 
     let vm = Vm::open(name)?;
-    Ok(url(&ip(&vm)?, vm.config.port, path))
+    let (ip, port) = ip(&vm)?;
+    Ok(url(&ip, port, path))
   };
 
   let (src, dst) = (side(src)?, side(dst)?);
@@ -149,11 +171,22 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     .status()
 }
 
+/// The guest's side of `scp`: an `scp://` URL with a port, whose path scp decodes (`%` escapes,
+/// `+` as a space), so all but plain characters are escaped. Windows' sshd finds no path with `\`
+/// in it: `/` in its place.
 fn url(ip: &str, port: Option<u16>, path: &str) -> String {
-  match port {
-    Some(port) => format!("scp://{}@{ip}:{port}/{path}", vm::USER),
-    None => format!("{}@{ip}:{path}", vm::USER),
-  }
+  let Some(port) = port else { return format!("{}@{ip}:{path}", vm::USER) };
+  let path: String = path
+    .bytes()
+    .map(|x| match x {
+      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+        (x as char).to_string()
+      }
+      b'\\' => "/".to_string(),
+      _ => format!("%{x:02X}"),
+    })
+    .collect();
+  format!("scp://{}@{ip}:{port}/{path}", vm::USER)
 }
 
 /// Waits until the guest runs a command over SSH with trivm's key.
@@ -162,7 +195,7 @@ pub fn wait(vm: &Vm, timeout: Duration) -> io::Result<()> {
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if vm.ip().is_some() {
@@ -189,7 +222,7 @@ pub fn with_password(vm: &Vm, script: &str, timeout: Duration) -> io::Result<()>
   let mut last = "no address yet".to_string();
   while start.elapsed() < timeout {
     if vm.pid().is_none() {
-      return Err(bad(format!("{} stopped; see {}", vm.name, vm.path("log").display())));
+      return Err(bad(format!("{} stopped; see {}", vm.name, vm.state("log").display())));
     }
 
     if let Some(ip) = vm.ip() {
@@ -242,5 +275,11 @@ mod tests {
     assert_eq!(url("192.168.64.2", None, "/tmp/"), "user@192.168.64.2:/tmp/");
     assert_eq!(url("127.0.0.1", Some(50022), "C:/x"), "scp://user@127.0.0.1:50022/C:/x");
     assert_eq!(url("127.0.0.1", Some(50022), ""), "scp://user@127.0.0.1:50022/");
+    let path = "C:\\a+b 100%/é@x";
+    assert_eq!(
+      url("127.0.0.1", Some(1), path),
+      "scp://user@127.0.0.1:1/C:/a%2Bb%20100%25/%C3%A9%40x"
+    );
+    assert_eq!(url("10.0.0.2", None, "/a+b 100%"), "user@10.0.0.2:/a+b 100%");
   }
 }

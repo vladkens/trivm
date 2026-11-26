@@ -2,6 +2,9 @@
 //! Windows' guest side: the unattended install's `autounattend.xml` and the setup script its
 //! first logon runs, and commands run as PowerShell through SSH, `desktop` among them.
 
+use std::io;
+
+use crate::bad;
 use crate::vm::{PASSWORD, USER};
 
 /// Microsoft's generic key for installing Windows 11 Pro; it doesn't activate it.
@@ -32,8 +35,10 @@ function desktop {
   $exe = "$($args[0])"
   $app = Get-Command $exe -CommandType Application -ErrorAction SilentlyContinue
   if ($app) { $exe = @($app)[0].Source }
+  # Quoted as Windows splits a command line: backslashes before a quote, or the closing one, doubled.
   $rest = @($args | Select-Object -Skip 1 | ForEach-Object {
-    if ("$_" -match '[\s"]' -or "$_" -eq '') { '"' + ("$_" -replace '"', '\"') + '"' } else { "$_" }
+    if ("$_" -notmatch '[\s"]' -and "$_" -ne '') { "$_"; return }
+    '"' + ("$_" -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
   }) -join ' '
   $dir = (Get-Location).ProviderPath
   $action = if ($rest) {
@@ -45,25 +50,50 @@ function desktop {
   $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
   $name = "trivm-$([guid]::NewGuid())"
   Register-ScheduledTask -TaskName $name -Action $action -Principal $user -Settings $set | Out-Null
-  try { Start-ScheduledTask -TaskName $name; Start-Sleep -Milliseconds 500 }
-  finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+  # A task unregistered before it has started never runs. Its result: 267011 not run yet, 267009
+  # running, 0 done, else the program's failure or exit code.
+  try {
+    Start-ScheduledTask -TaskName $name
+    for ($i = 0; $i -lt 100; $i++) {
+      $res = (Get-ScheduledTaskInfo -TaskName $name).LastTaskResult
+      if ($res -ne 267011) { break }
+      Start-Sleep -Milliseconds 100
+    }
+  } finally { Unregister-ScheduledTask -TaskName $name -Confirm:$false }
+  if ($res -eq 267011) { throw "desktop: $exe didn't start in 10 seconds" }
+  if ($res -ne 267009 -and $res -ne 0) { throw ('desktop: {0} failed: 0x{1:x8}' -f $exe, $res) }
 }
 $global:LASTEXITCODE = 0
+$global:trivm = $null
 "#;
 
-/// After the command: the last native command's exit code, or 1 when a cmdlet failed.
+/// After the command, the exit code in `$trivm`: the last native command's, or 1 when a cmdlet
+/// failed. A `return` skips it, leaving `$trivm` empty: the last native command's then.
 const EPILOGUE: &str = r#"
-if (-not $?) { if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }
-exit $LASTEXITCODE
+$global:trivm = if ($?) { $LASTEXITCODE } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
 "#;
 
-/// `powershell` running `script` after the prelude, given as `-EncodedCommand` (base64 of
-/// UTF-16), which no shell in between unquotes; sshd's shell is cmd. Its errors as text: they
-/// come as CLIXML otherwise.
-pub fn powershell(script: &str) -> String {
-  let script = format!("{PRELUDE}{script}{EPILOGUE}");
+/// The longest command line sshd's shell, cmd, runs.
+const CMD_MAX: usize = 8191;
+
+/// `powershell` running `script` after the prelude, as base64 of UTF-8, which no shell in between
+/// unquotes (sshd's shell is cmd), decoded by `-Command`: PowerShell 5.1 writes the errors of an
+/// `-EncodedCommand` as CLIXML to a stderr that isn't a console, whatever `-OutputFormat` says.
+pub fn powershell(script: &str) -> io::Result<String> {
+  let script = base64(format!("{PRELUDE}{script}{EPILOGUE}").as_bytes());
   let opts = "-NoLogo -NoProfile -NonInteractive -OutputFormat Text";
-  format!("powershell {opts} -EncodedCommand {}", encode(&script))
+  let text = format!("[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{script}'))");
+  // `-Command` formats its whole line at the end, which an `exit` skips: `Out-Default` writes the
+  // script's output (tables too) before it. A script that doesn't parse leaves `$trivm` at 1.
+  let exit = "if ($null -eq $trivm) { $trivm = $LASTEXITCODE }; exit $trivm";
+  let run = format!("$trivm = 1; iex ({text}) | Out-Default; {exit}");
+  let cmd = format!("powershell {opts} -Command \"{run}\"");
+  if cmd.len() > CMD_MAX {
+    let why = format!("the command is {} characters, past cmd's {CMD_MAX}", cmd.len());
+    return Err(bad(format!("{why}: copy a script with trivm cp and run that")));
+  }
+
+  Ok(cmd)
 }
 
 /// An interactive PowerShell with the prelude.
@@ -93,9 +123,11 @@ fn base64(data: &[u8]) -> String {
   s
 }
 
-/// Waits up to 5 minutes for the desktop: Explorer running in the user's session.
+/// Waits up to 5 minutes for the desktop: Explorer running in the user's session, and the first
+/// sign-in's animation gone, which covers the desktop for a minute and a half after an install.
 pub const DESKTOP: &str = r#"for ($i = 0; $i -lt 150; $i++) {
-  if (Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -gt 0) { exit 0 }
+  $up = Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -gt 0
+  if ($up -and -not (Get-Process FirstLogonAnim -ErrorAction SilentlyContinue)) { exit 0 }
   Start-Sleep 2
 }
 'no desktop in 5 minutes'; exit 1"#;
@@ -288,9 +320,21 @@ mod tests {
     // `[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes('dir'))` in PowerShell.
     assert_eq!(encode("dir"), "ZABpAHIA");
 
-    let cmd = powershell("exit 3");
-    assert!(cmd.starts_with("powershell -NoLogo -NoProfile -NonInteractive -OutputFormat Text "));
-    assert_eq!(cmd.split(' ').count(), 8);
+    let cmd = powershell("exit 3").unwrap();
+    let run = "-OutputFormat Text -Command \"$trivm = 1; iex ([Text.Encoding]::UTF8.GetString(";
+    assert!(cmd.starts_with(&format!("powershell -NoLogo -NoProfile -NonInteractive {run}")));
+    let script = base64(format!("{PRELUDE}exit 3{EPILOGUE}").as_bytes());
+    let end = "| Out-Default; if ($null -eq $trivm) { $trivm = $LASTEXITCODE }; exit $trivm\"";
+    assert!(cmd.ends_with(&format!("FromBase64String('{script}'))) {end}")));
+    // cmd's operators only between the quotes, where it reads them as text; no `%` anywhere.
+    assert_eq!(cmd.matches('"').count(), 2);
+    let (head, _) = cmd.split_once('"').unwrap();
+    assert!(!head.contains(['&', '|', '<', '>', '^']));
+    assert!(!cmd.contains('%'));
+
+    // A script of 3 KB fits cmd's line; one of 8 KB doesn't.
+    assert!(powershell(&"x".repeat(3072)).is_ok());
+    assert!(powershell(&"x".repeat(8192)).is_err());
   }
 
   #[test]
