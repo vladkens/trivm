@@ -232,7 +232,7 @@ fn png_size(png: &Path) -> io::Result<(f64, f64)> {
 
 /// A service `os grant` takes: its name, TCC's services for it, and whether the user's database
 /// keeps them, not the system's.
-struct Service {
+pub struct Service {
   name: &'static str,
   tcc: &'static [&'static str],
   user: bool,
@@ -302,26 +302,13 @@ pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
 
   // Asked first: it waits out a guest just booted that drops the SSH session.
   let sip = sip_on(&vm)?;
-  let out = ssh::output(&vm, &format!("sh -c {} app {}", ssh::quote(APP), ssh::quote(app)))?;
-  let lines: Vec<&str> = out.lines().collect();
-  let [kind, client] = lines[..] else {
-    return Err(bad(format!("{app} in {name}: {out}")));
-  };
-
+  let (kind, client) = client(&vm, app)?;
   if sip {
     eprintln!("SIP is on in {name}: turning it off from recoveryOS first (about a minute)");
     turn(&vm, false)?;
   }
 
-  let kind: u8 = kind.parse().map_err(|_| bad(format!("{app} in {name}: {out}")))?;
-  let pick = |user: bool| -> Vec<&str> {
-    services.iter().filter(|s| s.user == user).flat_map(|s| s.tcc.iter().copied()).collect()
-  };
-  let (system, user) = (sql(&pick(false), client, kind), sql(&pick(true), client, kind));
-  let script =
-    format!("sh -c {} write {} {}", ssh::quote(WRITE), ssh::quote(&system), ssh::quote(&user));
-  ssh::output(&vm, &script)?;
-
+  write(&vm, kind, &client, &services)?;
   let names: Vec<_> = services.iter().map(|s| s.name).collect();
   eprintln!(
     "{client} may use {} in {name}; an app that runs sees them once relaunched",
@@ -330,8 +317,46 @@ pub fn grant(name: &str, app: &str, names: &[String]) -> io::Result<()> {
   Ok(())
 }
 
+/// The services allowed for the app at a path from / in a running macOS guest, as `os grant`
+/// allows them, but refused with SIP on: turning it off restarts the guest. The app's TCC client.
+pub fn allow(vm: &Vm, app: &str, services: &[&Service]) -> io::Result<String> {
+  if sip_on(vm)? {
+    let name = &vm.name;
+    return Err(bad(format!(
+      "SIP is on in {name}, which keeps TCC's databases from root; trivm os sip {name} off"
+    )));
+  }
+
+  let (kind, client) = client(vm, app)?;
+  write(vm, kind, &client, services)?;
+  Ok(client)
+}
+
+/// The TCC client of the app at a path in the guest: its kind (0 a bundle, 1 a path) and its
+/// bundle identifier or path.
+fn client(vm: &Vm, app: &str) -> io::Result<(u8, String)> {
+  let out = ssh::output(vm, &format!("sh -c {} app {}", ssh::quote(APP), ssh::quote(app)))?;
+  let lines: Vec<&str> = out.lines().collect();
+  let bad_app = || bad(format!("{app} in {}: {out}", vm.name));
+  let [kind, client] = lines[..] else { return Err(bad_app()) };
+  let kind: u8 = kind.parse().map_err(|_| bad_app())?;
+  Ok((kind, client.to_string()))
+}
+
+/// Writes the rows that allow the client the services, then has tccd read them.
+fn write(vm: &Vm, kind: u8, client: &str, services: &[&Service]) -> io::Result<()> {
+  let pick = |user: bool| -> Vec<&str> {
+    services.iter().filter(|s| s.user == user).flat_map(|s| s.tcc.iter().copied()).collect()
+  };
+  let (system, user) = (sql(&pick(false), client, kind), sql(&pick(true), client, kind));
+  let script =
+    format!("sh -c {} write {} {}", ssh::quote(WRITE), ssh::quote(&system), ssh::quote(&user));
+  ssh::output(vm, &script)?;
+  Ok(())
+}
+
 /// The services named, all with none.
-fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
+pub fn services(names: &[String]) -> io::Result<Vec<&'static Service>> {
   let all: Vec<_> = SERVICES.iter().map(|s| s.name).collect();
   let find = |x: &String| {
     let known = SERVICES.iter().find(|s| s.name == x);

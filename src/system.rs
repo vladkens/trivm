@@ -77,7 +77,7 @@ pub fn find(name: &str) -> io::Result<&'static System> {
 }
 
 /// A file in the cache, downloaded (resumed after a break) and checked first.
-fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
+pub fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
   let name = url.rsplit('/').next().unwrap_or(url);
   let path = vm::cache_dir().join(name);
   vm::made(&vm::cache_dir())?;
