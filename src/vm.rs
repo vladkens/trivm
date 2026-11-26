@@ -171,8 +171,13 @@ impl Vm {
     };
 
     self.setup = self.path(SETUP).exists();
-    self.port = fs::read_to_string(self.state("port")).ok().and_then(|x| x.trim().parse().ok());
+    self.port = self.saved_port();
     Ok(())
+  }
+
+  /// The forwarded SSH port its last start saved, read now: a running VM's current one.
+  pub fn saved_port(&self) -> Option<u16> {
+    fs::read_to_string(self.state("port")).ok().and_then(|x| x.trim().parse().ok())
   }
 
   pub fn all() -> io::Result<Vec<Self>> {

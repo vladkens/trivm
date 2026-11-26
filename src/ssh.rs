@@ -46,21 +46,27 @@ pub fn public_key() -> io::Result<String> {
   Ok(fs::read_to_string(key()?.with_extension("pub"))?.trim().to_string())
 }
 
-pub fn ip(vm: &Vm) -> io::Result<String> {
-  // A stopped VM's address or port may be another VM's by now.
+/// The guest's address and SSH's forwarded port, if any, of a running VM: a stopped VM's may be
+/// another VM's by now. The port is read once the VM runs, as a start saves it before that.
+pub fn ip(vm: &Vm) -> io::Result<(String, Option<u16>)> {
   if vm.pid().is_none() {
     return Err(bad(format!("{} isn't running; trivm start {}", vm.name, vm.name)));
   }
 
-  vm.ip().ok_or_else(|| bad(format!("{} has no address yet", vm.name)))
+  let port = vm.saved_port();
+  let ip = match port {
+    Some(_) => Some("127.0.0.1".to_string()),
+    None => vm.ip(),
+  };
+
+  Ok((ip.ok_or_else(|| bad(format!("{} has no address yet", vm.name)))?, port))
 }
 
 /// The guest's SSH as `ip` or `ip:port`.
 pub fn address(vm: &Vm) -> io::Result<String> {
-  let ip = ip(vm)?;
-  Ok(match vm.port {
-    Some(port) => format!("{ip}:{port}"),
-    None => ip,
+  Ok(match ip(vm)? {
+    (ip, Some(port)) => format!("{ip}:{port}"),
+    (ip, None) => ip,
   })
 }
 
@@ -85,11 +91,12 @@ fn options(key: &Path) -> Vec<String> {
 pub fn ssh(vm: &Vm) -> io::Result<Command> {
   let mut cmd = Command::new("ssh");
   cmd.args(options(&key()?)).args(["-o", "BatchMode=yes"]);
-  if let Some(port) = vm.port {
+  let (ip, port) = ip(vm)?;
+  if let Some(port) = port {
     cmd.args(["-p", &port.to_string()]);
   }
 
-  cmd.arg(format!("{}@{}", vm::USER, ip(vm)?));
+  cmd.arg(format!("{}@{ip}", vm::USER));
   Ok(cmd)
 }
 
@@ -153,7 +160,8 @@ pub fn cp(src: &str, dst: &str) -> io::Result<ExitStatus> {
     }
 
     let vm = Vm::open(name)?;
-    Ok(url(&ip(&vm)?, vm.port, path))
+    let (ip, port) = ip(&vm)?;
+    Ok(url(&ip, port, path))
   };
 
   let (src, dst) = (side(src)?, side(dst)?);
