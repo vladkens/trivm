@@ -282,8 +282,12 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   let started;
   let vm = match vm.config.os() {
     Os::Windows if vm.pid().is_some() => {
-      if !qemu::started(vm)? && !force {
-        return Err(bad(format!("{} is still starting; stop it with --force", vm.name)));
+      if !qemu::started(vm) {
+        if !force {
+          return Err(bad(format!("{} is still starting; stop it with --force", vm.name)));
+        }
+
+        qemu::cancel(vm)?;
       }
 
       started = Vm::open(&vm.name)?;

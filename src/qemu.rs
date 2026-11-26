@@ -3,7 +3,7 @@
 //! it, and trivm's requests (`status`, `shot`, `click`, `open`, ...) done over QMP on `qmp.sock`.
 
 use std::cell::RefCell;
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
@@ -123,28 +123,65 @@ fn free_port() -> io::Result<u16> {
 unsafe extern "C" {
   fn setsid() -> i32;
   fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+  fn getpid() -> i32;
+  fn pwrite(fd: i32, buf: *const u8, n: usize, offset: i64) -> isize;
 }
 
 const F_SETFD: i32 = 2;
 
+/// Whether the process runs a program of this name.
+fn runs(pid: i32, name: &str) -> bool {
+  let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output();
+  out.is_ok_and(|x| String::from_utf8_lossy(&x.stdout).trim_end().ends_with(name))
+}
+
 /// Waits up to a minute until the VM's process is QEMU, false if it isn't by then: a starting VM's
 /// pid is trivm's until QEMU's replaces it.
-pub fn started(vm: &Vm) -> io::Result<bool> {
+pub fn started(vm: &Vm) -> bool {
   let t = Instant::now();
   while let Some(pid) = vm.pid() {
-    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output()?;
-    if String::from_utf8_lossy(&out.stdout).contains(QEMU) {
-      return Ok(true);
+    if runs(pid, QEMU) {
+      return true;
     }
 
     if t.elapsed() > Duration::from_secs(60) {
-      return Ok(false);
+      return false;
     }
 
     thread::sleep(Duration::from_millis(200));
   }
 
-  Ok(true)
+  true
+}
+
+/// Ends a start stuck before QEMU runs: its trivm, then QEMU if forked meanwhile, then swtpm.
+pub fn cancel(vm: &Vm) -> io::Result<()> {
+  let Some(pid) = vm.pid() else { return Ok(()) };
+  // Read while the start holds the lock: no other start's.
+  let tpm = tpm_pid(vm);
+  let until = |done: &dyn Fn() -> bool| {
+    let t = Instant::now();
+    while !done() {
+      if t.elapsed() > Duration::from_secs(5) {
+        return Err(bad(format!("{} didn't stop; its process is {pid}", vm.name)));
+      }
+
+      thread::sleep(Duration::from_millis(100));
+    }
+
+    Ok(())
+  };
+
+  crate::vm::signal(pid, 9);
+  until(&|| vm.pid() != Some(pid))?;
+  // QEMU, forked before trivm ended, holds the lock with its own pid, written before it runs.
+  if let Some(x) = vm.pid().filter(|&x| runs(x, QEMU)) {
+    crate::vm::signal(x, 9);
+    until(&|| vm.pid() != Some(x))?;
+  }
+
+  tpm_kill(tpm);
+  Ok(())
 }
 
 /// Checks that the VM's folders can be given to swtpm, which splits its options at commas, with
@@ -166,7 +203,9 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   fits(vm)?;
   let (bin, share) = qemu()?;
   // Held from here, so a second start finds the VM running before touching its TPM.
-  let mut lock = vm.lock()?;
+  let lock = vm.lock()?;
+  // The last swtpm's pid isn't this start's, which `stop --force` ends.
+  let _ = fs::remove_file(vm.state("tpm.pid"));
   let port = match vm.port {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
@@ -197,36 +236,51 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     return Err(bad(format!("{} {}", e.to_string().trim_end(), log.trim())));
   }
 
+  // Read while the lock is held: a start after this one ends writes its own.
+  let tpm = tpm_pid(vm);
   let fd = lock.as_raw_fd();
   let mut cmd = Command::new(&bin);
   cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(out).stderr(log);
-  // SAFETY: setsid and fcntl are async-signal-safe; the lock's fd stays open in QEMU.
+  // SAFETY: setsid, fcntl, getpid and pwrite are async-signal-safe, the digits made on the stack;
+  // the lock's fd stays open in QEMU.
   unsafe {
-    cmd.pre_exec(move || match setsid() < 0 || fcntl(fd, F_SETFD, 0) < 0 {
-      true => Err(io::Error::last_os_error()),
-      false => Ok(()),
+    cmd.pre_exec(move || {
+      // The child's pid over trivm's before it runs QEMU, so a trivm killed meanwhile leaves it:
+      // one write, padded and not truncated first, so a reader sees one pid or the other.
+      let mut pid = [b' '; 10];
+      let (mut n, mut len) = (getpid() as u32, 0);
+      let mut digits = [0u8; 10];
+      while len == 0 || n > 0 {
+        digits[len] = b'0' + (n % 10) as u8;
+        (n, len) = (n / 10, len + 1);
+      }
+
+      for i in 0..len {
+        pid[i] = digits[len - 1 - i];
+      }
+
+      match setsid() < 0 || fcntl(fd, F_SETFD, 0) < 0 || pwrite(fd, pid.as_ptr(), 10, 0) != 10 {
+        true => Err(io::Error::last_os_error()),
+        false => Ok(()),
+      }
     })
   };
 
   let mut child = match cmd.spawn() {
     Ok(x) => x,
     Err(e) => {
-      tpm_kill(vm);
+      tpm_kill(tpm);
       return Err(e);
     }
   };
 
-  // One write over trivm's pid, padded and not truncated first: a reader sees one pid or the other.
-  lock.rewind()?;
-  lock.write_all(format!("{:<10}", child.id()).as_bytes())?;
-  lock.set_len(10)?;
   drop(lock);
   let _ = Command::new("caffeinate").args(["-i", "-w", &child.id().to_string()]).spawn();
 
   let t = Instant::now();
   loop {
     if let Some(code) = child.try_wait()? {
-      tpm_kill(vm);
+      tpm_kill(tpm);
       let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
       let tail: Vec<_> = log.lines().rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
@@ -245,10 +299,13 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   }
 }
 
+fn tpm_pid(vm: &Vm) -> Option<i32> {
+  fs::read_to_string(vm.state("tpm.pid")).ok().and_then(|x| x.trim().parse().ok())
+}
+
 /// `swtpm` ends with QEMU's connection; one that QEMU never connected to is ended here.
-fn tpm_kill(vm: &Vm) {
-  let pid = fs::read_to_string(vm.state("tpm.pid")).ok().and_then(|x| x.trim().parse().ok());
-  if let Some(pid) = pid {
+fn tpm_kill(pid: Option<i32>) {
+  if let Some(pid) = pid.filter(|&x| runs(x, "swtpm")) {
     crate::vm::signal(pid, 15);
   }
 }
