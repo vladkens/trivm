@@ -203,8 +203,9 @@ pub fn fits(vm: &Vm) -> io::Result<()> {
 pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   fits(vm)?;
   let (bin, share) = qemu()?;
-  // Held from here, so a second start finds the VM running before touching its TPM.
-  let lock = vm.lock()?;
+  // Held from here, so a second start finds the VM in use before touching its TPM; running once
+  // its port is saved, so no command reaches the last one, which another VM may have now.
+  let mut lock = vm.take()?;
   let port = match vm.port {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
@@ -214,6 +215,8 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     vm.port = Some(port);
     vm.save()?;
   }
+
+  write!(lock, "{}", std::process::id())?;
 
   // Opened before swtpm starts, as a failure after leaves it running.
   let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;

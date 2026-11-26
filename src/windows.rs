@@ -35,8 +35,10 @@ function desktop {
   $exe = "$($args[0])"
   $app = Get-Command $exe -CommandType Application -ErrorAction SilentlyContinue
   if ($app) { $exe = @($app)[0].Source }
+  # Quoted as Windows splits a command line: backslashes before a quote, or the closing one, doubled.
   $rest = @($args | Select-Object -Skip 1 | ForEach-Object {
-    if ("$_" -match '[\s"]' -or "$_" -eq '') { '"' + ("$_" -replace '"', '\"') + '"' } else { "$_" }
+    if ("$_" -notmatch '[\s"]' -and "$_" -ne '') { "$_"; return }
+    '"' + ("$_" -replace '(\\*)"', '$1$1\"' -replace '(\\+)$', '$1$1') + '"'
   }) -join ' '
   $dir = (Get-Location).ProviderPath
   $action = if ($rest) {
