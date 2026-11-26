@@ -56,6 +56,12 @@ with its SSH off; a Linux VM; a `run` clone; Windows for its fix.
   its error saying to copy a script) and `desktop` defined only for a script that calls it (main
   defines it in every prelude).
 - Dropped: the style pass, as the code it touched is main's now.
+- pr-gate's review of this branch, each finding fixed: Shut Down's shots and clicks wait 10 s at
+  most, not `ask`'s 5 minutes; the pid read from the file's start each time, as `kill` waited on
+  an empty second read (its wait now ends when the lock is let go: the discard test's 2 s fell
+  to 1.2 s), and the lock a reader takes when there's no holder let go; `click --name` counts a
+  match once with the matches inside it only when they have its name, so a group whose name
+  holds its buttons' is one more element.
 
 ## Tasks
 
@@ -74,15 +80,15 @@ with its SSH off; a Linux VM; a `run` clone; Windows for its fix.
 
 Run on this Mac with this branch's binary, shots read:
 
-- `macos-27`: started in 17 s, `sw_vers` 27.2, a shot, stopped through SSH in 8 s. A clone of it
+- `macos-27`: started in 15 s, `sw_vers` 27.2, a shot, stopped through SSH in 7 s. A clone of it
   with sshd unloaded: `stop` pressed the power button, read Shut Down and clicked it, and the VM
-  shut down in 41 s, 28 of them Vision's first read in a new binary. Before the 30-reads fix two
-  of three such `stop`s killed it after 2 minutes 33 seconds.
+  shut down in 38 s, about 28 of them Vision's first read in a new binary. Before the 30-reads
+  fix two of three such `stop`s killed it after 2 minutes 33 seconds.
 - `debian-13`, a scratch VM: the pointer read back with XQueryPointer where `move` put it at
   1920×1080, 2560×1600 and 1600×1200; at 2560×1600 with Files maximized, `click --name
-  Templates --double` opened the folder (a cell, a cell and a label of that name) and `click
-  --name "List View"` at x 2479 switched the view; with its sshd stopped, `stop` by the power
-  button in 2 s.
+  Templates --double` opened the folder from its grid (a cell, a cell in it and a label of that
+  name) and its list (a row, its icon and its label), and `click --name` on the view switch at x
+  2479 switched the view each way; with its sshd stopped, `stop` by the power button in 2 s.
 - `run debian-13` ran its command in `debian-13-run-1`, gone after; a `run` killed with SIGKILL
   left its clone to the reaper, which killed the VM process by its pid and removed the clone.
 - `windows-11`, a scratch VM: sshd's config begins with both lines, and its SSH offers only
