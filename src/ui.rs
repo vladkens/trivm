@@ -236,11 +236,11 @@ fn running(name: &str, cmd: &str) -> io::Result<Vm> {
 }
 
 /// Whether trivm puts agent-desktop in the VM's system: not in Windows, though it has a build for
-/// it; nor macOS 13 and 14, where trivm doesn't turn SIP off for its grant; nor Ubuntu 22.04's
-/// Plasma: agent-desktop needs 24.04's AT-SPI, and found no X window to raise for Konsole's.
+/// it (UI Automation); nor in Ubuntu 22.04's Plasma: agent-desktop needs 24.04's AT-SPI, and found
+/// no X window to raise for Konsole's.
 fn supported(vm: &Vm) -> io::Result<bool> {
   Ok(match vm.config.os() {
-    Os::Macos => vm.config.recovery(),
+    Os::Macos => true,
     Os::Linux => system::find(&vm.config.system)?.desktop != Desktop::Plasma,
     Os::Windows => false,
   })

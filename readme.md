@@ -6,7 +6,7 @@ trivm installs a system into a VM with one command and no clicks, runs it in the
 lets an agent (or you) run commands in it, copy files, take screenshots, click and type, all from
 the terminal. When you want to look, `trivm open` shows the VM in a window.
 
-- macOS 13, 14, 15, 26 and 27 on Apple's Virtualization.framework.
+- macOS 15, 26 and 27 on Apple's Virtualization.framework.
 - Ubuntu 24.04 (Xfce) and 22.04 (KDE Plasma), Debian 13 (GNOME) and Fedora 45 (Xfce), on X11.
 - Windows 11 Pro on QEMU with HVF, from the ESD of Microsoft's Media Creation Tool.
 - Systems from their own sources (Apple's IPSWs, the distros' cloud images, Microsoft's ESD),
@@ -28,7 +28,7 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 
 ```sh
 trivm create macos-27          # downloads 25 GB once, installs, starts: about 20 minutes
-trivm create macos-14          # the last IPSW of each macOS: 13.6, 14.6.1, 15.6.1, 26.6.2
+trivm create macos-15          # the last IPSW of each older macOS: 15.6.1, 26.6.2
 trivm create ubuntu-24.04      # downloads 600 MB once: about 3 minutes
 trivm list
 
@@ -71,7 +71,7 @@ grants for the app, by its path in the guest, into macOS's TCC databases, first 
 Integrity Protection off from recoveryOS, which trivm drives itself (about a minute, once per VM).
 Accessibility, Screen Recording, Input Monitoring and the microphone, or the ones named; an app
 that runs sees them once relaunched. A VM's clones have its grants. `os` holds the guest system's
-own integrations, macOS's from 15 on; on a system without one, it says it's not supported there:
+own integrations; on a system without one, it says it's not supported there:
 
 ```sh
 trivm os grant macos-27 /Applications/Wavo.app
@@ -85,8 +85,8 @@ value, state and frame in a shot's pixels, read through the system's accessibili
 [agent-desktop](https://github.com/vercel-labs/agent-desktop), which trivm puts in the guest at
 the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`). An app shows what its
 toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the
-first `ui`. Not supported yet on macOS 13 and 14, Ubuntu 22.04 (agent-desktop needs 24.04's
-accessibility) and Windows.
+first `ui`. Not supported yet on Ubuntu 22.04 (agent-desktop needs 24.04's accessibility) and
+Windows.
 
 ```sh
 trivm ui macos-27 --app Wavo
@@ -98,18 +98,6 @@ trivm ui macos-27 --app Wavo
 #     radiobutton "Models" 710,110 56x48
 #   combobox "Microphone" = "Automatic" 939,211 111x24
 trivm click macos-27 --name Models   # raises Wavo's window first if another is in front
-```
-
-### macOS 13 and 14
-
-Their Data volume is encrypted once installed, so their Setup Assistant can't be skipped from the
-host: `trivm create macos-14` boots into it and waits. Answer it in `trivm open macos-14` (or with
-`shot`, `click`, `type` and `key`) with the user `user` and the password `1234`, then turn Remote
-Login on in Terminal; trivm goes on once SSH answers. trivm doesn't drive their recoveryOS, so
-`os`, `ui` and `click --name` aren't supported on them.
-
-```sh
-sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist
 ```
 
 ### Windows

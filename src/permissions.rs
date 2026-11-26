@@ -15,13 +15,13 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSRange, NSRect, NSString};
 
-use crate::vm::{PASSWORD, Vm};
+use crate::vm::{Os, PASSWORD, Vm};
 use crate::{bad, ssh, vz};
 
 /// A macOS VM that is set up, for the `os` command `cmd`: SIP and TCC are macOS's.
 fn macos(name: &str, cmd: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
-  if !vm.config.recovery() {
+  if vm.config.os() != Os::Macos {
     return Err(bad(format!("os {cmd}: not supported on {}", vm.config.system)));
   }
 

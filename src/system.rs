@@ -76,16 +76,6 @@ pub const SYSTEMS: &[System] = &[
     "https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw",
     "3d87686b691ac765eb6a6b3082b2334e2af9710096a00432dd519af89ff2ea78",
   ),
-  System::macos(
-    "macos-14",
-    "https://updates.cdn-apple.com/2024SummerFCS/fullrestores/062-52859/932E0A8F-6644-4759-82DA-F8FA8DEA806A/UniversalMac_14.6.1_23G93_Restore.ipsw",
-    "e387251e63387150ba76cf784bdb97d2016e5d43c6f809c90a115eb067a097b8",
-  ),
-  System::macos(
-    "macos-13",
-    "https://updates.cdn-apple.com/2023FallFCS/fullrestores/042-55833/C0830847-A2F8-458F-B680-967991820931/UniversalMac_13.6_22G120_Restore.ipsw",
-    "9bf095739b8b2d5ebd20f7e8de938f10bc449f9843de21c4a41ae54d73526728",
-  ),
   System::linux(
     "ubuntu-24.04",
     "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img",
@@ -274,24 +264,8 @@ fn macos(vm: &Vm, ipsw: &Path) -> io::Result<()> {
   vz::install(vm, ipsw)?;
   match vm.config.provisioned() {
     true => Ok(()),
-    false if apfs::encrypted(&vm.path("disk.img"), apfs::DATA)? => {
-      eprintln!("{}", mac_by_hand(&vm.name));
-      Ok(())
-    }
     false => mac_data(vm),
   }
-}
-
-/// macOS 13 and 14 leave their Data volume encrypted after the install, its keys the guest's: no
-/// file can be written to it from the host, and the Setup Assistant shows at the first boot.
-fn mac_by_hand(name: &str) -> String {
-  format!(
-    "{name}'s Data volume is encrypted, so its Setup Assistant can't be skipped: answer it in \
-    `trivm open {name}` (or with shot, click, type and key) with the user {USER} and the password \
-    {PASSWORD}, then turn Remote Login on in Terminal: \
-    sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist\n\
-    trivm goes on once SSH answers (it waits 30 minutes)"
-  )
 }
 
 /// The files an older macOS's first boot reads, relative to its Data volume: the Setup Assistant
@@ -460,9 +434,9 @@ chmod 440 /etc/sudoers.d/trivm
 printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' > /etc/ssh/sshd_config.d/000-trivm.conf"
 "#;
 
-/// No sleep, screen saver, lock or automatic updates; the host's time zone, `$2`, not Cupertino's
-/// that macOS guesses; the automatic login of `$4` by its `kcpassword`, `$3`, which a Setup
-/// Assistant answered by hand leaves off.
+/// No sleep, screen saver or lock, which would leave the screen dark; no automatic updates
+/// (macOS 27 kept checking regardless of some of these, as the old `vm` tool found); the host's
+/// time zone, `$2`, which macOS would otherwise guess as Cupertino's.
 const MAC_TUNE: &str = r#"set -e
 sudo -n pmset -a displaysleep 0 sleep 0 disksleep 0 >/dev/null
 defaults -currentHost write com.apple.screensaver idleTime -int 0
@@ -473,8 +447,6 @@ done
 sudo -n defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false
 sudo -n defaults write /Library/Preferences/com.apple.timezone.auto Active -bool false
 sudo -n ln -sf "/var/db/timezone/zoneinfo/$2" /etc/localtime
-printf "$3" | sudo -n sh -c 'umask 077; cat > /etc/kcpassword'
-sudo -n defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser "$4"
 "#;
 
 /// The first boot of a new macOS VM, which made the user: the key, then the tuning.
@@ -484,9 +456,7 @@ pub fn macos_setup(vm: &Vm) -> io::Result<()> {
     format!("sh -ec {} enroll {} {USER}", ssh::quote(MAC_ENROLL), ssh::quote(&ssh::public_key()?));
   ssh::with_password(vm, &script, Duration::from_secs(1800))?;
   ssh::wait(vm, Duration::from_secs(60))?;
-  let kc = ssh::quote(&kcpassword(PASSWORD));
-  let tune = format!("sh -ec {} tune {PASSWORD} {} {kc} {USER}", ssh::quote(MAC_TUNE), timezone());
-  ssh::output(vm, &tune)?;
+  ssh::output(vm, &format!("sh -ec {} tune {PASSWORD} {}", ssh::quote(MAC_TUNE), timezone()))?;
   Ok(())
 }
 
@@ -838,8 +808,6 @@ pub fn windows_setup(vm: &Vm) -> io::Result<()> {
 /// half a minute more while it is busy starting.
 pub fn desktop(vm: &Vm) -> io::Result<()> {
   let names = match (vm.config.os(), find(&vm.config.system)?.desktop) {
-    // WallpaperAgent draws the desktop from macOS 14 on, the Dock before it.
-    (Os::Macos, _) if vm.config.macos().is_some_and(|x| x < 14) => "Dock Finder",
     (Os::Macos, _) => "Dock Finder WallpaperAgent",
     (_, Desktop::Xfce) => "xfce4-session xfce4-panel xfdesktop",
     (_, Desktop::Plasma) => "ksmserver kwin_x11 plasmashell",
@@ -927,7 +895,6 @@ mod tests {
     assert!(lint("plutil", &["-lint", "-s", "-"], &mac_daemon()));
     assert!(mac_daemon().contains("<string>/private/var/db/trivm-setup.sh</string>"));
     assert!(lint("sh", &["-n"], MAC_TUNE));
-    assert!(mac_by_hand("m").contains("trivm open m"));
   }
 
   #[test]

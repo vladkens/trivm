@@ -71,8 +71,7 @@ struct Volume {
   root: u64,
   xid: u64,
   uuid: [u8; 16],
-  /// Encrypted, as macOS 13 and 14 leave their Data volume: locked to anyone without its keys,
-  /// which are the guest's.
+  /// Encrypted: its tree is locked to anyone without its keys, which are the guest's.
   encrypted: bool,
 }
 
@@ -417,11 +416,6 @@ pub fn uuid(disk: &Path, role: u16) -> io::Result<String> {
   Ok(format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..]))
 }
 
-/// Whether the volume with `role` in the disk image is encrypted.
-pub fn encrypted(disk: &Path, role: u16) -> io::Result<bool> {
-  Ok(Container::open(disk, false)?.volume(role)?.encrypted)
-}
-
 /// Sets the owner of `paths`, relative to the volume's root, to root:wheel; each was written by a
 /// mount that ignored ownership, or is root's already.
 pub fn chown_root(disk: &Path, role: u16, paths: &[&str]) -> io::Result<()> {
@@ -494,7 +488,6 @@ mod tests {
     // Root's already: nothing to do.
     chown_root(&img, 0, &["a b/file.plist"]).unwrap();
     assert_eq!(uuid(&img, 0).unwrap().len(), 36);
-    assert!(!encrypted(&img, 0).unwrap());
     assert!(uuid(&img, DATA).is_err());
 
     let out = run(Command::new("hdiutil").args(["attach", "-nomount"]).arg(&img)).unwrap();

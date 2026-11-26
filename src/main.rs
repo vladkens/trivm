@@ -66,14 +66,11 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Sip { vm, on } => permissions::sip(&vm, on)?,
     Cmd::Grant { vm, app, services } => permissions::grant(&vm, &app, &services)?,
     Cmd::Open { vm } => {
-      // One still being set up shows at once: an older macOS's Setup Assistant is answered in it.
-      let vm = match Vm::open(&vm)? {
-        x if x.setup => boot(&vm)?,
-        x if x.pid().is_none() => start(&vm).and_then(|_| Vm::open(&vm))?,
-        x => x,
-      };
+      if Vm::open(&vm)?.pid().is_none() {
+        start(&vm)?;
+      }
 
-      ask(&vm, "open", "")?;
+      ask(&Vm::open(&vm)?, "open", "")?;
     }
     Cmd::Exec { vm, cmd } => return Ok(status(ssh::exec(&Vm::open(&vm)?, &cmd)?)),
     Cmd::Ssh { vm } => return Ok(status(ssh::interactive(&Vm::open(&vm)?)?)),
@@ -193,7 +190,25 @@ fn signed() -> io::Result<()> {
 /// Starts the VM's process unless it runs, and waits until the guest answers SSH and its desktop
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
-  let mut vm = boot(name)?;
+  let mut vm = Vm::open(name)?;
+  if vm.pid().is_none() {
+    match vm.config.os() {
+      Os::Windows => {
+        let cds = system::windows_cds(&vm)?;
+        qemu::spawn(&mut vm, &cds)?
+      }
+      _ => spawn(&vm, false)?,
+    }
+  } else {
+    // Another start runs it: its config, Windows' port among it, is saved once its VM runs.
+    let t = Instant::now();
+    while !ask(&vm, "status", "").is_ok_and(|x| x == "running") && t.elapsed().as_secs() < 60 {
+      thread::sleep(Duration::from_millis(200));
+    }
+
+    vm = Vm::open(name)?;
+  }
+
   match (vm.setup, vm.config.os()) {
     (true, Os::Macos) => system::macos_setup(&vm)?,
     (true, Os::Linux) => system::linux_setup(&vm)?,
@@ -210,30 +225,6 @@ pub fn start(name: &str) -> io::Result<()> {
 
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
-}
-
-/// Starts the VM's process unless it runs; the VM as that process saved it.
-fn boot(name: &str) -> io::Result<Vm> {
-  let mut vm = Vm::open(name)?;
-  if vm.pid().is_none() {
-    match vm.config.os() {
-      Os::Windows => {
-        let cds = system::windows_cds(&vm)?;
-        qemu::spawn(&mut vm, &cds)?
-      }
-      _ => spawn(&vm, false)?,
-    }
-
-    return Ok(vm);
-  }
-
-  // Another start runs it: its config, Windows' port among it, is saved once its VM runs.
-  let t = Instant::now();
-  while !ask(&vm, "status", "").is_ok_and(|x| x == "running") && t.elapsed().as_secs() < 60 {
-    thread::sleep(Duration::from_millis(200));
-  }
-
-  Vm::open(name)
 }
 
 /// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and
