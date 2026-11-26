@@ -6,6 +6,7 @@
 //! and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app under test its macOS
 //! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
 
+mod apfs;
 mod args;
 mod clone;
 mod display;

@@ -94,9 +94,9 @@ fn turn(vm: &Vm, on: bool) -> io::Result<()> {
   }
 }
 
-/// Drives recoveryOS of macOS 27 from its startup options to `csrutil` in its Terminal, which
-/// asks to confirm and for the password of the only admin, then halts it. Each step waits for its
-/// screen's text; the last screen read is `shot`.
+/// Drives recoveryOS of macOS 15 and later from its startup options to `csrutil` in its Terminal,
+/// which asks to confirm and for the password of the only admin, then halts it. Each step waits for
+/// its screen's text; the last screen read is `shot`.
 fn recovery(vm: &Vm, on: bool, shot: &Path) -> io::Result<()> {
   let click = |(x, y): (f64, f64)| vz::ask(vm, &format!("click {x} {y} left 1"), "");
   let typing = |text: &str| vz::ask(vm, "type", text);
@@ -109,6 +109,11 @@ fn recovery(vm: &Vm, on: bool, shot: &Path) -> io::Result<()> {
   screen("Utilities", 300)?;
   vz::ask(vm, "key cmd+shift+t", "")?;
   screen("bash", 60)?;
+  // Its font made bigger, which Vision reads: at its 11 points 15's `[y/n]` read as `[v/nl`.
+  for _ in 0..4 {
+    vz::ask(vm, "key cmd+=", "")?;
+  }
+
   typing(&format!("csrutil {}\n", if on { "enable" } else { "disable" }))?;
   screen("y/n", 60)?;
   typing("y\n")?;

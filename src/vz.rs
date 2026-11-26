@@ -404,7 +404,7 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
       opts.setStartUpFromMacOSRecovery(true);
       machine.startWithOptions_completionHandler(&opts, &block)
     },
-    (Os::Macos, true, false) => {
+    (Os::Macos, true, false) if vm.config.provisioned() => {
       let opts = provisioning()?;
       unsafe { machine.startWithOptions_completionHandler(&opts, &block) }
     }
