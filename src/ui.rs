@@ -613,21 +613,31 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
   tiers.iter().map(|f| outermost(nodes, f)).find(|x| !x.is_empty()).unwrap_or_default()
 }
 
-/// The elements that match and aren't inside one that does: GTK 4 gives a cell, a cell in it and
-/// its label one name, one element to click.
+/// The elements that match, a match with matches inside it that nest one in the next counted once:
+/// GTK 4 gives a cell, a cell in it and its label one name, one element to click. Two side by side
+/// inside it are counted each, and it too.
 fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node> {
-  let mut out = Vec::new();
-  // The depth of the match the elements now are in.
-  let mut inside = None;
-  for x in nodes {
-    if inside.is_some_and(|depth| x.depth <= depth) {
-      inside = None;
+  // The index after the last element inside the one at `i`.
+  let end = |i: usize| {
+    let depth = nodes[i].depth;
+    (i + 1..nodes.len()).find(|&j| nodes[j].depth <= depth).unwrap_or(nodes.len())
+  };
+
+  let (mut out, mut i) = (Vec::new(), 0);
+  while i < nodes.len() {
+    if nodes[i].depth == 0 || !hit(&nodes[i]) {
+      i += 1;
+      continue;
     }
 
-    if x.depth > 0 && inside.is_none() && hit(x) {
-      out.push(x);
-      inside = Some(x.depth);
-    }
+    out.push(&nodes[i]);
+    let (last, mut at) = (end(i), i);
+    let chain = (i + 1..last).filter(|&j| hit(&nodes[j])).all(|j| {
+      let inside = j < end(at);
+      at = j;
+      inside
+    });
+    i = if chain { last } else { i + 1 };
   }
 
   out
@@ -967,7 +977,8 @@ mod tests {
       (vec!["Save"], vec!["Save", "SAVE"], vec!["Save as", "Save", "SAVE"])
     );
 
-    // GTK 4's cell, its twin and its label in Files are one; the next is another.
+    // GTK 4's cell, its twin and its label in Files are one; the next is another. A group whose
+    // name holds that of two buttons in it is three.
     let el = |depth: usize, role: &str, name: &str| Node {
       depth,
       role: role.into(),
@@ -981,9 +992,14 @@ mod tests {
       el(3, "statictext", "Videos"),
       el(1, "cell", "Music"),
       el(1, "statictext", "Videos"),
+      el(1, "group", "Delete options"),
+      el(2, "button", "Delete permanently"),
+      el(3, "statictext", "Delete permanently"),
+      el(2, "button", "Delete to Trash"),
     ];
     let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
     assert_eq!(roles("Videos"), ["cell", "statictext"]);
+    assert_eq!(roles("Delete"), ["group", "button", "button"]);
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;
