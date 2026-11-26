@@ -162,7 +162,8 @@ unsafe extern "C" {
 }
 
 /// Where `want` shows in a PNG, by Vision's text recognition: the middle of it, in the PNG's
-/// pixels. Vision is loaded at the first use: only recoveryOS's steps read text.
+/// pixels. Vision is loaded at the first use: only recoveryOS's steps and `stop`'s Shut Down read
+/// text.
 pub fn find_text(png: &Path, want: &str) -> io::Result<Option<(f64, f64)>> {
   let lib = c"/System/Library/Frameworks/Vision.framework/Vision";
   // SAFETY: a system framework, whose initializers are Apple's; RTLD_LAZY.

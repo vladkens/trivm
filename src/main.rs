@@ -374,9 +374,10 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   Ok(())
 }
 
-/// Answers macOS's question at its power button: Shut Down, clicked again while it shows, as a
-/// click while the dialog fades in is lost. Up to 30 reads, not a time: Vision's first read in a
-/// newly installed trivm takes half a minute, while it prepares its model.
+/// Answers macOS's question at its power button, which VZ has no API for: Shut Down, read with
+/// Vision and clicked again while it shows, as a click while the dialog fades in is lost. Up to 30
+/// reads, not a time: Vision's first read in a newly installed trivm takes half a minute, while it
+/// prepares its model.
 fn shut_down(vm: &Vm) -> io::Result<()> {
   let shot = env::temp_dir().join(format!("trivm-{}-stop.png", vm.name));
   let mut clicked = false;
