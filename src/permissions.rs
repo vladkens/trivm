@@ -15,13 +15,13 @@ use objc2::rc::{Allocated, Retained};
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2_foundation::{NSArray, NSDictionary, NSError, NSRange, NSRect, NSString};
 
-use crate::vm::{Os, PASSWORD, Vm};
+use crate::vm::{PASSWORD, Vm};
 use crate::{bad, ssh, vz};
 
 /// A macOS VM that is set up, for the `os` command `cmd`: SIP and TCC are macOS's.
 fn macos(name: &str, cmd: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
-  if vm.config.os() != Os::Macos {
+  if !vm.config.recovery() {
     return Err(bad(format!("os {cmd}: not supported on {}", vm.config.system)));
   }
 
@@ -94,9 +94,9 @@ fn turn(vm: &Vm, on: bool) -> io::Result<()> {
   }
 }
 
-/// Drives recoveryOS of macOS 27 from its startup options to `csrutil` in its Terminal, which
-/// asks to confirm and for the password of the only admin, then halts it. Each step waits for its
-/// screen's text; the last screen read is `shot`.
+/// Drives recoveryOS of macOS 15 and later from its startup options to `csrutil` in its Terminal,
+/// which asks to confirm and for the password of the only admin, then halts it. Each step waits for
+/// its screen's text; the last screen read is `shot`.
 fn recovery(vm: &Vm, on: bool, shot: &Path) -> io::Result<()> {
   let click = |(x, y): (f64, f64)| vz::ask(vm, &format!("click {x} {y} left 1"), "");
   let typing = |text: &str| vz::ask(vm, "type", text);

@@ -71,7 +71,7 @@ grants for the app, by its path in the guest, into macOS's TCC databases, first 
 Integrity Protection off from recoveryOS, which trivm drives itself (about a minute, once per VM).
 Accessibility, Screen Recording, Input Monitoring and the microphone, or the ones named; an app
 that runs sees them once relaunched. A VM's clones have its grants. `os` holds the guest system's
-own integrations; on a system without one, it says it's not supported there:
+own integrations, macOS's from 15 on; on a system without one, it says it's not supported there:
 
 ```sh
 trivm os grant macos-27 /Applications/Wavo.app
@@ -85,7 +85,8 @@ value, state and frame in a shot's pixels, read through the system's accessibili
 [agent-desktop](https://github.com/vercel-labs/agent-desktop), which trivm puts in the guest at
 the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`). An app shows what its
 toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the
-first `ui`. On Windows `ui` and `click --name` aren't supported yet.
+first `ui`. Not supported yet on macOS 13 and 14, Ubuntu 22.04 (agent-desktop needs 24.04's
+accessibility) and Windows.
 
 ```sh
 trivm ui macos-27 --app Wavo
@@ -104,7 +105,8 @@ trivm click macos-27 --name Models   # raises Wavo's window first if another is 
 Their Data volume is encrypted once installed, so their Setup Assistant can't be skipped from the
 host: `trivm create macos-14` boots into it and waits. Answer it in `trivm open macos-14` (or with
 `shot`, `click`, `type` and `key`) with the user `user` and the password `1234`, then turn Remote
-Login on in Terminal; trivm goes on once SSH answers.
+Login on in Terminal; trivm goes on once SSH answers. trivm doesn't drive their recoveryOS, so
+`os`, `ui` and `click --name` aren't supported on them.
 
 ```sh
 sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist

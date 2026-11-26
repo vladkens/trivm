@@ -6,6 +6,7 @@
 use std::process::Stdio;
 use std::{fmt, fs, io};
 
+use crate::system::Desktop;
 use crate::vm::{Os, Vm};
 use crate::{bad, permissions, run, ssh, system, vz};
 
@@ -221,10 +222,10 @@ fn in_window<'a>(nodes: &'a [Node], id: &str) -> Option<&'a [Node]> {
   Some(&nodes[start..rest.map_or(nodes.len(), |n| start + 1 + n)])
 }
 
-/// The running VM for `cmd`, refused on Windows.
+/// The running VM for `cmd`, refused on a system agent-desktop doesn't work in.
 fn running(name: &str, cmd: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
-  if vm.config.os() == Os::Windows {
+  if !supported(&vm)? {
     return Err(unsupported(&vm, cmd));
   }
 
@@ -234,8 +235,18 @@ fn running(name: &str, cmd: &str) -> io::Result<Vm> {
   }
 }
 
-/// `cmd` refused on a system agent-desktop isn't put in by trivm: Windows, though it has a build
-/// for it (UI Automation).
+/// Whether trivm puts agent-desktop in the VM's system: not in Windows, though it has a build for
+/// it; nor macOS 13 and 14, where trivm doesn't turn SIP off for its grant; nor Ubuntu 22.04's
+/// Plasma: agent-desktop needs 24.04's AT-SPI, and found no X window to raise for Konsole's.
+fn supported(vm: &Vm) -> io::Result<bool> {
+  Ok(match vm.config.os() {
+    Os::Macos => vm.config.recovery(),
+    Os::Linux => system::find(&vm.config.system)?.desktop != Desktop::Plasma,
+    Os::Windows => false,
+  })
+}
+
+/// `cmd` refused on a system agent-desktop isn't put in by trivm.
 fn unsupported(vm: &Vm, cmd: &str) -> io::Error {
   bad(format!("{cmd}: not supported on {}", vm.config.system))
 }

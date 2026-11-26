@@ -91,6 +91,12 @@ impl Config {
     self.macos().is_some_and(|x| x >= 27)
   }
 
+  /// Whether trivm drives the system's recoveryOS, to turn SIP off for `os` and `ui`: macOS 15 and
+  /// later, tried on 15, 26 and 27; 13 and 14 weren't tried.
+  pub fn recovery(&self) -> bool {
+    self.macos().is_some_and(|x| x >= 15)
+  }
+
   /// The version of a `macos-<n>` system.
   pub fn macos(&self) -> Option<u32> {
     self.system.strip_prefix("macos-").and_then(|x| x.parse().ok())
@@ -533,9 +539,15 @@ mod tests {
     assert_eq!(c.text(), "system = macos-27\ncpus = 4\nmemory = 8\ndisk = 64\n");
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
+    assert_eq!(c.memory_bytes(), 8 << 30);
+
+    // What trivm does in a macOS by its version.
     assert!(c.provisioned());
     assert!(!Config { system: "macos-26".into(), ..c.clone() }.provisioned());
-    assert_eq!(c.memory_bytes(), 8 << 30);
+    assert!(c.recovery() && Config { system: "macos-15".into(), ..c.clone() }.recovery());
+    assert!(!Config { system: "macos-14".into(), ..c.clone() }.recovery());
+    assert!(!Config { system: "ubuntu-22.04".into(), ..c.clone() }.recovery());
+
     assert!(Config::parse("system = x\n").is_err());
     // A line it doesn't know, such as the machine state the config used to hold, is left.
     let old = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\nsetup = true\n");

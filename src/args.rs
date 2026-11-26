@@ -27,7 +27,7 @@ Clones of a stopped VM, made in a second with APFS and sharing its disk until wr
                           TRIVM_VM, then delete the clone; exit with the command's code. One
                           argument is a shell line, more are run as they are
 
-The guest system's own integrations, macOS's so far (not supported on Linux or Windows):
+The guest system's own integrations, macOS's from 15 on so far (not on 13, 14, Linux or Windows):
   os grant <vm> <app> [<service>...]
                           allow an app, by its path in the guest, the services, all by default:
                           accessibility, screen (recording), input (monitoring), microphone;
@@ -52,8 +52,9 @@ The screen, from the host:
   type <vm> <text>        type text (US layout)
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
-The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
-(on macOS with its Accessibility grant, which needs SIP off; not supported on Windows):
+The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use (on
+macOS with its Accessibility grant, which needs SIP off; not on macOS 13 and 14, ubuntu-22.04 or
+Windows):
   ui <vm> [--app <name>]  the visible windows, all apps' or one's, and macOS's menu bar, with
                           their elements, a line each: role, \"name\", = \"value\", [states] and
                           frame (x,y wxh in a shot's pixels)
