@@ -123,37 +123,30 @@ pub fn click(
   double: bool,
 ) -> io::Result<()> {
   let vm = running(name, "click --name")?;
-  let all = windows(&vm)?;
-  let nodes = tree(&vm, &all, app)?;
-  let node = match find(&nodes, text)[..] {
-    [one] => one,
-    [] => return Err(bad(format!("no element named {text:?} in {name}"))),
-    ref found => {
-      let lines: Vec<String> = found.iter().map(|x| format!("\n  {}", x.line())).collect();
-      let (n, lines) = (found.len(), lines.concat());
-      return Err(bad(format!(
-        "{n} elements named {text:?} in {name}; click one by its frame:{lines}"
-      )));
-    }
-  };
+  let (mut nodes, mut at) = element(&vm, text, app)?;
 
+  // The menu bar, with no id, is in front of every window.
+  let window = window_of(&nodes, &nodes[at]);
+  let focused = |w: &Node| w.states.iter().any(|x| x == "focused");
+  if !window.id.is_empty() && !focused(window) {
+    // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
+    let id = window.id.clone();
+    let raised = agent_desktop(&vm, &["focus-window", "--window-id", &id]);
+    if let Err(e) = raised
+      && !windows(&vm)?.iter().any(|w| w.id == id && focused(w))
+    {
+      return Err(e);
+    }
+
+    // Read again: a window may lay its elements out anew once it has the focus.
+    (nodes, at) = element(&vm, text, app)?;
+  }
+
+  let (node, window) = (&nodes[at], window_of(&nodes, &nodes[at]));
   let (x, y) = node.middle();
   let screen = vz::screen(vm.config.os());
   if !(0.0..screen.width).contains(&x) || !(0.0..screen.height).contains(&y) {
     return Err(bad(format!("{} is off the screen", node.line())));
-  }
-
-  // The menu bar, with no id, is in front of every window.
-  let window = window_of(&nodes, node);
-  let focused = |w: &Node| w.states.iter().any(|x| x == "focused");
-  if !window.id.is_empty() && !focused(window) {
-    // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
-    let raised = agent_desktop(&vm, &["focus-window", "--window-id", &window.id]);
-    if let Err(e) = raised
-      && !windows(&vm)?.iter().any(|w| w.id == window.id && focused(w))
-    {
-      return Err(e);
-    }
   }
 
   // agent-desktop lists the focused window first, but X keeps a dialog or an always-on-top window
@@ -186,6 +179,26 @@ pub fn click(
   vz::ask(&vm, &format!("click {x} {y} {button} {clicks}"), "")?;
   eprintln!("clicked {} at {x},{y}", node.line());
   Ok(())
+}
+
+/// The windows' elements, all apps' or one's, and where the one named `text` is among them: an
+/// error when none or more than one is.
+fn element(vm: &Vm, text: &str, app: Option<&str>) -> io::Result<(Vec<Node>, usize)> {
+  let nodes = tree(vm, &windows(vm)?, app)?;
+  let name = &vm.name;
+  let at = match find(&nodes, text)[..] {
+    [one] => nodes.iter().position(|x| std::ptr::eq(x, one)).unwrap_or(0),
+    [] => return Err(bad(format!("no element named {text:?} in {name}"))),
+    ref found => {
+      let lines: Vec<String> = found.iter().map(|x| format!("\n  {}", x.line())).collect();
+      let (n, lines) = (found.len(), lines.concat());
+      return Err(bad(format!(
+        "{n} elements named {text:?} in {name}; click one by its frame:{lines}"
+      )));
+    }
+  };
+
+  Ok((nodes, at))
 }
 
 /// The running VM for `cmd`, refused on Windows.
@@ -268,13 +281,34 @@ fn stack(out: &str) -> (String, Vec<Client>) {
       "WM_TRANSIENT_FOR" => c.owner = id(value),
       "_NET_WM_NAME" => {
         let name = value.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or_default();
-        c.window.name = name.replace("\\\"", "\"").replace("\\\\", "\\");
+        c.window.name = unescape(name);
       }
       _ => {}
     }
   }
 
   (active, all)
+}
+
+/// A string as `xprop` prints it, quoted: `\\`, `\"`, `\n`, `\t` and other control characters as
+/// `\` and three octal digits.
+fn unescape(x: &str) -> String {
+  let (mut out, mut chars) = (String::new(), x.chars());
+  while let Some(c) = chars.next() {
+    let next = if c == '\\' { chars.next() } else { None };
+    match next {
+      None => out.push(c),
+      Some('n') => out.push('\n'),
+      Some('t') => out.push('\t'),
+      Some(d @ '0'..='7') => {
+        let digits: String = [Some(d), chars.next(), chars.next()].into_iter().flatten().collect();
+        out.push(u8::from_str_radix(&digits, 8).map_or('\u{fffd}', char::from));
+      }
+      Some(x) => out.push(x),
+    }
+  }
+
+  out
 }
 
 /// The windows, all apps' or one's, each followed by its elements, after the menu bar on macOS,
@@ -901,7 +935,7 @@ _NET_WM_NAME = "a \"b\" \\"
 window 0x2a00004 -26 7 870 568
 _NET_FRAME_EXTENTS = 0, 0, 0, 0
 _GTK_FRAME_EXTENTS = 26, 26, 23, 29
-_NET_WM_NAME = "Shadow"
+_NET_WM_NAME = "Shadow\\n\n\t\001"
 window 0x800036 -1 0 1 1080
 _NET_WM_NAME:  not found."#;
     let (active, all) = stack(out);
@@ -913,7 +947,7 @@ _NET_WM_NAME:  not found."#;
       [
         r#"0x120029a 0x1200007 window "Thunar" 640,350 284x258"#,
         r#"0x1200007  window "a \"b\" \\" 635,296 650x514"#,
-        r#"0x2a00004  window "Shadow" 0,30 818x516"#,
+        r#"0x2a00004  window "Shadow\\n\n\t\u{1}" 0,30 818x516"#,
         "0x800036  window -1,0 1x1080"
       ]
     );
