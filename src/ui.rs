@@ -588,17 +588,18 @@ fn frame(bounds: &Json) -> Option<[f64; 4]> {
   (frame[2] > 0.0 && frame[3] > 0.0).then_some(frame)
 }
 
-/// The elements whose name is `text`, else those whose name holds it, ignoring case; windows
-/// are not elements to click.
+/// The elements whose name is `text`, else is it ignoring case, else holds it ignoring case;
+/// windows are not elements to click.
 fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
-  let elements = || nodes.iter().filter(|x| x.depth > 0);
-  let found: Vec<&Node> = elements().filter(|x| x.name == text).collect();
-  if !found.is_empty() {
-    return found;
-  }
-
   let low = text.to_lowercase();
-  elements().filter(|x| x.name.to_lowercase().contains(&low)).collect()
+  let tiers: [&dyn Fn(&Node) -> bool; 3] =
+    [&|x| x.name == text, &|x| x.name.to_lowercase() == low, &|x| {
+      x.name.to_lowercase().contains(&low)
+    }];
+  let found = |f: &&dyn Fn(&Node) -> bool| -> Vec<&Node> {
+    nodes.iter().filter(|x| x.depth > 0 && f(x)).collect()
+  };
+  tiers.iter().map(found).find(|x| !x.is_empty()).unwrap_or_default()
 }
 
 /// Whether the element is an item of an open menu whose items all lie in `frame`: the popup the
@@ -925,6 +926,15 @@ mod tests {
     assert_eq!(names("Wavo"), [r#"statictext "Wavo" 783,108 34x16"#]);
     assert!(names("Hidden").is_empty());
     assert_eq!(names("e").len(), 4);
+
+    // The whole name ignoring case before a part of another's.
+    let button = |name: &str| Node { depth: 1, name: name.into(), ..Node::default() };
+    let saves = [button("Save as"), button("Save"), button("SAVE")];
+    let found = |x: &str| -> Vec<&str> { find(&saves, x).iter().map(|x| &x.name[..]).collect() };
+    assert_eq!(
+      (found("Save"), found("save"), found("sav")),
+      (vec!["Save"], vec!["Save", "SAVE"], vec!["Save as", "Save", "SAVE"])
+    );
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;

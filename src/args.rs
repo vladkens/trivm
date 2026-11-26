@@ -57,8 +57,8 @@ The desktop's elements, read by agent-desktop, which trivm puts in the guest at 
                           their elements, a line each: role, \"name\", = \"value\", [states] and
                           frame (x,y wxh in a shot's pixels)
   click <vm> --name <text> [--app <name>] [--right] [--double]
-                          click the element of that name, else the one whose name holds it,
-                          its window raised first
+                          click the element of that name, else of it in any case, else the one
+                          whose name holds it, its window raised first
 
 The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
 Files, by the XDG Base Directory spec: each VM's settings in ~/.config/trivm/<vm>.conf
