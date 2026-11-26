@@ -613,9 +613,9 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
   tiers.iter().map(|f| outermost(nodes, f)).find(|x| !x.is_empty()).unwrap_or_default()
 }
 
-/// The elements that match, a match with matches inside it that nest one in the next counted once:
-/// GTK 4 gives a cell, a cell in it and its label one name, one element to click. Two side by side
-/// inside it are counted each, and it too.
+/// The elements that match, a match counted once with the matches inside it when they have its name
+/// and nest one in the next: GTK 4 gives a cell, a cell in it and its label one name, one element
+/// to click. Else each is counted, it too.
 fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node> {
   // The index after the last element inside the one at `i`.
   let end = |i: usize| {
@@ -633,9 +633,9 @@ fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node
     out.push(&nodes[i]);
     let (last, mut at) = (end(i), i);
     let chain = (i + 1..last).filter(|&j| hit(&nodes[j])).all(|j| {
-      let inside = j < end(at);
+      let same = j < end(at) && nodes[j].name == nodes[i].name;
       at = j;
-      inside
+      same
     });
     i = if chain { last } else { i + 1 };
   }
@@ -978,7 +978,7 @@ mod tests {
     );
 
     // GTK 4's cell, its twin and its label in Files are one; the next is another. A group whose
-    // name holds that of two buttons in it is three.
+    // name holds that of the buttons in it is one more element.
     let el = |depth: usize, role: &str, name: &str| Node {
       depth,
       role: role.into(),
@@ -996,10 +996,13 @@ mod tests {
       el(2, "button", "Delete permanently"),
       el(3, "statictext", "Delete permanently"),
       el(2, "button", "Delete to Trash"),
+      el(1, "group", "Remove all"),
+      el(2, "button", "Remove one"),
     ];
     let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
     assert_eq!(roles("Videos"), ["cell", "statictext"]);
     assert_eq!(roles("Delete"), ["group", "button", "button"]);
+    assert_eq!(roles("Remove"), ["group", "button"]);
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;
