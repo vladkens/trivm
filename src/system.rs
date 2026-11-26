@@ -459,10 +459,9 @@ chmod 440 /etc/sudoers.d/trivm
 printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' > /etc/ssh/sshd_config.d/000-trivm.conf"
 "#;
 
-/// No sleep, screen saver or lock, which would leave the screen dark; no automatic updates
-/// (macOS 27 kept checking regardless of some of these, as the old `vm` tool found); the host's
-/// time zone, `$2`, which macOS would otherwise guess as Cupertino's; the automatic login of `$4`
-/// by its `kcpassword`, `$3`, which a Setup Assistant answered by hand leaves off.
+/// No sleep, screen saver, lock or automatic updates; the host's time zone, `$2`, not Cupertino's
+/// that macOS guesses; the automatic login of `$4` by its `kcpassword`, `$3`, which a Setup
+/// Assistant answered by hand leaves off.
 const MAC_TUNE: &str = r#"set -e
 sudo -n pmset -a displaysleep 0 sleep 0 disksleep 0 >/dev/null
 defaults -currentHost write com.apple.screensaver idleTime -int 0
