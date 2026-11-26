@@ -277,15 +277,16 @@ unsafe extern "C" {
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
-  // A starting Windows VM's pid is trivm's until QEMU's replaces it, before QMP answers.
-  let t = Instant::now();
-  while vm.config.os() == Os::Windows
-    && vm.pid().is_some()
-    && ask(vm, "status", "").is_err()
-    && t.elapsed().as_secs() < 60
-  {
-    thread::sleep(Duration::from_millis(200));
-  }
+  // A starting Windows VM's pid and port are its start's until QEMU runs: read once it does.
+  let started;
+  let vm = match vm.config.os() {
+    Os::Windows if vm.pid().is_some() => {
+      qemu::started(vm)?;
+      started = Vm::open(&vm.name)?;
+      &started
+    }
+    _ => vm,
+  };
 
   let Some(pid) = vm.pid() else { return Ok(()) };
   // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.

@@ -127,6 +127,26 @@ unsafe extern "C" {
 
 const F_SETFD: i32 = 2;
 
+/// Waits up to a minute until the VM's process is QEMU: a starting VM's pid is trivm's until
+/// QEMU's replaces it.
+pub fn started(vm: &Vm) -> io::Result<()> {
+  let t = Instant::now();
+  while let Some(pid) = vm.pid() {
+    let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output()?;
+    if String::from_utf8_lossy(&out.stdout).contains(QEMU) {
+      return Ok(());
+    }
+
+    if t.elapsed() > Duration::from_secs(60) {
+      return Err(bad(format!("{} is still starting; stop it again", vm.name)));
+    }
+
+    thread::sleep(Duration::from_millis(200));
+  }
+
+  Ok(())
+}
+
 /// Checks that the VM's folders can be given to swtpm, which splits its options at commas, with
 /// no escape for one in a path.
 pub fn fits(vm: &Vm) -> io::Result<()> {
