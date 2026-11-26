@@ -123,7 +123,7 @@ pub fn click(
   double: bool,
 ) -> io::Result<()> {
   let vm = running(name, "click --name")?;
-  let (mut nodes, mut at) = element(&vm, text, app)?;
+  let (mut nodes, mut at) = element(&vm, text, app, None)?;
 
   // The menu bar, with no id, is in front of every window.
   let window = window_of(&nodes, &nodes[at]);
@@ -138,8 +138,8 @@ pub fn click(
       return Err(e);
     }
 
-    // Read again: a window may lay its elements out anew once it has the focus.
-    (nodes, at) = element(&vm, text, app)?;
+    // Read again, that window only: it may lay its elements out anew once it has the focus.
+    (nodes, at) = element(&vm, text, app, Some(&id))?;
   }
 
   let (node, window) = (&nodes[at], window_of(&nodes, &nodes[at]));
@@ -181,12 +181,22 @@ pub fn click(
   Ok(())
 }
 
-/// The windows' elements, all apps' or one's, and where the one named `text` is among them: an
-/// error when none or more than one is.
-fn element(vm: &Vm, text: &str, app: Option<&str>) -> io::Result<(Vec<Node>, usize)> {
+/// The windows' elements, all apps' or one's, and where the one named `text` is among them, or
+/// among the elements of the window with the id given: an error when none or more than one is.
+fn element(
+  vm: &Vm,
+  text: &str,
+  app: Option<&str>,
+  window: Option<&str>,
+) -> io::Result<(Vec<Node>, usize)> {
   let nodes = tree(vm, &windows(vm)?, app)?;
-  let name = &vm.name;
-  let at = match find(&nodes, text)[..] {
+  let (mut name, mut some) = (vm.name.clone(), &nodes[..]);
+  if let Some(id) = window {
+    some = in_window(&nodes, id).ok_or_else(|| bad(format!("{text:?}: its window left {name}")))?;
+    name = some[0].line();
+  }
+
+  let at = match find(some, text)[..] {
     [one] => nodes.iter().position(|x| std::ptr::eq(x, one)).unwrap_or(0),
     [] => return Err(bad(format!("no element named {text:?} in {name}"))),
     ref found => {
@@ -199,6 +209,13 @@ fn element(vm: &Vm, text: &str, app: Option<&str>) -> io::Result<(Vec<Node>, usi
   };
 
   Ok((nodes, at))
+}
+
+/// The window with the id and its elements, as `tree` lists them.
+fn in_window<'a>(nodes: &'a [Node], id: &str) -> Option<&'a [Node]> {
+  let start = nodes.iter().position(|x| x.depth == 0 && x.id == id)?;
+  let rest = nodes[start + 1..].iter().position(|x| x.depth == 0);
+  Some(&nodes[start..rest.map_or(nodes.len(), |n| start + 1 + n)])
 }
 
 /// The running VM for `cmd`, refused on Windows.
@@ -917,6 +934,14 @@ mod tests {
     nodes.insert(0, window("w-1"));
     let of = |x: &str| window_of(&nodes, find(&nodes, x)[0]).id.clone();
     assert_eq!((of("General"), of("Microphone")), ("w-1".into(), "w-2".into()));
+
+    // A window's own: "e" in the second's only, after a raise.
+    let names = |id: &str| -> Vec<String> {
+      find(in_window(&nodes, id).unwrap(), "e").iter().map(|x| x.line()).collect()
+    };
+    assert_eq!(names("w-1").len() + names("w-2").len(), 4);
+    assert!(names("w-2").iter().all(|x| !x.contains("General")));
+    assert!(in_window(&nodes, "w-3").is_none());
   }
 
   #[test]
