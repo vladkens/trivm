@@ -86,9 +86,8 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
     let net = VZVirtioNetworkDeviceConfiguration::new();
     net.setAttachment(Some(&VZNATNetworkDeviceAttachment::new()));
-    let mac =
-      VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&vm.config.mac));
-    let mac = mac.ok_or_else(|| bad(format!("config: not a MAC address: {}", vm.config.mac)))?;
+    let mac = VZMACAddress::initWithString(VZMACAddress::alloc(), &NSString::from_str(&vm.mac));
+    let mac = mac.ok_or_else(|| bad(format!("{}: not a MAC address", vm.path("mac").display())))?;
     net.setMACAddress(&mac);
     c.setNetworkDevices(&NSArray::from_retained_slice(&[Retained::into_super(net)]));
 
@@ -176,7 +175,7 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
         let console = VZFileSerialPortAttachment::initWithURL_append_error(
           VZFileSerialPortAttachment::alloc(),
-          &url(&vm.path("console.log")),
+          &url(&vm.state("console.log")),
           true,
         )
         .map_err(ns)?;
@@ -398,16 +397,14 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   // SAFETY: the VM runs on the main queue, which `app.run()` runs.
   let machine =
     unsafe { VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &config) };
-  match (vm.config.os(), vm.config.setup, recovery) {
-    (Os::Linux | Os::Windows, _, true) => {
-      return Err(bad(format!("{} isn't macOS: no recoveryOS", vm.name)));
-    }
+  match (vm.config.os(), vm.setup, recovery) {
+    (Os::Linux, _, true) => return Err(bad(format!("{} runs Linux: no recoveryOS", vm.name))),
     (Os::Macos, _, true) => unsafe {
       let opts = VZMacOSVirtualMachineStartOptions::new();
       opts.setStartUpFromMacOSRecovery(true);
       machine.startWithOptions_completionHandler(&opts, &block)
     },
-    (Os::Macos, true, false) if vm.config.provisioned() => {
+    (Os::Macos, true, false) => {
       let opts = provisioning()?;
       unsafe { machine.startWithOptions_completionHandler(&opts, &block) }
     }
@@ -417,10 +414,10 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
   let display = Display::new(mtm, &machine, screen(vm.config.os()), &vm.name);
   STATE.with(|s| *s.borrow_mut() = Some(State { machine, display }));
 
-  let sock = vm.path("ctl.sock");
+  let sock = vm.state("ctl.sock");
   let _ = fs::remove_file(&sock);
   let listener = UnixListener::bind(&sock)?;
-  let dir = vm.dir.clone();
+  let dir = vm.state_dir.clone();
   thread::spawn(move || watch(&dir));
   thread::spawn(move || {
     for conn in listener.incoming().flatten() {
@@ -543,7 +540,7 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
 
 /// [ask], waiting for the answer at most `wait`.
 pub fn ask_within(vm: &Vm, req: &str, body: &str, wait: Duration) -> io::Result<String> {
-  let sock = vm.path("ctl.sock");
+  let sock = vm.state("ctl.sock");
   let not_running = || bad(format!("{} isn't running; trivm start {}", vm.name, vm.name));
   if vm.pid().is_none() {
     return Err(not_running());

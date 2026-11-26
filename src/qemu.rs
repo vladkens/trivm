@@ -6,20 +6,20 @@ use std::cell::RefCell;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{self, Command, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use crate::display::{self, Act};
-use crate::vm::{self, PASSWORD, Vm};
+use crate::vm::{PASSWORD, Vm};
 use crate::{bad, run};
 
 const QEMU: &str = "qemu-system-aarch64";
 
-/// The CDs attached while a VM is set up, by their device ids.
+/// The CDs attached while a VM is set up, the install media and the seed, by their device ids.
 const CDS: [&str; 2] = ["cd0", "cd1"];
 
 /// QEMU's binary and its share folder, which holds edk2's firmware.
@@ -49,7 +49,7 @@ pub fn platform(vm: &Vm) -> io::Result<()> {
 /// QEMU's command line for the VM, the CDs attached as USB drives.
 pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
   let c = &vm.config;
-  let port = c.port.unwrap_or(0);
+  let port = vm.port.unwrap_or(0);
   let mut args: Vec<String> = [
     "-name".into(),
     vm.name.clone(),
@@ -70,7 +70,7 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-drive".into(),
     format!("if=none,id=disk,format=raw,discard=unmap,file={}", opt(&vm.path("disk.img"))),
     "-device".into(),
-    "nvme,drive=disk,serial=trivm,bootindex=1".into(),
+    "nvme,drive=disk,serial=trivm,bootindex=0".into(),
     "-device".into(),
     "ramfb".into(),
     "-device".into(),
@@ -82,17 +82,18 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-netdev".into(),
     format!("user,id=net,hostfwd=tcp:127.0.0.1:{port}-:22"),
     "-device".into(),
-    format!("virtio-net-pci,netdev=net,mac={}", c.mac),
+    format!("virtio-net-pci,netdev=net,mac={}", vm.mac),
     "-chardev".into(),
-    format!("socket,id=tpm,path={}", opt(&vm.path("tpm.sock"))),
+    format!("socket,id=tpm,path={}", opt(&vm.state("tpm.sock"))),
     "-tpmdev".into(),
     "emulator,id=tpm,chardev=tpm".into(),
     "-device".into(),
     "tpm-tis-device,tpmdev=tpm,ppi=off".into(),
+    // Windows reads the clock as local time, and its time zone is UTC.
     "-rtc".into(),
-    "base=localtime".into(),
+    "base=utc".into(),
     "-qmp".into(),
-    format!("unix:{},server=on,wait=off", opt(&vm.path("qmp.sock"))),
+    format!("unix:{},server=on,wait=off", opt(&vm.state("qmp.sock"))),
     "-vnc".into(),
     "127.0.0.1:0,to=99,password=on".into(),
     "-display".into(),
@@ -100,9 +101,11 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
   ]
   .into();
 
-  // edk2 connects only the devices that have a boot index: the ISO's too, or it isn't seen.
+  // edk2 connects only the devices that have a boot index: the media's too, or it isn't seen. The
+  // disk goes first: blank, it doesn't boot and the media does; once Setup has written Windows'
+  // boot files, each of Setup's restarts boots the disk, with no key pressed.
   for (i, (cd, id)) in cds.iter().zip(CDS).enumerate() {
-    let boot = if i == 0 { ",bootindex=0" } else { "" };
+    let boot = if i == 0 { ",bootindex=1" } else { "" };
     args.push("-drive".into());
     args.push(format!("if=none,id={id}d,format=raw,media=cdrom,readonly=on,file={}", opt(cd)));
     args.push("-device".into());
@@ -120,80 +123,179 @@ fn free_port() -> io::Result<u16> {
 unsafe extern "C" {
   fn setsid() -> i32;
   fn fcntl(fd: i32, cmd: i32, ...) -> i32;
-  fn pwrite(fd: i32, buf: *const u8, len: usize, off: i64) -> isize;
-  fn ftruncate(fd: i32, len: i64) -> i32;
-}
-
-/// Whether the process of that pid is QEMU, not the trivm that starts it.
-pub fn is_qemu(pid: i32) -> bool {
-  vm::process_name(pid).is_some_and(|x| x.starts_with("qemu"))
+  fn getpid() -> i32;
+  fn pwrite(fd: i32, buf: *const u8, n: usize, offset: i64) -> isize;
 }
 
 const F_SETFD: i32 = 2;
 
+/// Whether the process runs a program of this name.
+fn runs(pid: i32, name: &str) -> bool {
+  let out = Command::new("ps").args(["-o", "comm=", "-p", &pid.to_string()]).output();
+  out.is_ok_and(|x| String::from_utf8_lossy(&x.stdout).trim_end().ends_with(name))
+}
+
+/// Waits up to a minute until the VM's process is QEMU, false if it isn't by then: a starting VM's
+/// pid is trivm's until QEMU's replaces it.
+pub fn started(vm: &Vm) -> bool {
+  let t = Instant::now();
+  while let Some(pid) = vm.pid() {
+    if runs(pid, QEMU) {
+      return true;
+    }
+
+    if t.elapsed() > Duration::from_secs(60) {
+      return false;
+    }
+
+    thread::sleep(Duration::from_millis(200));
+  }
+
+  true
+}
+
+/// Ends a start stuck before QEMU runs: its trivm, stopped first so it makes no more processes,
+/// then those it made (swtpm, QEMU forked or running) and trivm.
+pub fn cancel(vm: &Vm) -> io::Result<()> {
+  let Some(pid) = vm.pid() else { return Ok(()) };
+  // Started meanwhile: stopped as a running VM.
+  if runs(pid, QEMU) {
+    return Ok(());
+  }
+
+  crate::vm::signal(pid, 17);
+  let out = Command::new("pgrep").args(["-P", &pid.to_string()]).output()?;
+  let out = String::from_utf8_lossy(&out.stdout);
+  let mut pids: Vec<i32> = out.lines().filter_map(|x| x.trim().parse().ok()).collect();
+  pids.push(pid);
+  for &x in &pids {
+    crate::vm::signal(x, 9);
+  }
+
+  // Gone once none of them holds the lock: a start after isn't this one.
+  let t = Instant::now();
+  while vm.pid().is_some_and(|x| pids.contains(&x)) {
+    if t.elapsed() > Duration::from_secs(5) {
+      return Err(bad(format!("{} didn't stop; its process is {pid}", vm.name)));
+    }
+
+    thread::sleep(Duration::from_millis(100));
+  }
+
+  Ok(())
+}
+
+/// Checks that the VM's folders can be given to swtpm, which splits its options at commas, with
+/// no escape for one in a path.
+pub fn fits(vm: &Vm) -> io::Result<()> {
+  for dir in [&vm.dir, &vm.state_dir] {
+    if dir.to_string_lossy().contains(',') {
+      return Err(bad(format!("{}: swtpm takes no path with a comma", dir.display())));
+    }
+  }
+
+  Ok(())
+}
+
 /// Starts `swtpm`, then QEMU as the VM's process in a session of its own, the CDs attached;
 /// waits until it runs. QEMU inherits the locked `pid` file, so the VM runs exactly while QEMU
-/// does, and writes its pid in it before it runs: the file never names a trivm that's gone.
+/// does.
 pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
+  fits(vm)?;
   let (bin, share) = qemu()?;
-  // Held from here, so a second start finds the VM running before touching its TPM.
-  let lock = vm.lock()?;
-  let port = match vm.config.port {
+  // Held from here, so a second start finds the VM in use before touching its TPM; running once
+  // its port is saved, so no command reaches the last one, which another VM may have now.
+  let mut lock = vm.take()?;
+  // The saved one read again: a start before this one may have saved another since it was read.
+  let port = match vm.saved_port() {
     Some(x) if TcpListener::bind(("127.0.0.1", x)).is_ok() => x,
     _ => free_port()?,
   };
 
-  if vm.config.port != Some(port) {
-    vm.config.port = Some(port);
-    vm.save()?;
-  }
+  vm.port = Some(port);
+  vm.save_port()?;
+  write!(lock, "{}", std::process::id())?;
 
-  // Opened before swtpm starts: nothing fails between it and QEMU, which ends it.
-  let log = fs::OpenOptions::new().create(true).append(true).open(vm.path("log"))?;
+  // Opened before swtpm starts, as a failure after leaves it running.
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
   let out = log.try_clone()?;
   fs::create_dir_all(vm.path("tpm"))?;
-  let _ = fs::remove_file(vm.path("tpm.sock"));
-  let _ = fs::remove_file(vm.path("tpm.log"));
+  let _ = fs::remove_file(vm.state("tpm.sock"));
+  let _ = fs::remove_file(vm.state("tpm.log"));
 
-  let path = |x: &str| vm.path(x).to_string_lossy().into_owned();
+  let path = |x: &str| vm.state(x).to_string_lossy().into_owned();
+  // swtpm's socket, listened on before swtpm runs, so QEMU's connection waits for it.
+  let sock = UnixListener::bind(vm.state("tpm.sock"))?;
+  let sfd = sock.as_raw_fd();
   let mut swtpm = Command::new("swtpm");
-  swtpm.args(["socket", "--tpm2", "--daemon", "--terminate"]);
-  swtpm.args(["--tpmstate", &format!("dir={}", path("tpm"))]);
-  swtpm.args(["--ctrl", &format!("type=unixio,path={}", path("tpm.sock"))]);
-  swtpm.args(["--pid", &format!("file={}", path("tpm.pid"))]);
+  swtpm.args(["socket", "--tpm2"]);
+  swtpm.args(["--tpmstate", &format!("dir={}", vm.path("tpm").display())]);
+  // Ends when QEMU's connection does.
+  swtpm.args(["--ctrl", &format!("type=unixio,fd={sfd},terminate")]);
   swtpm.args(["--log", &format!("file={}", path("tpm.log"))]);
-  // swtpm's errors go to its log.
-  if let Err(e) = run(&mut swtpm) {
-    let log = fs::read_to_string(vm.path("tpm.log")).unwrap_or_default();
-    return Err(bad(format!("{} {}", e.to_string().trim_end(), log.trim())));
-  }
+  swtpm.stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log.try_clone()?);
+  // SAFETY: setsid and fcntl are async-signal-safe; the socket's fd stays open in swtpm.
+  unsafe {
+    swtpm.pre_exec(move || match setsid() < 0 || fcntl(sfd, F_SETFD, 0) < 0 {
+      true => Err(io::Error::last_os_error()),
+      false => Ok(()),
+    })
+  };
+
+  // trivm's child, not a daemon, so `stop --force` finds it while the start is stuck.
+  let mut tpm = swtpm.spawn()?;
+  drop(sock);
+  let mut tpm_kill = || {
+    let _ = tpm.kill();
+    let _ = tpm.wait();
+  };
 
   let fd = lock.as_raw_fd();
   let mut cmd = Command::new(&bin);
   cmd.args(args(vm, &share, cds)).stdin(Stdio::null()).stdout(out).stderr(log);
-  // SAFETY: setsid, fcntl, getpid, pwrite and ftruncate are async-signal-safe, `pid_text`
-  // allocates nothing; the lock's fd stays open in QEMU.
+  // SAFETY: setsid, fcntl, getpid and pwrite are async-signal-safe, the digits made on the stack;
+  // the lock's fd stays open in QEMU.
   unsafe {
     cmd.pre_exec(move || {
-      let pid = vm::pid_text(process::id());
-      let failed = setsid() < 0
-        || fcntl(fd, F_SETFD, 0) < 0
-        || pwrite(fd, pid.as_ptr(), pid.len(), 0) != pid.len() as isize
-        || ftruncate(fd, pid.len() as i64) < 0;
-      if failed { Err(io::Error::last_os_error()) } else { Ok(()) }
+      // The child's pid over trivm's before it runs QEMU, so a trivm killed meanwhile leaves it:
+      // one write, padded and not truncated first, so a reader sees one pid or the other.
+      let mut pid = [b' '; 10];
+      let (mut n, mut len) = (getpid() as u32, 0);
+      let mut digits = [0u8; 10];
+      while len == 0 || n > 0 {
+        digits[len] = b'0' + (n % 10) as u8;
+        (n, len) = (n / 10, len + 1);
+      }
+
+      for i in 0..len {
+        pid[i] = digits[len - 1 - i];
+      }
+
+      match setsid() < 0 || fcntl(fd, F_SETFD, 0) < 0 || pwrite(fd, pid.as_ptr(), 10, 0) != 10 {
+        true => Err(io::Error::last_os_error()),
+        false => Ok(()),
+      }
     })
   };
 
-  let mut child = cmd.spawn().inspect_err(|_| tpm_kill(vm))?;
+  let mut child = match cmd.spawn() {
+    Ok(x) => x,
+    Err(e) => {
+      tpm_kill();
+      return Err(e);
+    }
+  };
+
   drop(lock);
   let _ = Command::new("caffeinate").args(["-i", "-w", &child.id().to_string()]).spawn();
 
   let t = Instant::now();
   loop {
     if let Some(code) = child.try_wait()? {
-      tpm_kill(vm);
-      let log = fs::read_to_string(vm.path("log")).unwrap_or_default();
-      let tail: Vec<_> = log.lines().rev().take(5).collect();
+      tpm_kill();
+      let log = fs::read_to_string(vm.state("log")).unwrap_or_default();
+      let tpm = fs::read_to_string(vm.state("tpm.log")).unwrap_or_default();
+      let tail: Vec<_> = log.lines().chain(tpm.lines()).rev().take(5).collect();
       let tail: Vec<_> = tail.into_iter().rev().collect();
       return Err(bad(format!("{} didn't start ({code}):\n{}", vm.name, tail.join("\n"))));
     }
@@ -207,14 +309,6 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
     }
 
     thread::sleep(Duration::from_millis(200));
-  }
-}
-
-/// `swtpm` ends with QEMU's connection; one that QEMU never connected to is ended here.
-fn tpm_kill(vm: &Vm) {
-  let pid = fs::read_to_string(vm.path("tpm.pid")).ok().and_then(|x| x.trim().parse().ok());
-  if let Some(pid) = pid {
-    vm::signal(pid, 15);
   }
 }
 
@@ -232,7 +326,7 @@ impl Qmp {
       return Err(not_running());
     }
 
-    let w = UnixStream::connect(vm.path("qmp.sock")).map_err(|_| not_running())?;
+    let w = UnixStream::connect(vm.state("qmp.sock")).map_err(|_| not_running())?;
     w.set_read_timeout(Some(Duration::from_secs(60)))?;
     let mut qmp = Self { r: BufReader::new(w.try_clone()?), w };
     qmp.line()?;
@@ -349,9 +443,9 @@ impl Frame {
   }
 }
 
-/// The screen now, through a PPM dump in the VM's folder, one per trivm process.
+/// The screen now, through a PPM dump in the VM's state folder, one per trivm process.
 fn frame(vm: &Vm, qmp: &mut Qmp) -> io::Result<Frame> {
-  let path = vm.path(&format!("screen-{}.ppm", std::process::id()));
+  let path = vm.state(&format!("screen-{}.ppm", std::process::id()));
   qmp.call("screendump", &format!(r#"{{"filename": {}}}"#, json(&path.to_string_lossy())))?;
   let mut data = Vec::new();
   fs::File::open(&path)?.read_to_end(&mut data)?;
@@ -553,33 +647,11 @@ mod tests {
   use crate::vm::Config;
 
   #[test]
-  fn qemu_told() {
-    let dir = env::temp_dir().join(format!("trivm-qemu-{}", process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let exe = dir.join("qemu-system-aarch64");
-    fs::copy("/bin/sleep", &exe).unwrap();
-    let mut child = Command::new(&exe).arg("10").spawn().unwrap();
-    let told = is_qemu(child.id() as i32) && vm::is_vm(child.id() as i32);
-    let _ = child.kill();
-    let _ = child.wait();
-    fs::remove_dir_all(&dir).unwrap();
-    assert!(told);
-    assert!(!is_qemu(process::id() as i32));
-    assert!(!is_qemu(-1));
-  }
-
-  #[test]
   fn command_line() {
-    let config = Config {
-      system: "windows-11".into(),
-      cpus: 4,
-      memory: 6,
-      disk: 64,
-      mac: "02:00:00:00:00:01".into(),
-      setup: true,
-      port: Some(50022),
-    };
-    let vm = Vm { name: "w".into(), dir: "/v/a,b".into(), config };
+    let config = Config { system: "windows-11".into(), cpus: 4, memory: 6, disk: 64 };
+    let (dir, state_dir) = ("/v/a,b".into(), "/s/a,b".into());
+    let mac = "02:00:00:00:00:01".into();
+    let vm = Vm { dir, state_dir, mac, setup: true, port: Some(50022), ..Vm::at("w", config) };
     let cds = ["/c/win.iso".into(), "/v/a,b/seed.iso".into()];
     let line = args(&vm, Path::new("/q"), &cds).join(" ");
 
@@ -587,21 +659,25 @@ mod tests {
       "-machine virt -accel hvf -cpu host -smp 4 -m 6G",
       "if=pflash,format=raw,readonly=on,file=/q/edk2-aarch64-code.fd",
       "if=pflash,format=raw,file=/v/a,,b/efi.bin",
-      "file=/v/a,,b/disk.img -device nvme,drive=disk,serial=trivm,bootindex=1 ",
+      "file=/v/a,,b/disk.img -device nvme,drive=disk,serial=trivm,bootindex=0 ",
       "-device ramfb -device qemu-xhci,id=usb -device usb-kbd -device usb-tablet",
       "user,id=net,hostfwd=tcp:127.0.0.1:50022-:22",
       "virtio-net-pci,netdev=net,mac=02:00:00:00:00:01",
-      "socket,id=tpm,path=/v/a,,b/tpm.sock",
-      "tpm-tis-device,tpmdev=tpm,ppi=off",
-      "-qmp unix:/v/a,,b/qmp.sock,server=on,wait=off",
+      "socket,id=tpm,path=/s/a,,b/tpm.sock",
+      "tpm-tis-device,tpmdev=tpm,ppi=off -rtc base=utc",
+      "-qmp unix:/s/a,,b/qmp.sock,server=on,wait=off",
       "-vnc 127.0.0.1:0,to=99,password=on -display none",
-      "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=0",
+      "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=1",
       "file=/v/a,,b/seed.iso -device usb-storage,drive=cd1d,id=cd1",
     ] {
       assert!(line.contains(x), "{x} not in {line}");
     }
 
     assert!(!args(&vm, Path::new("/q"), &[]).join(" ").contains("usb-storage"));
+
+    // QEMU's paths take a comma doubled; swtpm's none.
+    assert!(fits(&vm).is_err());
+    assert!(fits(&Vm { dir: "/v/a".into(), state_dir: "/s/a".into(), ..vm }).is_ok());
   }
 
   #[test]

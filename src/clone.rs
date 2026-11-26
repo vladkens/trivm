@@ -8,20 +8,16 @@ use std::io::{self, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::process::{self, Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 use std::{env, fs, thread};
 
 use crate::vm::{self, Config, Os, Vm};
 use crate::{bad, vz};
 
-/// The files of a VM's folder that are its runs', not the machine's: not cloned, nor the config
-/// (`config` and the `config.<pid>` it is saved through), which the clone has its own of.
-const OWN: &[&str] = &["pid", "log", "console.log", "ctl.sock"];
-
 /// A clone of a stopped VM that is set up, with the MAC address given and a new machine
-/// identifier. It is made whole in a hidden folder of this process's, which `made` is told of
-/// first, then renamed into place: no one sees half a VM, and of two clones of a name one fails.
+/// identifier. Its name is claimed by its data folder, which `made` is told of first, and its
+/// config written last: no one opens half a VM, and of two clones of a name one fails.
 pub fn clone(
   src: &str,
   name: &str,
@@ -29,68 +25,41 @@ pub fn clone(
   made: impl FnOnce(&Path) -> io::Result<()>,
 ) -> io::Result<Vm> {
   let vm = Vm::open(src)?;
-  if vm.config.setup {
+  if vm.setup {
     return Err(bad(format!("{src} isn't set up yet; trivm start {src} finishes it")));
   }
 
-  if !vm::valid(name) {
-    return Err(bad(format!("not a VM name: {name}")));
-  }
-
-  let dst = vm::home().join(name);
-  vm::socket_fits(&dst)?;
-  let taken = || {
-    let msg = format!("{name} exists; trivm delete {name} first");
-    io::Error::new(io::ErrorKind::AlreadyExists, msg)
-  };
-  if dst.exists() {
-    return Err(taken());
-  }
-
-  // Held while copying, so the VM can't start in the middle.
+  // Held while copying, so the VM can't start in the middle; the clone held until it shows, and
+  // while a failed one goes.
   let _hold = vm.hold()?;
-  let tmp = vm::home().join(format!(".{name}.{}", process::id()));
-  let _ = fs::remove_dir_all(&tmp);
-  fs::create_dir(&tmp)?;
-  vm::private(&tmp)?;
-
-  // QEMU's port is the clone's own once started.
-  let config = Config { mac, port: None, ..vm.config };
-  let new = Vm { name: name.into(), dir: tmp.clone(), config };
-  let res = made(&tmp).and_then(|_| copy(&vm.dir, &new)).and_then(|_| {
-    // rename(2) doesn't replace a folder with files in it.
-    match fs::rename(&tmp, &dst) {
-      Err(_) if dst.exists() => Err(taken()),
-      x => x,
-    }
-  });
+  let new = Vm { mac, ..Vm::at(name, vm.config.clone()) };
+  let _made = new.claim()?;
+  let res = made(&new.dir).and_then(|_| copy(&vm.dir, &new)).and_then(|_| new.commit());
   if let Err(e) = res {
-    let _ = fs::remove_dir_all(&tmp);
+    let _ = new.remove();
     return Err(e);
   }
 
   Vm::open(name)
 }
 
-/// The VM's files into `vm`'s folder but the run's own, a new machine identifier, the config.
+/// The VM's data into `vm`'s folder but its `mac`, which the clone has its own of, then a new
+/// machine identifier, which a VM on QEMU hasn't.
 fn copy(src: &Path, vm: &Vm) -> io::Result<()> {
   for x in fs::read_dir(src)? {
     let x = x?;
     let (name, kind) = (x.file_name(), x.file_type()?);
-    let config = name.to_str().is_some_and(|x| x == "config" || x.starts_with("config."));
-    if config || OWN.iter().any(|x| name == *x) || !(kind.is_file() || kind.is_dir()) {
+    if name == "mac" || !(kind.is_file() || kind.is_dir()) {
       continue;
     }
 
     clone_file(&x.path(), &vm.dir.join(&name))?;
   }
 
-  // QEMU's Windows has no identifier of trivm's.
-  if vm.config.os() != Os::Windows {
-    fs::write(vm.path("machine.bin"), vz::machine_id(vm.config.os()))?;
+  match vm.config.os() {
+    Os::Windows => Ok(()),
+    os => fs::write(vm.path("machine.bin"), vz::machine_id(os)),
   }
-
-  vm.save()
 }
 
 unsafe extern "C" {
@@ -131,12 +100,11 @@ pub fn run(src: &str, cmd: &[String]) -> io::Result<ExitStatus> {
 /// `run`'s clone of `src`: `<src>-run-<n>`, the lowest `n` free, with a MAC address of its own
 /// for each name. The reaper is told of each try before its files are copied.
 fn slot(src: &str, reaper: &mut io::PipeWriter) -> io::Result<Vm> {
-  let mac = Vm::open(src)?.config.mac;
+  let mac = Vm::open(src)?.mac;
   let mut n = 1;
   loop {
     let name = format!("{src}-run-{n}");
-    let tell =
-      |tmp: &Path| writeln!(reaper, "{} {name} {}", fs::metadata(tmp)?.ino(), tmp.display());
+    let tell = |dir: &Path| writeln!(reaper, "{} {name}", fs::metadata(dir)?.ino());
 
     match clone(src, &name, vm::clone_mac(&mac, &name)?, tell) {
       Err(e) if e.kind() == io::ErrorKind::AlreadyExists && n < u8::MAX => n += 1,
@@ -177,111 +145,93 @@ fn reaper() -> io::Result<io::PipeWriter> {
 }
 
 /// `trivm _reap`: deletes the clone of a `run` that ended without deleting it. `run` writes, for
-/// each name it tries, the inode of the hidden folder the clone is made in (kept when it's renamed
-/// into place; APFS doesn't reuse inodes), the name and the folder, then `done` once it deleted it.
+/// each name it tries, the inode of the clone's data folder (APFS doesn't reuse inodes) and the
+/// name, then `done` once it deleted it.
 pub fn reap() -> io::Result<()> {
   let text = io::read_to_string(io::stdin())?;
   let Some(last) = text.lines().last() else { return Ok(()) };
-  let mut words = last.splitn(3, ' ');
-  let (Some(ino), Some(name), Some(tmp)) = (words.next(), words.next(), words.next()) else {
-    return Ok(());
-  };
-
+  let Some((ino, name)) = last.split_once(' ') else { return Ok(()) };
   let ino: u64 = ino.parse().map_err(|_| bad(format!("_reap: not an inode: {ino}")))?;
-  if fs::metadata(tmp).is_ok_and(|x| x.ino() == ino) {
-    return fs::remove_dir_all(tmp);
-  }
-
-  discard(&Vm::open(name)?, ino)
+  // Its folders are enough: the config may not be written yet.
+  discard(&Vm::at(name, Config::default()), ino)
 }
 
-/// Stops and deletes `run`'s clone if its folder still has the inode it was made with, checked
-/// again under its lock: the folder may have been deleted meanwhile and the name taken by another.
+/// Stops and deletes `run`'s clone if its data folder still has the inode it was made with,
+/// checked again under its lock: the folder may have been deleted meanwhile and the name taken by
+/// another.
 fn discard(vm: &Vm, ino: u64) -> io::Result<()> {
   let ours = || fs::metadata(&vm.dir).is_ok_and(|x| x.ino() == ino);
-  // Opened before the folder is checked, so it is the clone's even if the name is another VM's
-  // by the time it is read: APFS doesn't reuse inodes.
-  let pid = fs::File::open(vm.path("pid"));
   if !ours() {
     return Ok(());
   }
 
-  // Nothing of the clone's is kept: its process killed by its pid, not reached by its name.
-  if let Ok(f) = pid {
-    kill(&f);
-  }
-
-  // A clone of it being made holds the lock a moment.
-  let mut lock = vm.lock();
+  crate::stop(vm, true)?;
+  // A clone of it being made holds it a moment. Taken with no pid, as `delete` takes a VM.
+  let mut lock = vm.take();
   for _ in 0..60 {
     if lock.is_ok() {
       break;
     }
 
     thread::sleep(Duration::from_secs(1));
-    lock = vm.lock();
+    lock = vm.take();
   }
 
   let _lock = lock?;
-  match ours() {
-    true => fs::remove_dir_all(&vm.dir),
-    false => Ok(()),
+  if !ours() {
+    return Ok(());
   }
-}
 
-/// Kills the process that holds an open `pid` file's lock, and waits until it lets go.
-fn kill(f: &fs::File) {
-  let Some(pid) = vm::pid_of(f).filter(|&x| vm::is_vm(x)) else { return };
-  vm::signal(pid, 9);
-  for _ in 0..100 {
-    if vm::pid_of(f) != Some(pid) {
-      return;
-    }
-
-    thread::sleep(Duration::from_millis(100));
-  }
+  // Its data folder, by which it is known, last: a removal cut short, the reaper finishes it.
+  vm::gone(fs::remove_file(&vm.conf))?;
+  vm::gone(fs::remove_dir_all(&vm.state_dir))?;
+  fs::remove_dir_all(&vm.dir)
 }
 
 #[cfg(test)]
 mod tests {
-  use std::os::unix::process::ExitStatusExt;
+  use std::process;
 
   use super::*;
 
   #[test]
   fn discards() {
-    let dir = env::temp_dir().join(format!("trivm-discard-{}", process::id()));
-    fs::create_dir_all(&dir).unwrap();
-    let config = Config {
-      system: "macos-27".into(),
-      cpus: 1,
-      memory: 1,
-      disk: 1,
-      mac: "m".into(),
-      setup: false,
-      port: None,
+    let root = env::temp_dir().join(format!("trivm-discard-{}", process::id()));
+    let vm = Vm {
+      conf: root.join("a.conf"),
+      dir: root.join("data/a"),
+      state_dir: root.join("state/a"),
+      ..Vm::at("a", Config::default())
     };
-    let vm = Vm { name: "a".into(), dir: dir.clone(), config };
-    let ino = fs::metadata(&dir).unwrap().ino();
+    let make = || {
+      fs::create_dir_all(&vm.dir).unwrap();
+      fs::create_dir_all(&vm.state_dir).unwrap();
+      fs::write(&vm.conf, "").unwrap();
+      fs::metadata(&vm.dir).unwrap().ino()
+    };
 
-    // A process holding the clone's lock, as its VM's does, through its stdin, named as QEMU.
-    let qemu = env::temp_dir().join(format!("trivm-discard-bin-{}/qemu", process::id()));
-    fs::create_dir_all(qemu.parent().unwrap()).unwrap();
-    fs::copy("/bin/sleep", &qemu).unwrap();
-    let lock = vm.lock().unwrap();
-    let mut child =
-      Command::new(&qemu).arg("30").stdin(Stdio::from(lock.try_clone().unwrap())).spawn().unwrap();
-    vm::write_pid(&lock, child.id()).unwrap();
-    drop(lock);
-
-    // Another VM's folder by that name: left alone, its process too.
+    // Another VM's folder by that name: left alone.
+    let ino = make();
     discard(&vm, ino + 1).unwrap();
-    assert!(dir.exists());
-    assert!(child.try_wait().unwrap().is_none());
+    assert!(vm.dir.exists() && vm.state_dir.exists() && vm.conf.exists());
 
-    discard(&vm, ino).unwrap();
-    assert!(!dir.exists());
-    assert_eq!(child.wait().unwrap().signal(), Some(9));
-    fs::remove_dir_all(qemu.parent().unwrap()).unwrap();
+    // Held, as by a clone of it being made: waited for.
+    let hold = vm.hold().unwrap();
+    let t = std::time::Instant::now();
+    thread::scope(|s| {
+      s.spawn(|| {
+        thread::sleep(Duration::from_millis(500));
+        drop(hold);
+      });
+      discard(&vm, ino).unwrap();
+    });
+    assert!(t.elapsed() >= Duration::from_millis(500));
+    assert!(!vm.dir.exists() && !vm.state_dir.exists() && !vm.conf.exists());
+
+    // One whose removal was cut short, its config and state gone: its data goes too.
+    fs::create_dir_all(&vm.dir).unwrap();
+    discard(&vm, fs::metadata(&vm.dir).unwrap().ino()).unwrap();
+    assert!(!vm.dir.exists() && !vm.state_dir.exists());
+    fs::remove_dir_all(&root).unwrap();
   }
 }
