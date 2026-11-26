@@ -6,6 +6,7 @@
 use std::process::Stdio;
 use std::{fmt, fs, io};
 
+use crate::system::Desktop;
 use crate::vm::{Os, Vm};
 use crate::{bad, permissions, run, ssh, system, vz};
 
@@ -72,6 +73,9 @@ rm -rf "$d"
 /// `window <id> <x> <y> <width> <height>`, a client's in a window manager's frame, then the frame
 /// around it, GTK's shadow inside it, the window it's for and its title, as `xprop` prints them.
 const STACK: &str = r#"set -e
+for x in xprop xwininfo; do
+  command -v $x >/dev/null || { echo "click --name needs $x in the guest" >&2; exit 1; }
+done
 xprop -root -notype _NET_ACTIVE_WINDOW
 frames=$(for id in $(xprop -root _NET_CLIENT_LIST_STACKING | sed 's/.*# //; s/,/ /g'); do
   echo "$(xwininfo -id "$id" -tree | awk '/Parent window id/ { print $4 }') $id"
@@ -218,10 +222,10 @@ fn in_window<'a>(nodes: &'a [Node], id: &str) -> Option<&'a [Node]> {
   Some(&nodes[start..rest.map_or(nodes.len(), |n| start + 1 + n)])
 }
 
-/// The running VM for `cmd`, refused on Windows.
+/// The running VM for `cmd`, refused on a system agent-desktop doesn't work in.
 fn running(name: &str, cmd: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
-  if vm.config.os() == Os::Windows {
+  if !supported(&vm)? {
     return Err(unsupported(&vm, cmd));
   }
 
@@ -231,8 +235,18 @@ fn running(name: &str, cmd: &str) -> io::Result<Vm> {
   }
 }
 
-/// `cmd` refused on a system agent-desktop isn't put in by trivm: Windows, though it has a build
-/// for it (UI Automation).
+/// Whether trivm puts agent-desktop in the VM's system: not in Windows, though it has a build for
+/// it (UI Automation); nor in Ubuntu 22.04's Plasma: agent-desktop needs 24.04's AT-SPI, and found
+/// no X window to raise for Konsole's.
+fn supported(vm: &Vm) -> io::Result<bool> {
+  Ok(match vm.config.os() {
+    Os::Macos => true,
+    Os::Linux => system::find(&vm.config.system)?.desktop != Desktop::Plasma,
+    Os::Windows => false,
+  })
+}
+
+/// `cmd` refused on a system agent-desktop isn't put in by trivm.
 fn unsupported(vm: &Vm, cmd: &str) -> io::Error {
   bad(format!("{cmd}: not supported on {}", vm.config.system))
 }

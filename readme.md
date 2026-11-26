@@ -6,15 +6,15 @@ trivm installs a system into a VM with one command and no clicks, runs it in the
 lets an agent (or you) run commands in it, copy files, take screenshots, click and type, all from
 the terminal. When you want to look, `trivm open` shows the VM in a window.
 
-- macOS 27 and Ubuntu 24.04 (Xfce) on Apple's Virtualization.framework.
+- macOS 15, 26 and 27 on Apple's Virtualization.framework.
+- Ubuntu 24.04 (Xfce) and 22.04 (KDE Plasma), Debian 13 (GNOME) and Fedora 45 (Xfce), on X11.
 - Windows 11 Pro on QEMU with HVF, from the ESD of Microsoft's Media Creation Tool.
-- Systems from their own sources (Apple's IPSW, Ubuntu's cloud image, Microsoft's ESD), pinned
-  by SHA-256.
+- Systems from their own sources (Apple's IPSWs, the distros' cloud images, Microsoft's ESD),
+  pinned by SHA-256.
 - No agent in the guest: commands go through SSH, the screen is driven from the host.
 - One binary in Rust, no other app driven: no UTM, no AppleScript.
 
-Requires a Mac with Apple silicon on macOS 27 (macOS guests are made with its guest provisioning);
-Windows also needs `brew install qemu swtpm wimlib`.
+Requires a Mac with Apple silicon on macOS 27; Windows also needs `brew install qemu swtpm wimlib`.
 
 ## Install
 
@@ -28,6 +28,7 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 
 ```sh
 trivm create macos-27          # downloads 25 GB once, installs, starts: about 20 minutes
+trivm create macos-15          # the last IPSW of each older macOS: 15.6.1, 26.6.2
 trivm create ubuntu-24.04      # downloads 600 MB once: about 3 minutes
 trivm list
 
@@ -37,7 +38,7 @@ trivm exec macos-27 'hdiutil attach /tmp/MyApp.dmg && cp -R /Volumes/MyApp/MyApp
 trivm exec macos-27 -- open -a MyApp
 trivm exec ubuntu-24.04 'nohup myapp >/dev/null 2>&1 &'   # shows on the desktop
 
-trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Ubuntu, 800×600 on Windows
+trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Linux, 800×600 on Windows
 trivm click macos-27 800 450
 trivm type macos-27 'hello'
 trivm key macos-27 cmd+q
@@ -84,7 +85,8 @@ value, state and frame in a shot's pixels, read through the system's accessibili
 [agent-desktop](https://github.com/vercel-labs/agent-desktop), which trivm puts in the guest at
 the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`). An app shows what its
 toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the
-first `ui`. On Windows `ui` and `click --name` aren't supported yet.
+first `ui`. Not supported yet on Ubuntu 22.04 (agent-desktop needs 24.04's accessibility) and
+Windows.
 
 ```sh
 trivm ui macos-27 --app Wavo

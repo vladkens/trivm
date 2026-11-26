@@ -84,6 +84,17 @@ impl Config {
     }
   }
 
+  /// Whether VZ makes the guest's user on its first boot (`VZMacGuestProvisioningOptions`), as
+  /// for macOS 27 and later; an older macOS gets its user from files on its Data volume.
+  pub fn provisioned(&self) -> bool {
+    self.macos().is_some_and(|x| x >= 27)
+  }
+
+  /// The version of a `macos-<n>` system.
+  pub fn macos(&self) -> Option<u32> {
+    self.system.strip_prefix("macos-").and_then(|x| x.parse().ok())
+  }
+
   pub fn memory_bytes(&self) -> u64 {
     self.memory as u64 * GIB
   }
@@ -496,6 +507,25 @@ pub fn size(path: &Path) -> String {
 mod tests {
   use super::*;
 
+  /// Tried again for up to a second: a process another test starts meanwhile shares the locks
+  /// open in this one until it execs, 8 ms here.
+  fn soon<T>(f: impl Fn() -> io::Result<T>) -> T {
+    let t = std::time::Instant::now();
+    loop {
+      match f() {
+        Ok(x) => return x,
+        Err(e) if t.elapsed().as_secs() >= 1 => panic!("{e}"),
+        Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+      }
+    }
+  }
+
+  /// No one runs the VM, once a process sharing its lock has exec'd.
+  fn stopped(vm: &Vm) -> bool {
+    soon(|| vm.pid().map_or(Ok(()), |x| Err(bad(format!("{x} runs it")))));
+    true
+  }
+
   #[test]
   fn config() {
     let c = Config { system: "macos-27".into(), cpus: 4, memory: 8, disk: 64 };
@@ -503,6 +533,12 @@ mod tests {
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
     assert_eq!(c.memory_bytes(), 8 << 30);
+
+    // Made by VZ's provisioning from 27 on.
+    assert!(c.provisioned());
+    assert!(!Config { system: "macos-26".into(), ..c.clone() }.provisioned());
+    assert!(!Config { system: "ubuntu-22.04".into(), ..c.clone() }.provisioned());
+
     assert!(Config::parse("system = x\n").is_err());
     // A line it doesn't know, such as the machine state the config used to hold, is left.
     let old = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\nsetup = true\n");
@@ -543,7 +579,7 @@ mod tests {
 
     // Let go and set up: read back as saved.
     drop(hold);
-    assert!(vm.lock().is_ok());
+    soon(|| vm.lock());
     vm.setup = false;
     vm.port = Some(50022);
     vm.save().unwrap();
@@ -633,20 +669,20 @@ mod tests {
     assert!(vm.lock().is_err());
     assert!(vm.hold().is_err());
     drop(lock);
-    assert_eq!(vm.pid(), None);
+    assert!(stopped(&vm));
 
     // Taken, as by a `delete`: no pid to stop, and nothing else locks it.
-    let take = vm.take().unwrap();
+    let take = soon(|| vm.take());
     assert_eq!(vm.pid(), None);
     assert!(vm.take().is_err() && vm.lock().is_err() && vm.hold().is_err());
     drop(take);
 
     // Two holds at once, which keep the VM from running and don't count as it running.
-    let (a, b) = (vm.hold().unwrap(), vm.hold().unwrap());
+    let (a, b) = (soon(|| vm.hold()), soon(|| vm.hold()));
     assert_eq!(vm.pid(), None);
     assert!(vm.lock().is_err());
     drop((a, b));
-    assert!(vm.lock().is_ok());
+    soon(|| vm.lock());
 
     // A `pid` removed while open, as by a `delete`, and one made again in its place aren't it.
     let old = vm.pid_file().unwrap();
