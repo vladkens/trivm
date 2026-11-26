@@ -52,6 +52,15 @@ The screen, from the host:
   type <vm> <text>        type text (US layout)
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
+The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
+(on macOS with its Accessibility grant, which needs SIP off; not supported on Windows):
+  ui <vm> [--app <name>]  the visible windows, all apps' or one's, and macOS's menu bar, with
+                          their elements, a line each: role, \"name\", = \"value\", [states] and
+                          frame (x,y wxh in a shot's pixels)
+  click <vm> --name <text> [--app <name>] [--right] [--double]
+                          click the element of that name, else of it in any case, else the one
+                          whose name holds it, its window raised first
+
 The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
 Files, by the XDG Base Directory spec: each VM's settings in ~/.config/trivm/<vm>.conf
 (XDG_CONFIG_HOME), its disks in ~/.local/share/trivm (XDG_DATA_HOME), downloads in
@@ -122,6 +131,17 @@ pub enum Cmd {
     vm: String,
     keys: String,
   },
+  Ui {
+    vm: String,
+    app: Option<String>,
+  },
+  ClickName {
+    vm: String,
+    name: String,
+    app: Option<String>,
+    right: bool,
+    double: bool,
+  },
   Clone {
     vm: String,
     name: String,
@@ -188,7 +208,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     match x.as_str() {
       // `type` takes any text, dashes included.
       _ if cmd == "type" => pos.push(x),
-      "--name" | "--cpus" | "--memory" | "--disk" => {
+      "--name" | "--app" | "--cpus" | "--memory" | "--disk" => {
         let value = it.next().ok_or_else(|| bad(format!("{x}: no value given")))?;
         flags.push((x, Some(value)));
       }
@@ -276,6 +296,16 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
       _ => return Err(bad("usage: trivm shot <vm> [file]")),
     },
 
+    "click" if value("--name").is_some() => {
+      want(1, "<vm> --name <text> [--app <name>] [--right] [--double]")?;
+      Cmd::ClickName {
+        vm: pos[0].clone(),
+        name: value("--name").unwrap_or_default(),
+        app: value("--app"),
+        right: flag("--right"),
+        double: flag("--double"),
+      }
+    }
     "click" => {
       want(3, "<vm> <x> <y> [--right] [--double]")?;
       let (x, y) = (coord(&pos[1])?, coord(&pos[2])?);
@@ -293,6 +323,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     "key" => {
       want(2, "<vm> <keys>")?;
       Cmd::Key { vm: pos[0].clone(), keys: pos[1].clone() }
+    }
+    "ui" => {
+      want(1, "<vm> [--app <name>]")?;
+      Cmd::Ui { vm: pos[0].clone(), app: value("--app") }
     }
     _ => return Err(bad(format!("unknown command {cmd}; see trivm help"))),
   };
@@ -333,6 +367,33 @@ mod tests {
       Cmd::Click { vm: "a".into(), x: 10.0, y: 20.5, right: false, double: true }
     );
     assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None });
+
+    assert_eq!(args("ui a").unwrap(), Cmd::Ui { vm: "a".into(), app: None });
+    assert_eq!(
+      args("ui a --app Wavo").unwrap(),
+      Cmd::Ui { vm: "a".into(), app: Some("Wavo".into()) }
+    );
+    assert_eq!(
+      args("click a --name Models --double").unwrap(),
+      Cmd::ClickName {
+        vm: "a".into(),
+        name: "Models".into(),
+        app: None,
+        right: false,
+        double: true
+      }
+    );
+    assert_eq!(
+      args("click a --app Wavo --name General").unwrap(),
+      Cmd::ClickName {
+        vm: "a".into(),
+        name: "General".into(),
+        app: Some("Wavo".into()),
+        right: false,
+        double: false
+      }
+    );
+
     assert_eq!(args("cp a:/x .").unwrap(), Cmd::Cp { src: "a:/x".into(), dst: ".".into() });
     assert_eq!(args("clone a b").unwrap(), Cmd::Clone { vm: "a".into(), name: "b".into() });
 
@@ -385,6 +446,11 @@ mod tests {
     assert!(args("clone a").is_err());
     assert!(args("create x --cpus many").is_err());
     assert!(args("click a -1 2").is_err());
+
+    assert!(args("click a 1 2 --name x").is_err());
+    assert!(args("click a --name").is_err());
+    assert!(args("ui").is_err());
+    assert!(args("ui a --app").is_err());
     assert!(args("start a --what").is_err());
     assert!(args("frobnicate").is_err());
   }

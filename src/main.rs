@@ -3,8 +3,8 @@
 //! macOS or Linux VM runs in a process of its own (`vz.rs`), a Windows VM is QEMU's (`qemu.rs`);
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
 //! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), `clone`
-//! and `run` copy one (`clone.rs`), and `os grant` and `os sip` give the app under test its macOS
-//! permissions (`permissions.rs`).
+//! and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app under test its macOS
+//! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
 
 mod apfs;
 mod args;
@@ -15,6 +15,7 @@ mod qcow2;
 mod qemu;
 mod ssh;
 mod system;
+mod ui;
 mod vm;
 mod vz;
 mod windows;
@@ -95,6 +96,10 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
+    Cmd::Ui { vm, app } => ui::ui(&vm, app.as_deref())?,
+    Cmd::ClickName { vm, name, app, right, double } => {
+      ui::click(&vm, &name, app.as_deref(), right, double)?;
+    }
     Cmd::Serve { vm, recovery } => {
       signed()?;
       vz::serve(Vm::open(&vm)?, recovery)?;
