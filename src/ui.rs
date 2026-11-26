@@ -147,9 +147,9 @@ pub fn click(
   }
 
   let (node, window) = (&nodes[at], window_of(&nodes, &nodes[at]));
+  // Past the right or the bottom, the display refuses the click: it knows its size now.
   let (x, y) = node.middle();
-  let screen = vz::screen(vm.config.os());
-  if !(0.0..screen.width).contains(&x) || !(0.0..screen.height).contains(&y) {
+  if x < 0.0 || y < 0.0 {
     return Err(bad(format!("{} is off the screen", node.line())));
   }
 
