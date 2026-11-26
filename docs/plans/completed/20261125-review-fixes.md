@@ -33,9 +33,9 @@ with its SSH off; a Linux VM; a `run` clone; Windows for its fix.
     past the old width or height is refused.
   - `click --name` refuses only a point left of or above the screen: main checks the element's
     middle against the size the VM started with.
-  - `click --name`: matches of one name nested one in the next are one element. GTK 4 names a
-    cell, a cell in it and its label alike (Debian's Files), where main says "3 elements named"
-    and asks for a frame.
+  - `click --name`: a match and the matches inside it of its name are one element. GTK 4 names a
+    file's cell or row, a cell in it, its icon and its label alike (Debian's Files), where main
+    says "3 elements named" and asks for a frame.
   - `run`'s clone killed by its pid: main checks the clone's data folder, then stops the VM by its
     name, which may be another VM's by then. Now the `pid` file is opened before the folder is
     checked, and the process holding its lock gets SIGKILL by its pid.

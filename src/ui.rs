@@ -613,31 +613,23 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
   tiers.iter().map(|f| outermost(nodes, f)).find(|x| !x.is_empty()).unwrap_or_default()
 }
 
-/// The elements that match, a match counted once with the matches inside it when they have its name
-/// and nest one in the next: GTK 4 gives a cell, a cell in it and its label one name, one element
+/// The elements that match, a match counted once with the matches inside it when they all have its
+/// name: GTK 4 names a file's cell or row, a cell in it, its icon and its label alike, one element
 /// to click. Else each is counted, it too.
 fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node> {
-  // The index after the last element inside the one at `i`.
-  let end = |i: usize| {
-    let depth = nodes[i].depth;
-    (i + 1..nodes.len()).find(|&j| nodes[j].depth <= depth).unwrap_or(nodes.len())
-  };
-
   let (mut out, mut i) = (Vec::new(), 0);
   while i < nodes.len() {
-    if nodes[i].depth == 0 || !hit(&nodes[i]) {
+    let x = &nodes[i];
+    if x.depth == 0 || !hit(x) {
       i += 1;
       continue;
     }
 
-    out.push(&nodes[i]);
-    let (last, mut at) = (end(i), i);
-    let chain = (i + 1..last).filter(|&j| hit(&nodes[j])).all(|j| {
-      let same = j < end(at) && nodes[j].name == nodes[i].name;
-      at = j;
-      same
-    });
-    i = if chain { last } else { i + 1 };
+    out.push(x);
+    let inside = &nodes[i + 1..];
+    let last = i + 1 + inside.iter().position(|y| y.depth <= x.depth).unwrap_or(inside.len());
+    let same = nodes[i + 1..last].iter().filter(|y| hit(y)).all(|y| y.name == x.name);
+    i = if same { last } else { i + 1 };
   }
 
   out
@@ -977,8 +969,8 @@ mod tests {
       (vec!["Save"], vec!["Save", "SAVE"], vec!["Save as", "Save", "SAVE"])
     );
 
-    // GTK 4's cell, its twin and its label in Files are one; the next is another. A group whose
-    // name holds that of the buttons in it is one more element.
+    // GTK 4's cell, its twin and its label in Files are one, as a row, its icon and its label are;
+    // the next is another. A group whose name holds that of the buttons in it is one more element.
     let el = |depth: usize, role: &str, name: &str| Node {
       depth,
       role: role.into(),
@@ -992,6 +984,9 @@ mod tests {
       el(3, "statictext", "Videos"),
       el(1, "cell", "Music"),
       el(1, "statictext", "Videos"),
+      el(1, "row", "Templates"),
+      el(2, "image", "Templates"),
+      el(2, "statictext", "Templates"),
       el(1, "group", "Delete options"),
       el(2, "button", "Delete permanently"),
       el(3, "statictext", "Delete permanently"),
@@ -1001,6 +996,7 @@ mod tests {
     ];
     let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
     assert_eq!(roles("Videos"), ["cell", "statictext"]);
+    assert_eq!(roles("Templates"), ["row"]);
     assert_eq!(roles("Delete"), ["group", "button", "button"]);
     assert_eq!(roles("Remove"), ["group", "button"]);
 
