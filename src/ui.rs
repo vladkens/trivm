@@ -99,7 +99,7 @@ const A11Y: &str = "gsettings set org.gnome.desktop.interface toolkit-accessibil
 
 /// `ui <vm> [--app <name>]`: the visible windows, all apps' or one's, and their elements.
 pub fn ui(name: &str, app: Option<&str>) -> io::Result<()> {
-  let vm = running(name)?;
+  let vm = running(name, "ui")?;
   let nodes = tree(&vm, &windows(&vm)?, app)?;
   if nodes.is_empty() {
     eprintln!("no windows on {name}'s desktop");
@@ -122,7 +122,7 @@ pub fn click(
   right: bool,
   double: bool,
 ) -> io::Result<()> {
-  let vm = running(name)?;
+  let vm = running(name, "click --name")?;
   let all = windows(&vm)?;
   let nodes = tree(&vm, &all, app)?;
   let node = match find(&nodes, text)[..] {
@@ -188,12 +188,23 @@ pub fn click(
   Ok(())
 }
 
-fn running(name: &str) -> io::Result<Vm> {
+/// The running VM for `cmd`, refused on Windows.
+fn running(name: &str, cmd: &str) -> io::Result<Vm> {
   let vm = Vm::open(name)?;
+  if vm.config.os() == Os::Windows {
+    return Err(unsupported(&vm, cmd));
+  }
+
   match vm.pid() {
     Some(_) => Ok(vm),
     None => Err(bad(format!("{name} isn't running; trivm start {name}"))),
   }
+}
+
+/// `cmd` refused on a system agent-desktop isn't put in by trivm: Windows, though it has a build
+/// for it (UI Automation).
+fn unsupported(vm: &Vm, cmd: &str) -> io::Error {
+  bad(format!("{cmd}: not supported on {}", vm.config.system))
 }
 
 /// The visible windows, front to back, as agent-desktop lists them.
@@ -335,15 +346,13 @@ fn add(out: &mut Vec<Node>, head: Node, snapshot: &Json) {
 /// agent-desktop's answer to the arguments in the running guest, its `data`. It is installed
 /// first when it isn't there, and on macOS granted Accessibility when it lacks it.
 fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
-  let os = vm.config.os();
-  let script = match os {
-    Os::Macos => format!("{HAS}{ALLOWED}{MACOS_RUN}"),
-    Os::Linux => format!("{HAS}shift\nexec {BIN} \"$@\"\n"),
-  };
-
-  let rest = match os {
-    Os::Macos => ssh::quote(&plist_strings(args)),
-    Os::Linux => args.iter().map(|x| ssh::quote(x)).collect::<Vec<_>>().join(" "),
+  let (script, rest) = match vm.config.os() {
+    Os::Macos => (format!("{HAS}{ALLOWED}{MACOS_RUN}"), ssh::quote(&plist_strings(args))),
+    Os::Linux => {
+      let args: Vec<_> = args.iter().map(|x| ssh::quote(x)).collect();
+      (format!("{HAS}shift\nexec {BIN} \"$@\"\n"), args.join(" "))
+    }
+    Os::Windows => return Err(unsupported(vm, "agent-desktop")),
   };
 
   let line = format!("sh -c {} ui {VERSION} {rest}", ssh::quote(&script));
@@ -381,18 +390,14 @@ fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
 
 /// Puts agent-desktop in the guest from trivm's cache; on Linux switches accessibility on.
 fn install(vm: &Vm) -> io::Result<()> {
-  let os = vm.config.os();
-  let (url, sha256) = match os {
-    Os::Macos => MACOS,
-    Os::Linux => LINUX,
+  let ((url, sha256), script) = match vm.config.os() {
+    Os::Macos => (MACOS, INSTALL.to_string()),
+    Os::Linux => (LINUX, format!("{INSTALL}{A11Y}")),
+    Os::Windows => return Err(unsupported(vm, "agent-desktop")),
   };
 
   let archive = system::download(url, sha256)?;
   eprintln!("installing agent-desktop {VERSION} in {}", vm.name);
-  let script = match os {
-    Os::Macos => INSTALL.to_string(),
-    Os::Linux => format!("{INSTALL}{A11Y}"),
-  };
 
   run(ssh::ssh(vm)?.arg("--").arg(script).stdin(fs::File::open(&archive)?))?;
   Ok(())

@@ -61,6 +61,7 @@ pub fn made(dir: &Path) -> io::Result<()> {
 pub enum Os {
   Macos,
   Linux,
+  Windows,
 }
 
 /// A VM's settings, the person's: `<vm>.conf` in trivm's config folder, `key = value` lines.
@@ -76,9 +77,10 @@ pub struct Config {
 
 impl Config {
   pub fn os(&self) -> Os {
-    match self.system.starts_with("macos") {
-      true => Os::Macos,
-      false => Os::Linux,
+    match self.system.split('-').next() {
+      Some("macos") => Os::Macos,
+      Some("windows") => Os::Windows,
+      _ => Os::Linux,
     }
   }
 
@@ -122,7 +124,7 @@ pub struct Vm {
   pub conf: PathBuf,
   /// Its disks, platform files and machine state, in trivm's data folder.
   pub dir: PathBuf,
-  /// What its runs write (`log`, `pid`, `ctl.sock`), in trivm's state folder.
+  /// What its runs write (`log`, `pid`, the sockets), in trivm's state folder.
   pub state_dir: PathBuf,
   pub config: Config,
   /// The NIC's address, `mac` in the data folder: the guest's DHCP lease follows it.
@@ -130,6 +132,9 @@ pub struct Vm {
   /// Set until the first boot has made the user and the guest answers SSH with trivm's key: the
   /// mark `setup` in the data folder, as it says what the disk holds.
   pub setup: bool,
+  /// The host's port forwarded to the guest's SSH, for a VM on QEMU's user network: `port` in the
+  /// state folder, chosen at each start.
+  pub port: Option<u16>,
 }
 
 impl Vm {
@@ -137,7 +142,8 @@ impl Vm {
   pub fn at(name: &str, config: Config) -> Self {
     let conf = config_dir().join(format!("{name}.conf"));
     let (dir, state_dir) = (data_dir().join(name), state_dir().join(name));
-    Self { name: name.into(), conf, dir, state_dir, config, mac: String::new(), setup: false }
+    let (mac, setup, port) = (String::new(), false, None);
+    Self { name: name.into(), conf, dir, state_dir, config, mac, setup, port }
   }
 
   pub fn open(name: &str) -> io::Result<Self> {
@@ -165,7 +171,13 @@ impl Vm {
     };
 
     self.setup = self.path(SETUP).exists();
+    self.port = self.saved_port();
     Ok(())
+  }
+
+  /// The forwarded SSH port its last start saved, read now: a running VM's current one.
+  pub fn saved_port(&self) -> Option<u16> {
+    fs::read_to_string(self.state("port")).ok().and_then(|x| x.trim().parse().ok())
   }
 
   pub fn all() -> io::Result<Vec<Self>> {
@@ -238,13 +250,22 @@ impl Vm {
     }
   }
 
-  /// Saves the machine state, `mac` and the `setup` mark, in the data folder. A file is written
+  /// Saves the machine state: `mac` and the `setup` mark in the data folder. A file is written
   /// beside its place and renamed there: two `start`s may save at once.
   pub fn save(&self) -> io::Result<()> {
     put(&self.path("mac"), &format!("{}\n", self.mac))?;
     match self.setup {
       true => fs::write(self.path(SETUP), ""),
       false => gone(fs::remove_file(self.path(SETUP))),
+    }
+  }
+
+  /// Saves `port` in the state folder, only by the start holding the VM: a start that saved one
+  /// earlier may have another by now.
+  pub fn save_port(&self) -> io::Result<()> {
+    match self.port {
+      Some(x) => put(&self.state("port"), &format!("{x}\n")),
+      None => gone(fs::remove_file(self.state("port"))),
     }
   }
 
@@ -337,8 +358,13 @@ impl Vm {
     fs::OpenOptions::new().create(true).write(true).truncate(false).open(self.state("pid"))
   }
 
-  /// The guest's address from its newest DHCP lease.
+  /// The guest's address: from its newest DHCP lease, or the host's own for a VM on QEMU's user
+  /// network, whose SSH is forwarded from `port`.
   pub fn ip(&self) -> Option<String> {
+    if self.port.is_some() {
+      return Some("127.0.0.1".into());
+    }
+
     let mut text = String::new();
     fs::File::open(LEASES).ok()?.read_to_string(&mut text).ok()?;
     lease(&text, &self.mac)
@@ -481,7 +507,8 @@ mod tests {
     // A line it doesn't know, such as the machine state the config used to hold, is left.
     let old = Config::parse("system=a\ncpus=1\nmemory=2\ndisk=3\nmac=m\nsetup = true\n");
     assert_eq!(old.unwrap().text(), "system = a\ncpus = 1\nmemory = 2\ndisk = 3\n");
-    assert_eq!(Config { system: "ubuntu-24.04".into(), ..c }.os(), Os::Linux);
+    assert_eq!(Config { system: "ubuntu-24.04".into(), ..c.clone() }.os(), Os::Linux);
+    assert_eq!(Config { system: "windows-11".into(), ..c }.os(), Os::Windows);
   }
 
   #[test]
@@ -518,10 +545,14 @@ mod tests {
     drop(hold);
     assert!(vm.lock().is_ok());
     vm.setup = false;
+    vm.port = Some(50022);
     vm.save().unwrap();
+    vm.save_port().unwrap();
+    assert_eq!(fs::read_to_string(vm.state("port")).unwrap(), "50022\n");
     let mut read = Vm { mac: String::new(), ..at("a") };
     read.read().unwrap();
     assert_eq!((&read.config, read.mac.as_str(), read.setup), (&config, mac, false));
+    assert_eq!((read.port, read.ip().as_deref()), (Some(50022), Some("127.0.0.1")));
 
     // Removed, the name is free; its data folder left with no config is in the way.
     vm.remove().unwrap();

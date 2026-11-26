@@ -1,7 +1,8 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
-//! trivm: macOS and Linux VMs on Apple silicon for coding agents to test apps in. A VM runs in a
-//! process of its own (`vz.rs`), commands and files go through SSH (`ssh.rs`), the screen is read
-//! and driven from the host (`display.rs`), `create` installs a system (`system.rs`), `clone`
+//! trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test apps in. A
+//! macOS or Linux VM runs in a process of its own (`vz.rs`), a Windows VM is QEMU's (`qemu.rs`);
+//! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
+//! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), `clone`
 //! and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app under test its macOS
 //! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
 
@@ -10,11 +11,13 @@ mod clone;
 mod display;
 mod permissions;
 mod qcow2;
+mod qemu;
 mod ssh;
 mod system;
 mod ui;
 mod vm;
 mod vz;
+mod windows;
 
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitCode, Stdio};
@@ -66,12 +69,12 @@ fn start_cli() -> io::Result<ExitCode> {
         start(&vm)?;
       }
 
-      vz::ask(&Vm::open(&vm)?, "open", "")?;
+      ask(&Vm::open(&vm)?, "open", "")?;
     }
     Cmd::Exec { vm, cmd } => return Ok(status(ssh::exec(&Vm::open(&vm)?, &cmd)?)),
     Cmd::Ssh { vm } => return Ok(status(ssh::interactive(&Vm::open(&vm)?)?)),
     Cmd::Cp { src, dst } => return Ok(status(ssh::cp(&src, &dst)?)),
-    Cmd::Ip { vm } => println!("{}", ssh::ip(&Vm::open(&vm)?)?),
+    Cmd::Ip { vm } => println!("{}", ssh::address(&Vm::open(&vm)?)?),
     Cmd::Shot { vm, file } => {
       let vm = Vm::open(&vm)?;
       let path = match file {
@@ -79,16 +82,16 @@ fn start_cli() -> io::Result<ExitCode> {
         None => env::temp_dir().join(format!("trivm-{}-{}.png", vm.name, unix_ms())),
       };
 
-      vz::ask(&vm, "shot", &path.to_string_lossy())?;
+      ask(&vm, "shot", &path.to_string_lossy())?;
       println!("{}", path.display());
     }
     Cmd::Click { vm, x, y, right, double } => {
       let (button, clicks) = (if right { "right" } else { "left" }, if double { 2 } else { 1 });
-      vz::ask(&Vm::open(&vm)?, &format!("click {x} {y} {button} {clicks}"), "")?;
+      ask(&Vm::open(&vm)?, &format!("click {x} {y} {button} {clicks}"), "")?;
     }
-    Cmd::Move { vm, x, y } => _ = vz::ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
-    Cmd::Type { vm, text } => _ = vz::ask(&Vm::open(&vm)?, "type", &text)?,
-    Cmd::Key { vm, keys } => _ = vz::ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
+    Cmd::Move { vm, x, y } => _ = ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
+    Cmd::Type { vm, text } => _ = ask(&Vm::open(&vm)?, "type", &text)?,
+    Cmd::Key { vm, keys } => _ = ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
     Cmd::Ui { vm, app } => ui::ui(&vm, app.as_deref())?,
     Cmd::ClickName { vm, name, app, right, double } => {
       ui::click(&vm, &name, app.as_deref(), right, double)?;
@@ -105,6 +108,14 @@ fn start_cli() -> io::Result<ExitCode> {
 
 pub fn bad(msg: impl Into<String>) -> io::Error {
   io::Error::other(msg.into())
+}
+
+/// A request to the VM's process: trivm's own for VZ, QEMU's QMP for Windows.
+pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
+  match vm.config.os() {
+    Os::Windows => qemu::ask(vm, req, body),
+    _ => vz::ask(vm, req, body),
+  }
 }
 
 /// The output of `cmd`, which must succeed; when it fails, the error has its stderr.
@@ -180,12 +191,27 @@ fn signed() -> io::Result<()> {
 pub fn start(name: &str) -> io::Result<()> {
   let mut vm = Vm::open(name)?;
   if vm.pid().is_none() {
-    spawn(&vm, false)?;
+    match vm.config.os() {
+      Os::Windows => {
+        let cds = system::windows_cds(&vm)?;
+        qemu::spawn(&mut vm, &cds)?
+      }
+      _ => spawn(&vm, false)?,
+    }
+  } else {
+    // Another start runs it: its config, Windows' port among it, is saved once its VM runs.
+    let t = Instant::now();
+    while !ask(&vm, "status", "").is_ok_and(|x| x == "running") && t.elapsed().as_secs() < 60 {
+      thread::sleep(Duration::from_millis(200));
+    }
+
+    vm = Vm::open(name)?;
   }
 
   match (vm.setup, vm.config.os()) {
     (true, Os::Macos) => system::macos_setup(&vm)?,
     (true, Os::Linux) => system::linux_setup(&vm)?,
+    (true, Os::Windows) => system::windows_setup(&vm)?,
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
@@ -196,7 +222,7 @@ pub fn start(name: &str) -> io::Result<()> {
     vm.save()?;
   }
 
-  eprintln!("{name} is up at {}", ssh::ip(&vm)?);
+  eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
 }
 
@@ -256,6 +282,25 @@ unsafe extern "C" {
 
 /// Shuts the guest down from inside, or with `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
+  // A starting Windows VM's pid and port are its start's until QEMU runs: read once it does. One
+  // stuck starting is killed only with --force.
+  let started;
+  let vm = match vm.config.os() {
+    Os::Windows if vm.pid().is_some() => {
+      if !qemu::started(vm) {
+        if !force {
+          return Err(bad(format!("{} is still starting; stop it with --force", vm.name)));
+        }
+
+        qemu::cancel(vm)?;
+      }
+
+      started = Vm::open(&vm.name)?;
+      &started
+    }
+    _ => vm,
+  };
+
   let Some(pid) = vm.pid() else { return Ok(()) };
   // Gone once its process no longer holds the lock: the VM started again meanwhile isn't this one.
   let gone = |secs: u64| {
@@ -275,12 +320,18 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
     let cmd = match vm.config.os() {
       Os::Macos => "sudo -n shutdown -h now",
       Os::Linux => "sudo -n systemctl poweroff",
+      Os::Windows => "shutdown /s /t 0",
     };
 
     // Not waited for: a guest that hangs in it is still stopped after 2 minutes.
     let mut ssh = ssh::ssh(vm)?;
     ssh.args(["--", cmd]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     let child = ssh.spawn();
+    // The power button too, for a guest whose SSH isn't up.
+    if vm.config.os() == Os::Windows {
+      let _ = ask(vm, "stop", "");
+    }
+
     let down = gone(120);
     if let Ok(mut x) = child {
       let _ = x.kill();
@@ -293,7 +344,11 @@ pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
   }
 
   // A VM process busy with a long request answers late; SIGKILL follows anyway.
-  let _ = vz::ask_within(vm, "kill", "", Duration::from_secs(5));
+  let _ = match vm.config.os() {
+    Os::Windows => ask(vm, "kill", ""),
+    _ => vz::ask_within(vm, "kill", "", Duration::from_secs(5)),
+  };
+
   if !gone(15) {
     vm::signal(pid, 9);
     if !gone(5) {
@@ -331,7 +386,7 @@ fn list() -> io::Result<()> {
       (false, false) => "stopped",
     };
 
-    let ip = vm.pid().and(vm.ip()).unwrap_or_default();
+    let ip = vm.pid().and(ssh::address(&vm).ok()).unwrap_or_default();
     let (memory, disk) = (format!("{}G", c.memory), vm::size(&vm.path("disk.img")));
     println!(
       "{:<16} {:<14} {state:<9} {ip:<15} {:>4} {memory:>6} {disk:>8}",
