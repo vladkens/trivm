@@ -147,9 +147,9 @@ pub fn click(
   }
 
   let (node, window) = (&nodes[at], window_of(&nodes, &nodes[at]));
+  // Past the right or the bottom, the display refuses the click: it knows its size now.
   let (x, y) = node.middle();
-  let screen = vz::screen(vm.config.os());
-  if !(0.0..screen.width).contains(&x) || !(0.0..screen.height).contains(&y) {
+  if x < 0.0 || y < 0.0 {
     return Err(bad(format!("{} is off the screen", node.line())));
   }
 
@@ -610,10 +610,29 @@ fn find<'a>(nodes: &'a [Node], text: &str) -> Vec<&'a Node> {
     [&|x| x.name == text, &|x| x.name.to_lowercase() == low, &|x| {
       x.name.to_lowercase().contains(&low)
     }];
-  let found = |f: &&dyn Fn(&Node) -> bool| -> Vec<&Node> {
-    nodes.iter().filter(|x| x.depth > 0 && f(x)).collect()
-  };
-  tiers.iter().map(found).find(|x| !x.is_empty()).unwrap_or_default()
+  tiers.iter().map(|f| outermost(nodes, f)).find(|x| !x.is_empty()).unwrap_or_default()
+}
+
+/// The elements that match, a match counted once with the matches inside it when they all have its
+/// name: GTK 4 names a file's cell or row, a cell in it, its icon and its label alike, one element
+/// to click. Else each is counted, it too.
+fn outermost<'a>(nodes: &'a [Node], hit: &dyn Fn(&Node) -> bool) -> Vec<&'a Node> {
+  let (mut out, mut i) = (Vec::new(), 0);
+  while i < nodes.len() {
+    let x = &nodes[i];
+    if x.depth == 0 || !hit(x) {
+      i += 1;
+      continue;
+    }
+
+    out.push(x);
+    let inside = &nodes[i + 1..];
+    let last = i + 1 + inside.iter().position(|y| y.depth <= x.depth).unwrap_or(inside.len());
+    let same = nodes[i + 1..last].iter().filter(|y| hit(y)).all(|y| y.name == x.name);
+    i = if same { last } else { i + 1 };
+  }
+
+  out
 }
 
 /// Whether the element is an item of an open menu whose items all lie in `frame`: the popup the
@@ -949,6 +968,37 @@ mod tests {
       (found("Save"), found("save"), found("sav")),
       (vec!["Save"], vec!["Save", "SAVE"], vec!["Save as", "Save", "SAVE"])
     );
+
+    // GTK 4's cell, its twin and its label in Files are one, as a row, its icon and its label are;
+    // the next is another. A group whose name holds that of the buttons in it is one more element.
+    let el = |depth: usize, role: &str, name: &str| Node {
+      depth,
+      role: role.into(),
+      name: name.into(),
+      ..Node::default()
+    };
+    let cells = [
+      el(0, "window", "Home"),
+      el(1, "cell", "Videos"),
+      el(2, "cell", "Videos"),
+      el(3, "statictext", "Videos"),
+      el(1, "cell", "Music"),
+      el(1, "statictext", "Videos"),
+      el(1, "row", "Templates"),
+      el(2, "image", "Templates"),
+      el(2, "statictext", "Templates"),
+      el(1, "group", "Delete options"),
+      el(2, "button", "Delete permanently"),
+      el(3, "statictext", "Delete permanently"),
+      el(2, "button", "Delete to Trash"),
+      el(1, "group", "Remove all"),
+      el(2, "button", "Remove one"),
+    ];
+    let roles = |x: &str| find(&cells, x).iter().map(|x| x.role.clone()).collect::<Vec<_>>();
+    assert_eq!(roles("Videos"), ["cell", "statictext"]);
+    assert_eq!(roles("Templates"), ["row"]);
+    assert_eq!(roles("Delete"), ["group", "button", "button"]);
+    assert_eq!(roles("Remove"), ["group", "button"]);
 
     // Two windows: the first's elements, then the second's.
     let mut nodes = nodes;

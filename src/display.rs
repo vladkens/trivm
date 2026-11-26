@@ -251,9 +251,18 @@ impl Display {
     Ok(())
   }
 
+  /// The shot's size now: the display's, which the guest may have changed since it started.
+  fn size(&self) -> (f64, f64) {
+    let Screen { width, height, scale } = self.screen;
+    let Some(surface) = surface(&self.view) else { return (width, height) };
+    // SAFETY: as in `image`.
+    let surface = unsafe { &*(Retained::as_ptr(&surface) as *const IOSurfaceRef) };
+    (surface.width() as f64 / scale, surface.height() as f64 / scale)
+  }
+
   /// A shot's pixel in the view's window: the view shows the display scaled to fit, centered.
   fn point(&self, x: f64, y: f64) -> io::Result<NSPoint> {
-    let Screen { width: w, height: h, .. } = self.screen;
+    let (w, h) = self.size();
     if x >= w || y >= h {
       return Err(bad(format!("({x}, {y}) is outside the {w}×{h} screen")));
     }

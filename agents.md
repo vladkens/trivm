@@ -47,7 +47,8 @@ what trivm does, so the two aren't mixed up:
   boot), `qcow2.rs` (the distros' disks to raw for VZ).
 - A hack inside a command stays in that command's file, its doc comment saying which API is
   missing: the VM's view in a hidden window for shots and input (`display.rs`); TCC's database
-  written and recoveryOS read with Vision (`permissions.rs`); `/etc/kcpassword` written for the
+  written and recoveryOS read with Vision (`permissions.rs`); macOS's Shut Down at its power
+  button read with Vision and clicked (`main.rs`'s `stop`); `/etc/kcpassword` written for the
   automatic login (`system.rs`); agent-desktop as a launchd job for its grant (`ui.rs`);
   `LabConfig`'s skipped checks and `desktop`'s scheduled task (`windows.rs`).
 - A hack goes with the last system that needs it: macOS 27 makes its user itself, so `apfs.rs`

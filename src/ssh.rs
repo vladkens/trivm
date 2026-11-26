@@ -2,6 +2,7 @@
 //! Commands and files through the system's `ssh` and `scp` with trivm's own key; the password
 //! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
 
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -60,6 +61,12 @@ pub fn ip(vm: &Vm) -> io::Result<(String, Option<u16>)> {
   };
 
   Ok((ip.ok_or_else(|| bad(format!("{} has no address yet", vm.name)))?, port))
+}
+
+/// Whether the guest's SSH port takes a connection now.
+pub fn answers(vm: &Vm) -> bool {
+  let addr = ip(vm).ok().and_then(|(ip, port)| format!("{ip}:{}", port.unwrap_or(22)).parse().ok());
+  addr.is_some_and(|x: SocketAddr| TcpStream::connect_timeout(&x, Duration::from_secs(2)).is_ok())
 }
 
 /// The guest's SSH as `ip` or `ip:port`.
