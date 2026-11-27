@@ -160,6 +160,10 @@ if ($p.ExitCode -notin 0, 1638, 3010) { throw "the Visual C++ runtime's installe
 /// AccessKit wait for before they show their elements (GTK shows them regardless).
 const A11Y: &str = "gsettings set org.gnome.desktop.interface toolkit-accessibility true\n";
 
+/// A XAML app's popups (menus, tips) are a window of this name, in front of the app's, and in the
+/// app's window again, under an element of this name.
+const POPUP_HOST: &str = "PopupHost";
+
 /// `ui <vm> [--app <name>]`: the visible windows, all apps' or one's, and their elements.
 pub fn ui(name: &str, app: Option<&str>) -> io::Result<()> {
   let vm = running(name, "ui")?;
@@ -192,13 +196,21 @@ pub fn click(
   if !in_front(&nodes, window) {
     // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
     let id = window.id.clone();
-    let raised = match vm.config.os() {
-      Os::Windows => raise(&vm, &id),
-      _ => agent_desktop(&vm, &["focus-window", "--window-id", &id]).map(|_| ()),
+    let (raised, front) = match vm.config.os() {
+      // A popup's window comes to the front with its app's, which is what takes the focus.
+      Os::Windows => {
+        let front = match window.name == POPUP_HOST {
+          true => owner(&all, window)?,
+          false => window,
+        };
+
+        (raise(&vm, &front.id), front.id.clone())
+      }
+      _ => (agent_desktop(&vm, &["focus-window", "--window-id", &id]).map(|_| ()), id.clone()),
     };
 
     if let Err(e) = raised
-      && !windows(&vm)?.iter().any(|w| w.id == id && w.focused())
+      && !windows(&vm)?.iter().any(|w| w.id == front && w.focused())
     {
       return Err(e);
     }
@@ -347,6 +359,7 @@ fn windows(vm: &Vm) -> io::Result<Vec<Node>> {
   let window = |w: &Json| Node {
     id: w.get("id").str().into(),
     app: w.get("app_name").str().into(),
+    pid: w.get("pid").num().unwrap_or(0.0) as u32,
     role: "window".into(),
     name: w.get("title").str().into(),
     states: w.get("is_focused").bool().then(|| "focused".to_string()).into_iter().collect(),
@@ -528,9 +541,14 @@ fn add(out: &mut Vec<Node>, head: Node, snapshot: &Json) {
     eprintln!("trivm: {}: its tree was cut short", head.line());
   }
 
+  let (at, host) = (out.len() + 1, head.name == POPUP_HOST);
   out.push(head);
   for x in snapshot.get("tree").get("children").items() {
     flatten(x, 1, out);
+  }
+
+  if host {
+    out[at..].iter_mut().for_each(|x| x.popup = true);
   }
 }
 
@@ -663,6 +681,8 @@ struct Node {
   id: String,
   /// The app, a window's.
   app: String,
+  /// Its process's id, a window's.
+  pid: u32,
   role: String,
   name: String,
   value: String,
@@ -767,11 +787,16 @@ fn flatten(node: &Json, depth: usize, out: &mut Vec<Node>) {
   };
 
   let at = out.len();
+  let host = name == POPUP_HOST;
   let (role, name, value) = (role.into(), name.to_string(), value.to_string());
   let nameless = name.is_empty() && value.is_empty();
   out.push(Node { depth, role, name, value, states, frame, ..Node::default() });
   for x in children {
     flatten(x, depth + 1, out);
+  }
+
+  if host {
+    out[at + 1..].iter_mut().for_each(|x| x.popup = true);
   }
 
   if nameless && out.len() == at + 1 {
@@ -840,6 +865,22 @@ fn in_menu(nodes: &[Node], node: &Node, frame: [f64; 4]) -> bool {
 fn in_front(nodes: &[Node], window: &Node) -> bool {
   let at = nodes.iter().position(|x| std::ptr::eq(x, window)).unwrap_or(0);
   window.id.is_empty() || nodes[at..].iter().any(|x| x.depth == 0 && x.focused())
+}
+
+/// The window a XAML popup's window is for: its process's one window that isn't a popup's. Of
+/// several, agent-desktop doesn't say which: Notepad keeps all its windows in one process.
+fn owner<'a>(all: &'a [Node], popup: &Node) -> io::Result<&'a Node> {
+  let own: Vec<&Node> = all.iter().filter(|w| w.pid == popup.pid && w.name != POPUP_HOST).collect();
+  match own[..] {
+    [one] => Ok(one),
+    _ => Err(bad(format!(
+      "{} is behind another window, and which of {}'s {} windows it is of isn't known: bring it \
+       to the front first",
+      popup.line(),
+      popup.app,
+      own.len()
+    ))),
+  }
 }
 
 /// The window or menu bar an element is in: the last line at depth 0 up to it.
@@ -1126,6 +1167,7 @@ mod tests {
       depth: 0,
       id: "w-1".into(),
       app: "Wavo".into(),
+      pid: 1,
       role: "window".into(),
       name: "a \"b\"\n".into(),
       value: String::new(),
@@ -1292,6 +1334,48 @@ _NET_WM_NAME:  not found."#;
 
     // Elsewhere the name is the app's whole.
     assert!(same_app("Wavo", "WAVO", false) && !same_app("foo", "foo.exe", false));
+  }
+
+  #[test]
+  fn tips() {
+    // Notepad's tip: a window of its own, PopupHost, its top with a frame, and in Notepad's too.
+    let tip = r#"{"bounds":{"height":9.0,"width":21.0,"x":296.0,"y":172.0},"name":"Saved","role":"window","children":[
+      {"bounds":{"height":32.0,"width":142.0,"x":450.0,"y":261.0},"name":"Got it","role":"button"}]}"#;
+    let host = r#"{"bounds":{"height":32.0,"width":287.0,"x":176.0,"y":140.0},"name":"PopupHost","role":"group","children":[%]}"#;
+    let snapshot = |x: &str| {
+      Json::parse(&format!(r#"{{"complete":true,"tree":{{"children":[{x}]}}}}"#)).unwrap()
+    };
+    let window = |name: &str| Node { role: "window".into(), name: name.into(), ..Node::default() };
+
+    let mut nodes = Vec::new();
+    add(&mut nodes, window("PopupHost"), &snapshot(tip));
+    add(&mut nodes, window("Untitled - Notepad"), &snapshot(&host.replace('%', tip)));
+    once(&mut nodes);
+    let lines: Vec<String> = nodes.iter().map(|x| x.to_string()).collect();
+    assert_eq!(
+      lines,
+      [
+        r#"window "PopupHost" 0,0 0x0"#,
+        r#"  window "Saved" 296,172 21x9"#,
+        r#"    button "Got it" 450,261 142x32"#,
+        r#"window "Untitled - Notepad" 0,0 0x0"#,
+        r#"  group "PopupHost" 176,140 287x32"#,
+      ]
+    );
+    assert_eq!(find(&nodes, "Got it").len(), 1);
+
+    // Raised by its process's window; of two, which is unknown.
+    let at = |id: &str, pid: u32, name: &str| Node { id: id.into(), pid, ..window(name) };
+    let mut all = vec![
+      at("1", 7, "PopupHost"),
+      at("2", 8, "Documents - File Explorer"),
+      at("3", 8, "PopupHost"),
+      at("4", 7, "Untitled - Notepad"),
+    ];
+    assert_eq!(owner(&all, &all[0]).unwrap().id, "4");
+    assert_eq!(owner(&all, &all[2]).unwrap().id, "2");
+    all.push(at("5", 7, "Untitled - Notepad"));
+    assert!(owner(&all, &all[0]).is_err());
   }
 
   #[test]
