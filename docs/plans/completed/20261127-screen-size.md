@@ -80,5 +80,10 @@ clone and a copy of the person's):
   in points ("Go" at 238,0 38×30).
 - Built from 24500b0: `create macos-27 --screen 1152x720@2` (216 s) wrote `screen = 1152x720@2`
   in the config; `shot` 1152×720 and `shot --full` 2304×1440 by `sips`; `click 256 13` opened Go.
+  `create macos-27 --screen 1280x800@1` (206 s): `shot` and `shot --full` both 1280×800 by `sips`,
+  plain non-Retina text; `click 256 13` opened Go.
 
-Left: macOS at 1x (`@1`, 110 ppi) is unchecked.
+Windows, the manager's check built from 24500b0: `create windows-11 --screen 2304x1440 --memory 4`
+(944 s), `shot` 2304×1440; `screen = 1366x768` in the config, then `stop` and `start`: 1366×768;
+the key removed: 1920×1080; back to 2304x1440: 2304×1440, and a click at the shot's pixels on the
+taskbar's File Explorer opened it.
