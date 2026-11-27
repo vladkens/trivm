@@ -297,7 +297,7 @@ pub fn spawn(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
   };
 
   drop(lock);
-  let _ = Command::new("caffeinate").args(["-i", "-w", &child.id().to_string()]).spawn();
+  crate::awake(child.id());
 
   let t = Instant::now();
   loop {

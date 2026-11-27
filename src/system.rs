@@ -5,7 +5,7 @@
 use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
@@ -404,6 +404,9 @@ cat > $prefs/com.apple.SetupAssistant.plist <<EOF
 </plist>
 EOF
 chown {USER}:staff $prefs/com.apple.SetupAssistant.plist
+# No screen saver, as macos_idle, before the first login, which reads it.
+defaults write $prefs/com.apple.screensaver idleTime -int 0
+chown {USER}:staff $prefs/com.apple.screensaver.plist
 
 printf '{kc}' > /etc/kcpassword
 chmod 600 /etc/kcpassword
@@ -434,29 +437,90 @@ chmod 440 /etc/sudoers.d/trivm
 printf '%s\n' 'PasswordAuthentication no' 'KbdInteractiveAuthentication no' > /etc/ssh/sshd_config.d/000-trivm.conf"
 "#;
 
-/// No sleep, screen saver or lock, which would leave the screen dark; no automatic updates
-/// (macOS 27 kept checking regardless of some of these, as the old `vm` tool found); the host's
-/// time zone, `$2`, which macOS would otherwise guess as Cupertino's.
+/// No sleep, which would leave the screen dark (nor screen saver or lock: `macos_idle`); no
+/// automatic updates (macOS 27 kept checking regardless of some of these, as the old `vm` tool
+/// found); the host's time zone, `$1`, which macOS would otherwise guess as Cupertino's.
 const MAC_TUNE: &str = r#"set -e
 sudo -n pmset -a displaysleep 0 sleep 0 disksleep 0 >/dev/null
-defaults -currentHost write com.apple.screensaver idleTime -int 0
-sudo -n sysadminctl -screenLock off -password "$1" 2>/dev/null || true
 for key in AutomaticCheckEnabled AutomaticDownload CriticalUpdateInstall ConfigDataInstall; do
   sudo -n defaults write /Library/Preferences/com.apple.SoftwareUpdate $key -bool false
 done
 sudo -n defaults write /Library/Preferences/com.apple.commerce AutoUpdate -bool false
 sudo -n defaults write /Library/Preferences/com.apple.timezone.auto Active -bool false
-sudo -n ln -sf "/var/db/timezone/zoneinfo/$2" /etc/localtime
+sudo -n ln -sf "/var/db/timezone/zoneinfo/$1" /etc/localtime
 "#;
 
-/// The first boot of a new macOS VM, which made the user: the key, then the tuning.
+/// macOS 27's restart after its setup, at the boot that made the user only: a start stopped before
+/// its end may have done it.
+const MAC_MADE: &str = r#"boot=$(sysctl -n kern.boottime | sed 's/^{ sec = \([0-9]*\),.*/\1/')
+[ "$(stat -f %B "$HOME")" -ge "$boot" ] || exit 0
+"#;
+
+/// loginwindow's mark of a locked screen, set when it locks and cleared when unlocked, so kept by a
+/// shutdown while locked: the next boot's automatic login sees it and locks again at once. Deleted,
+/// the boot after logs in unlocked.
+const MAC_LOCKED: &str = r#"prefs=/Library/Preferences/com.apple.loginwindow
+[ "$(defaults read $prefs autoLoginUserScreenLocked 2>/dev/null)" = 1 ] || exit 0
+sudo -n defaults delete $prefs autoLoginUserScreenLocked || exit 1
+"#;
+
+/// The first boot of a new macOS VM, which made the user: the key, then the tuning. macOS 27 made
+/// it at this boot, logged in before `macos_idle` could write the screen saver's time, which macOS
+/// reads at login: one boot more, as the setup script's of 15 and 26.
 pub fn macos_setup(vm: &Vm) -> io::Result<()> {
   eprintln!("waiting for macOS to make the user and answer SSH (a few minutes)");
   let script =
     format!("sh -ec {} enroll {} {USER}", ssh::quote(MAC_ENROLL), ssh::quote(&ssh::public_key()?));
   ssh::with_password(vm, &script, Duration::from_secs(1800))?;
   ssh::wait(vm, Duration::from_secs(60))?;
-  ssh::output(vm, &format!("sh -ec {} tune {PASSWORD} {}", ssh::quote(MAC_TUNE), timezone()))?;
+  ssh::output(vm, &format!("sh -ec {} tune {}", ssh::quote(MAC_TUNE), timezone()))?;
+  if !vm.config.provisioned() {
+    return Ok(());
+  }
+
+  macos_idle(vm)?;
+  macos_restart(vm, MAC_MADE, "after its setup")?;
+  Ok(())
+}
+
+/// A screen locked at shutdown locks again at each boot, until someone types the password: at a
+/// boot that came up so, `MAC_LOCKED`'s mark goes and macOS restarts unlocked. No API unlocks a
+/// session; the password typed through the display needs the lock screen's field to take the keys.
+pub fn macos_unlock(vm: &Vm) -> io::Result<bool> {
+  macos_restart(vm, MAC_LOCKED, "to unlock its screen")
+}
+
+/// Restarts macOS unless `check`, a script, exits first, and waits for the new boot, told by
+/// `kern.boottime`; true if it did. The shutdown runs in the background: one stalled times out.
+fn macos_restart(vm: &Vm, check: &str, why: &str) -> io::Result<bool> {
+  let boot = || ssh::output(vm, "sysctl -n kern.boottime");
+  let was = boot()?;
+  let script = format!("{check}sudo -n nohup shutdown -r now >/dev/null 2>&1 &\necho restarting");
+  if ssh::output(vm, &script)? != "restarting" {
+    return Ok(false);
+  }
+
+  eprintln!("restarting {} {why}", vm.name);
+  let t = Instant::now();
+  while t.elapsed() < Duration::from_secs(300) {
+    ssh::wait(vm, Duration::from_secs(300))?;
+    if boot().is_ok_and(|x| x != was) {
+      return Ok(true);
+    }
+
+    thread::sleep(Duration::from_secs(2));
+  }
+
+  Err(bad(format!("{} didn't restart {why}", vm.name)))
+}
+
+/// No screen saver or lock, at each start: macOS keeps both per host, lost to a clone (a new one).
+/// The screen saver's time also goes in any host's prefs, for clones, read at the next login; the
+/// lock goes off at once, as the user (sudo's stays on), first: a changed password isn't fatal.
+pub fn macos_idle(vm: &Vm) -> io::Result<()> {
+  let lock = format!("sysadminctl -screenLock off -password {PASSWORD} 2>/dev/null");
+  let idle = "write com.apple.screensaver idleTime -int 0";
+  ssh::output(vm, &format!("{lock}; defaults {idle} && defaults -currentHost {idle}"))?;
   Ok(())
 }
 
@@ -905,10 +969,13 @@ mod tests {
     assert!(script.contains(&format!("printf '{kc}' > /etc/kcpassword\n")));
     assert!(script.contains("rm -f /Library/LaunchDaemons/trivm.setup.plist /private/var/db/"));
     assert!(script.contains("shutdown -r now\n"));
+    assert!(script.contains("defaults write $prefs/com.apple.screensaver idleTime -int 0\n"));
     assert!(lint("sh", &["-n"], &script));
     assert!(lint("plutil", &["-lint", "-s", "-"], &mac_daemon()));
     assert!(mac_daemon().contains("<string>/private/var/db/trivm-setup.sh</string>"));
     assert!(lint("sh", &["-n"], MAC_TUNE));
+    assert!(lint("sh", &["-n"], MAC_MADE));
+    assert!(lint("sh", &["-n"], MAC_LOCKED));
   }
 
   #[test]

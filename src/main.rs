@@ -191,6 +191,7 @@ fn signed() -> io::Result<()> {
 /// Starts the VM's process unless it runs, and waits until the guest answers SSH and its desktop
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
+  let _one = one_start(&Vm::open(name)?)?;
   // One start sets a new VM up; another waits for it, then finds the VM set up: Windows' setup
   // restarts the VM, which two at once would race.
   let (setup, mut vm) = loop {
@@ -201,7 +202,8 @@ pub fn start(name: &str) -> io::Result<()> {
     }
   };
 
-  if vm.pid().is_none() {
+  let boots = vm.pid().is_none();
+  if boots {
     match vm.config.os() {
       Os::Windows => {
         let cds = system::windows_cds(&vm)?;
@@ -230,6 +232,15 @@ pub fn start(name: &str) -> io::Result<()> {
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
+  // Unlocked at a boot of this start's only: a restart would close what a running VM runs. The
+  // lock goes off again after it: at a boot that came up locked, it didn't take.
+  if vm.config.os() == Os::Macos {
+    system::macos_idle(&vm)?;
+    if boots && system::macos_unlock(&vm)? {
+      system::macos_idle(&vm)?;
+    }
+  }
+
   system::desktop(&vm)?;
   // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
   if vm.setup {
@@ -239,6 +250,28 @@ pub fn start(name: &str) -> io::Result<()> {
 
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
+}
+
+/// Waits for another start of the VM to end, and keeps others waiting while the file returned is
+/// open: a start's restart of macOS, after its setup or to unlock it, would fail another's SSH.
+fn one_start(vm: &Vm) -> io::Result<fs::File> {
+  vm::made(&vm.state_dir)?;
+  let path = vm.state("start.lock");
+  let f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+  match f.try_lock() {
+    Ok(()) => {}
+    Err(fs::TryLockError::WouldBlock) => {
+      eprintln!("waiting for another start of {}", vm.name);
+      f.lock()?;
+    }
+    Err(fs::TryLockError::Error(e)) => return Err(e),
+  }
+
+  // A `delete` meanwhile removed it; a VM made again of the name has one of its own.
+  match fs::metadata(&path).map(|x| x.ino()).ok() == Some(f.metadata()?.ino()) {
+    true => Ok(f),
+    false => Err(bad(format!("{} was deleted meanwhile; see trivm list", vm.name))),
+  }
 }
 
 /// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and
@@ -293,6 +326,16 @@ pub fn detach(cmd: &mut Command) {
 
 unsafe extern "C" {
   fn setsid() -> i32;
+}
+
+/// Keeps the Mac from idle sleep while the process `pid`, a VM's, runs: `caffeinate` detached, and
+/// with no stdio of ours, which would keep a pipe from `trivm` open until the VM stops.
+pub fn awake(pid: u32) {
+  let mut cmd = Command::new("caffeinate");
+  cmd.args(["-i", "-w", &pid.to_string()]);
+  cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+  detach(&mut cmd);
+  let _ = cmd.spawn();
 }
 
 /// Shuts the guest down from inside, or by its power button when its SSH doesn't answer, or with

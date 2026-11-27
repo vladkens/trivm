@@ -49,7 +49,9 @@ what trivm does, so the two aren't mixed up:
   missing: the VM's view in a hidden window for shots and input (`display.rs`); TCC's database
   written and recoveryOS read with Vision (`permissions.rs`); macOS's Shut Down at its power
   button read with Vision and clicked (`main.rs`'s `stop`); `/etc/kcpassword` written for the
-  automatic login (`system.rs`); agent-desktop as a launchd job for its grant (`ui.rs`);
+  automatic login, macOS 27's restart after its setup, for the screen saver's time read at login,
+  and loginwindow's mark of a locked screen deleted with a restart, as it would lock it again at
+  each boot (`system.rs`); agent-desktop as a launchd job for its grant (`ui.rs`);
   `desktop`'s launchd job on macOS (`ssh.rs`); `LabConfig`'s skipped checks and `desktop`'s
   scheduled task (`windows.rs`).
 - A hack goes with the last system that needs it: macOS 27 makes its user itself, so `apfs.rs`

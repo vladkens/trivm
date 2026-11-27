@@ -6,10 +6,9 @@ use std::cell::RefCell;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{self, Command};
 use std::sync::mpsc;
 use std::time::Duration;
-use std::{fs, thread};
+use std::{fs, process, thread};
 
 use block2::RcBlock;
 use dispatch2::run_on_main;
@@ -425,8 +424,7 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
     }
   });
 
-  // Keeps the Mac from idle sleep while the VM runs.
-  let _ = Command::new("caffeinate").args(["-i", "-w", &process::id().to_string()]).spawn();
+  crate::awake(process::id());
   eprintln!("trivm: {} running, pid {}", vm.name, process::id());
   app.run();
   Ok(())
