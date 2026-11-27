@@ -176,7 +176,7 @@ pub const SYSTEMS: &[System] = &[
 /// Windows 11 Pro's image in the ESD, after Setup's media, Windows PE and Setup, 1 to 3.
 const WINDOWS_PRO: u32 = 6;
 
-/// Fedora's virtio-win, for NetKVM, the driver of the VM's virtio-net.
+/// Fedora's virtio-win, for NetKVM and viogpudo, the drivers of the VM's virtio-net and virtio-gpu.
 const VIRTIO: (&str, &str) = (
   "https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/archive-virtio/virtio-win-0.1.302-1/virtio-win-0.1.302.iso",
   "303f7ae40dad495d6ae474fdc571df58958a4dbc5c37a522d80f9a203867949d",
@@ -947,7 +947,8 @@ pub fn windows_cds(vm: &Vm) -> io::Result<Vec<PathBuf>> {
 }
 
 /// The disk, the firmware's variables and the seed: `autounattend.xml`, the setup script its first
-/// logon runs, trivm's key, Win32-OpenSSH's MSI and virtio-net's driver from virtio-win.
+/// logon runs, trivm's key, Win32-OpenSSH's MSI, and virtio-net's and virtio-gpu's drivers from
+/// virtio-win, the display's where Setup loads it (the `gpu` mark says the disk will have it).
 fn windows(vm: &Vm) -> io::Result<()> {
   let virtio = download(VIRTIO.0, VIRTIO.1)?;
   let msi = download(OPENSSH.0, OPENSSH.1)?;
@@ -961,13 +962,23 @@ fn windows(vm: &Vm) -> io::Result<()> {
   fs::write(seed.join("key.pub"), ssh::public_key()? + "\n")?;
   fs::copy(&msi, seed.join("openssh.msi"))?;
 
-  // The ISO's files are hard links across NetKVM's folders, read-only once extracted.
+  // The ISO's files are hard links across a driver's folders, read-only once extracted.
   let tmp = vm.path("virtio");
   fs::create_dir_all(&tmp)?;
-  run(Command::new("tar").arg("-xf").arg(&virtio).arg("-C").arg(&tmp).arg("NetKVM"))?;
+  let mut tar = Command::new("tar");
+  run(tar.arg("-xf").arg(&virtio).arg("-C").arg(&tmp).args(["NetKVM", "viogpudo"]))?;
   run(Command::new("chmod").arg("-R").arg("u+w").arg(&tmp))?;
   fs::rename(tmp.join("NetKVM/w11/ARM64"), seed.join("netkvm"))?;
+  // Setup looks for `$WinPEDriver$` at each drive's root: it loads its drivers in Windows PE and
+  // adds them to the system it installs.
+  let gpu = seed.join("$WinPEDriver$/viogpudo");
+  fs::create_dir_all(&gpu)?;
+  for x in ["viogpudo.inf", "viogpudo.sys", "viogpudo.cat"] {
+    fs::rename(tmp.join("viogpudo/w11/ARM64").join(x), gpu.join(x))?;
+  }
+
   fs::remove_dir_all(&tmp)?;
+  fs::write(vm.path(vm::GPU), "")?;
 
   let mut hdiutil = Command::new("hdiutil");
   hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "TRIVM", "-o"]);
@@ -975,16 +986,19 @@ fn windows(vm: &Vm) -> io::Result<()> {
   fs::remove_dir_all(&seed)
 }
 
-/// The first boot of a new Windows VM: Setup installs from the media unattended, restarting from
-/// the disk, and the first logon's script starts sshd last. The CDs go then.
-pub fn windows_setup(vm: &Vm) -> io::Result<()> {
+/// The first boot of a new Windows VM: Setup installs from the media unattended, the first logon's
+/// script starts sshd last; the desktop up, a restart without the media and the seed, and on
+/// virtio-gpu, whose driver Setup added, not on ramfb, which Setup draws on.
+pub fn windows_setup(vm: &mut Vm) -> io::Result<()> {
   eprintln!("installing Windows on {}, unattended (about 15 minutes)", vm.name);
   ssh::wait(vm, Duration::from_secs(5400))?;
-  qemu::ask(vm, "eject", "")?;
-  match fs::remove_file(vm.path("seed.iso")) {
-    Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-    _ => Ok(()),
-  }
+  // The first sign-in finished first: it sets up the user's desktop.
+  desktop(vm)?;
+  eprintln!("restarting {} on virtio-gpu", vm.name);
+  crate::stop(vm, false)?;
+  vm::gone(fs::remove_file(vm.path("seed.iso")))?;
+  qemu::spawn(vm, &[])?;
+  ssh::wait(vm, Duration::from_secs(300))
 }
 
 // MARK: All
