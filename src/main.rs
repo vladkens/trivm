@@ -191,6 +191,7 @@ fn signed() -> io::Result<()> {
 /// Starts the VM's process unless it runs, and waits until the guest answers SSH and its desktop
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
+  let _one = one_start(&Vm::open(name)?)?;
   let mut vm = Vm::open(name)?;
   let boots = vm.pid().is_none();
   if boots {
@@ -218,11 +219,12 @@ pub fn start(name: &str) -> io::Result<()> {
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
-  // Unlocked at a boot of this start's only: a restart would close what a running VM runs.
+  // Unlocked at a boot of this start's only: a restart would close what a running VM runs. The
+  // lock goes off again after it: at a boot that came up locked, it didn't take.
   if vm.config.os() == Os::Macos {
     system::macos_idle(&vm)?;
-    if boots {
-      system::macos_unlock(&vm)?;
+    if boots && system::macos_unlock(&vm)? {
+      system::macos_idle(&vm)?;
     }
   }
 
@@ -235,6 +237,23 @@ pub fn start(name: &str) -> io::Result<()> {
 
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
+}
+
+/// Waits for another start of the VM to end, and keeps others waiting while the file returned is
+/// open: a start's restart of macOS, after its setup or to unlock it, would fail another's SSH.
+fn one_start(vm: &Vm) -> io::Result<fs::File> {
+  vm::made(&vm.state_dir)?;
+  let f = fs::OpenOptions::new().create(true).append(true).open(vm.state("start.lock"))?;
+  match f.try_lock() {
+    Ok(()) => {}
+    Err(fs::TryLockError::WouldBlock) => {
+      eprintln!("waiting for another start of {}", vm.name);
+      f.lock()?;
+    }
+    Err(fs::TryLockError::Error(e)) => return Err(e),
+  }
+
+  Ok(f)
 }
 
 /// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and

@@ -450,8 +450,8 @@ sudo -n defaults write /Library/Preferences/com.apple.timezone.auto Active -bool
 sudo -n ln -sf "/var/db/timezone/zoneinfo/$1" /etc/localtime
 "#;
 
-/// macOS 27's restart after its setup, at the boot that made the user only: a start meanwhile may
-/// have done it.
+/// macOS 27's restart after its setup, at the boot that made the user only: a start stopped before
+/// its end may have done it.
 const MAC_MADE: &str = r#"boot=$(sysctl -n kern.boottime | sed 's/^{ sec = \([0-9]*\),.*/\1/')
 [ "$(stat -f %B "$HOME")" -ge "$boot" ] || exit 0
 "#;
@@ -479,24 +479,25 @@ pub fn macos_setup(vm: &Vm) -> io::Result<()> {
   }
 
   macos_idle(vm)?;
-  macos_restart(vm, MAC_MADE, "after its setup")
+  macos_restart(vm, MAC_MADE, "after its setup")?;
+  Ok(())
 }
 
 /// A screen locked at shutdown locks again at each boot, until someone types the password: at a
 /// boot that came up so, `MAC_LOCKED`'s mark goes and macOS restarts unlocked. No API unlocks a
 /// session; the password typed through the display needs the lock screen's field to take the keys.
-pub fn macos_unlock(vm: &Vm) -> io::Result<()> {
+pub fn macos_unlock(vm: &Vm) -> io::Result<bool> {
   macos_restart(vm, MAC_LOCKED, "to unlock its screen")
 }
 
 /// Restarts macOS unless `check`, a script, exits first, and waits for the new boot, told by
-/// `kern.boottime`. The shutdown runs in the background, so one that stalls times out here.
-fn macos_restart(vm: &Vm, check: &str, why: &str) -> io::Result<()> {
+/// `kern.boottime`; true if it did. The shutdown runs in the background: one stalled times out.
+fn macos_restart(vm: &Vm, check: &str, why: &str) -> io::Result<bool> {
   let boot = || ssh::output(vm, "sysctl -n kern.boottime");
   let was = boot()?;
   let script = format!("{check}sudo -n nohup shutdown -r now >/dev/null 2>&1 &\necho restarting");
   if ssh::output(vm, &script)? != "restarting" {
-    return Ok(());
+    return Ok(false);
   }
 
   eprintln!("restarting {} {why}", vm.name);
@@ -504,7 +505,7 @@ fn macos_restart(vm: &Vm, check: &str, why: &str) -> io::Result<()> {
   while t.elapsed() < Duration::from_secs(300) {
     ssh::wait(vm, Duration::from_secs(300))?;
     if boot().is_ok_and(|x| x != was) {
-      return Ok(());
+      return Ok(true);
     }
 
     thread::sleep(Duration::from_secs(2));
