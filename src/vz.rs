@@ -96,7 +96,12 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
     let balloon = VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new();
     c.setMemoryBalloonDevices(&NSArray::from_retained_slice(&[Retained::into_super(balloon)]));
 
+    // Not VZ's Mac trackpad, which macOS takes the pointer from when it has one: through it the
+    // guest counts clicks at one place as a double or triple click whatever the time between them,
+    // 10 s too. `open`'s window goes without the trackpad's gestures (pinch, rotate, swipe).
     let pointer = Retained::into_super(VZUSBScreenCoordinatePointingDeviceConfiguration::new());
+    c.setPointingDevices(&NSArray::from_retained_slice(&[pointer]));
+
     match os {
       Os::Macos => {
         let data = |file: &str| -> io::Result<Retained<NSData>> {
@@ -137,8 +142,6 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
         let keyboard = Retained::into_super(VZMacKeyboardConfiguration::new());
         c.setKeyboards(&NSArray::from_retained_slice(&[keyboard]));
-        let trackpad = Retained::into_super(VZMacTrackpadConfiguration::new());
-        c.setPointingDevices(&NSArray::from_retained_slice(&[pointer, trackpad]));
       }
       Os::Linux | Os::Windows => {
         let id = VZGenericMachineIdentifier::initWithDataRepresentation(
@@ -167,7 +170,6 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
 
         let keyboard = Retained::into_super(VZUSBKeyboardConfiguration::new());
         c.setKeyboards(&NSArray::from_retained_slice(&[keyboard]));
-        c.setPointingDevices(&NSArray::from_retained_slice(&[pointer]));
 
         if vm.path("seed.iso").exists() {
           storage.push(disk(&vm.path("seed.iso"), true, Os::Linux)?);
