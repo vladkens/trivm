@@ -193,24 +193,24 @@ pub fn click(
   let (mut nodes, mut at, mut all) = element(&vm, text, app, None)?;
 
   let window = window_of(&nodes, &nodes[at]);
-  if !in_front(&nodes, window) {
+  let behind = match vm.config.os() {
+    // A window Windows has in front may lack the focus, and a click gives it: raised only when
+    // another window covers the element.
+    Os::Windows => top(&all, window, nodes[at].middle()).is_some_and(|w| w.id != window.id),
+    _ => !in_front(&nodes, window),
+  };
+
+  if behind {
     // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
     let id = window.id.clone();
-    let (raised, front) = match vm.config.os() {
-      // A popup's window comes to the front with its app's, which is what takes the focus.
-      Os::Windows => {
-        let front = match window.name == POPUP_HOST {
-          true => owner(&all, window)?,
-          false => window,
-        };
-
-        (raise(&vm, &front.id), front.id.clone())
-      }
-      _ => (agent_desktop(&vm, &["focus-window", "--window-id", &id]).map(|_| ()), id.clone()),
+    let raised = match vm.config.os() {
+      Os::Windows if window.name == POPUP_HOST => uncover(&vm, &all, window, nodes[at].middle()),
+      Os::Windows => raise(&vm, &id),
+      _ => agent_desktop(&vm, &["focus-window", "--window-id", &id]).map(|_| ()),
     };
 
     if let Err(e) = raised
-      && !windows(&vm)?.iter().any(|w| w.id == front && w.focused())
+      && !windows(&vm)?.iter().any(|w| w.id == id && w.focused())
     {
       return Err(e);
     }
@@ -255,7 +255,7 @@ pub fn click(
   // Windows keeps an always-on-top window in front of the one raised, and a popup in front of the
   // window it's for: the first window at the point, from the front, must be the element's.
   if vm.config.os() == Os::Windows && !window.id.is_empty() {
-    match all.iter().find(|w| w.covers(x, y)) {
+    match top(&all, window, (x, y)) {
       Some(w) if w.id == window.id => {}
       Some(w) => return Err(bad(format!("{} is under {}", node.line(), w.line()))),
       None => return Err(bad(format!("{} is out of its window", node.line()))),
@@ -272,11 +272,31 @@ pub fn click(
 /// refuses `focus-window`'s `SetForegroundWindow` to a program in the background, as agent-desktop
 /// is in its task, but lets a window it restores take the focus. `focus-window` then checks it.
 fn raise(vm: &Vm, id: &str) -> io::Result<()> {
-  let args = format!(r#"{{"window_id":{}}}"#, json_str(id));
-  let batch: Vec<String> = ["minimize", "restore", "focus-window"]
-    .iter()
-    .map(|x| format!(r#"{{"command":"{x}","args":{args}}}"#))
-    .collect();
+  on_windows(vm, &[("minimize", id), ("restore", id), ("focus-window", id)])
+}
+
+/// Uncovers a XAML popup on Windows: the other apps' windows in front of it at the point are
+/// minimized. Its app's window minimized and restored, as `raise` does, takes the popup off the
+/// screen for good.
+fn uncover(vm: &Vm, all: &[Node], popup: &Node, (x, y): (f64, f64)) -> io::Result<()> {
+  let at = all.iter().position(|w| w.id == popup.id).unwrap_or(0);
+  let over: Vec<&Node> =
+    all[..at].iter().filter(|w| w.covers(x, y) && w.pid != popup.pid).collect();
+  let cmds: Vec<(&str, &str)> = over.iter().map(|w| ("minimize", w.id.as_str())).collect();
+  on_windows(vm, &cmds)?;
+  for w in over {
+    eprintln!("trivm: minimized {}, in front of {}", w.line(), popup.line());
+  }
+
+  Ok(())
+}
+
+/// agent-desktop's window commands, each on its window's id, in one batch that stops at an error.
+fn on_windows(vm: &Vm, cmds: &[(&str, &str)]) -> io::Result<()> {
+  let cmd = |(x, id): &(&str, &str)| {
+    format!(r#"{{"command":"{x}","args":{{"window_id":{}}}}}"#, json_str(id))
+  };
+  let batch: Vec<String> = cmds.iter().map(cmd).collect();
   let done = agent_desktop(vm, &["batch", "--stop-on-error", &format!("[{}]", batch.join(","))])?;
   let mut errors = done.get("results").items().iter().map(|x| x.get("error").get("message").str());
   match errors.find(|x| !x.is_empty()) {
@@ -867,20 +887,18 @@ fn in_front(nodes: &[Node], window: &Node) -> bool {
   window.id.is_empty() || nodes[at..].iter().any(|x| x.depth == 0 && x.focused())
 }
 
-/// The window a XAML popup's window is for: its process's one window that isn't a popup's. Of
-/// several, agent-desktop doesn't say which: Notepad keeps all its windows in one process.
-fn owner<'a>(all: &'a [Node], popup: &Node) -> io::Result<&'a Node> {
-  let own: Vec<&Node> = all.iter().filter(|w| w.pid == popup.pid && w.name != POPUP_HOST).collect();
-  match own[..] {
-    [one] => Ok(one),
-    _ => Err(bad(format!(
-      "{} is behind another window, and which of {}'s {} windows it is of isn't known: bring it \
-       to the front first",
-      popup.line(),
-      popup.app,
-      own.len()
-    ))),
-  }
+/// The first window at a point, front to back, for an element of `window`. Windows keeps a popup
+/// over the window it's for, which agent-desktop doesn't name: that one doesn't count, known when
+/// the popup's process has no other window.
+fn top<'a>(all: &'a [Node], window: &Node, (x, y): (f64, f64)) -> Option<&'a Node> {
+  let own: Vec<&Node> =
+    all.iter().filter(|w| w.pid == window.pid && w.name != POPUP_HOST).collect();
+  let owner = match own[..] {
+    [one] if window.name == POPUP_HOST => one.id.as_str(),
+    _ => "",
+  };
+
+  all.iter().find(|w| w.covers(x, y) && (owner.is_empty() || w.id != owner))
 }
 
 /// The window or menu bar an element is in: the last line at depth 0 up to it.
@@ -1364,18 +1382,31 @@ _NET_WM_NAME:  not found."#;
     );
     assert_eq!(find(&nodes, "Got it").len(), 1);
 
-    // Raised by its process's window; of two, which is unknown.
-    let at = |id: &str, pid: u32, name: &str| Node { id: id.into(), pid, ..window(name) };
-    let mut all = vec![
-      at("1", 7, "PopupHost"),
-      at("2", 8, "Documents - File Explorer"),
-      at("3", 8, "PopupHost"),
-      at("4", 7, "Untitled - Notepad"),
-    ];
-    assert_eq!(owner(&all, &all[0]).unwrap().id, "4");
-    assert_eq!(owner(&all, &all[2]).unwrap().id, "2");
-    all.push(at("5", 7, "Untitled - Notepad"));
-    assert!(owner(&all, &all[0]).is_err());
+    // A popup's own app's window never covers it; another's does.
+    let at = |id: &str, pid: u32, name: &str, frame: [f64; 4]| Node {
+      id: id.into(),
+      pid,
+      frame,
+      ..window(name)
+    };
+    let popup = at("1", 7, "PopupHost", [250.0, 150.0, 300.0, 120.0]);
+    let explorer = at("2", 8, "Documents - File Explorer", [0.0, 0.0, 800.0, 560.0]);
+    let notepad = at("4", 7, "Untitled - Notepad", [100.0, 100.0, 600.0, 400.0]);
+    let point = (400.0, 200.0);
+    let id = |w: Option<&Node>| w.map(|x| x.id.clone());
+    for stack in [[&notepad, &popup], [&popup, &notepad]] {
+      let stack: Vec<Node> = stack.into_iter().cloned().collect();
+      assert_eq!(id(top(&stack, &popup, point)), Some("1".into()));
+    }
+
+    let stack = [explorer.clone(), popup.clone(), notepad.clone()];
+    assert_eq!(id(top(&stack, &popup, point)), Some("2".into()));
+    assert_eq!(id(top(&stack, &notepad, point)), Some("2".into()));
+
+    // Of two windows of its app, either may be another's, in front of it.
+    let other = Node { id: "5".into(), ..notepad.clone() };
+    let stack = [other, popup.clone(), notepad];
+    assert_eq!(id(top(&stack, &popup, point)), Some("5".into()));
   }
 
   #[test]

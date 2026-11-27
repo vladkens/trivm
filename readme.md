@@ -84,8 +84,9 @@ the guest's desktop (and macOS's menu bar) with their elements, a line each with
 value, state and frame in a shot's pixels, read through the system's accessibility by
 [agent-desktop](https://github.com/vercel-labs/agent-desktop), which trivm puts in the guest at
 the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`); on Windows it needs
-Microsoft's Visual C++ runtime, which trivm puts in too, and `click --name` raises a window by
-minimizing and restoring it, as Windows lets no program in the background bring one to the front.
+Microsoft's Visual C++ runtime, which trivm puts in too, and `click --name` raises a covered
+window by minimizing and restoring it, as Windows lets no program in the background bring one to
+the front; a covered menu or tip is uncovered by minimizing the windows in front of it.
 `--app` takes an app's name in any case, `notepad` for Windows' `Notepad.exe`.
 An app shows what its toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once
 started after the first `ui`. Not supported yet on Ubuntu 22.04 (agent-desktop needs 24.04's

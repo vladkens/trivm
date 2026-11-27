@@ -12,8 +12,8 @@ Done: 2026-11-27
 - Its arguments and output: the batch file's one line runs agent-desktop with its output and errors to files, then writes `done`; the PowerShell over SSH waits for it (a minute at most), prints them and removes the task. The line comes on SSH's stdin, not in the command line, which cmd caps at 8191 characters with the script; quoted as Windows splits a command line, then `%` doubled and cmd's operators escaped where cmd reads them (unit tests). A batch's line past 8191 characters is refused, saying `--app` picks fewer windows. A run takes 3–5 seconds, most of it PowerShell and the task's start.
 - `--app`: Windows names an app by its program, `Notepad.exe`, so there `.exe` is optional, as the case is everywhere.
 - Frames: agent-desktop makes itself per-monitor DPI aware, so UI Automation gives it the screen's pixels, a shot's from 0,0. Checked at 150%: frames in the shot's pixels, a click at their middle on the element.
-- The raise: Windows refuses `SetForegroundWindow` to a program in the background, which agent-desktop is in its task (`focus-window` fails, "did not become foreground"; an Alt press before it didn't help and left Explorer in its keyboard mode). It does let a window restored from minimized take the focus, so `click --name` minimizes and restores the window, as its taskbar button would, then `focus-window` checks it is in front. The first window at the click's point, from the front, must then be the element's: one always on top, or a popup, may cover it (an error says which). Of the windows agent-desktop lists: it leaves out tool windows (`WS_EX_TOOLWINDOW`), so one of those always on top goes unseen, as every window does on macOS, which has no such check.
-- Menus: a XAML app's menu (Notepad's, Explorer's) is a window of its own, `PopupHost`, in front of the app's; its tree's top element is a frameless window UI Automation calls off the screen, so `ui` reads into it instead of leaving it out. The same popup is in the app window's tree too: a popup's element alike in all but its window to one in a window before is left out, unless something in it stays; other windows' twins all stay. A window listed before the focused one, as such a popup is, isn't raised before a click: minimized, it would close. All in a `PopupHost` window or under a `PopupHost` element is a popup's: a tip's top has a frame, which the frameless rule alone missed. A popup's window behind another is raised by its process's one other window: the popup's own doesn't take the focus. Of several, as Notepad keeps all its windows in one process, `click --name` says so and raises none: agent-desktop doesn't give a window's owner.
+- The raise: Windows refuses `SetForegroundWindow` to a program in the background, which agent-desktop is in its task (`focus-window` fails, "did not become foreground"; an Alt press before it didn't help and left Explorer in its keyboard mode). It does let a window restored from minimized take the focus, so `click --name` minimizes and restores the window, as its taskbar button would, then `focus-window` checks it is in front. The first window at the click's point, from the front, must then be the element's: one always on top, or a popup, may cover it (an error says which). Of the windows agent-desktop lists: it leaves out tool windows (`WS_EX_TOOLWINDOW`), so one of those always on top goes unseen, as every window does on macOS, which has no such check. On Windows a window is raised only when another covers the element's point: one in front may lack the focus (Notepad on a fresh desktop), and the click gives it.
+- Menus: a XAML app's menu (Notepad's, Explorer's) is a window of its own, `PopupHost`, in front of the app's; its tree's top element is a frameless window UI Automation calls off the screen, so `ui` reads into it instead of leaving it out. The same popup is in the app window's tree too: a popup's element alike in all but its window to one in a window before is left out, unless something in it stays; other windows' twins all stay. A window listed before the focused one, as such a popup is, isn't raised before a click: minimized, it would close. All in a `PopupHost` window or under a `PopupHost` element is a popup's: a tip's top has a frame, which the frameless rule alone missed. A popup behind another app's window is uncovered instead of raised: the windows in front of it at the element's point are minimized, and `click --name` says which. Its app's window minimized and restored takes the popup off the screen for good (Notepad's tip went to -31862,-31960). The window a popup is for doesn't count as covering it, known when the popup's process has no other: agent-desktop doesn't name a popup's owner.
 
 ## Tasks
 
@@ -59,9 +59,23 @@ A check on a fresh `windows-11` after the PR was opened found three defects, fix
   process held: let go after 5 s, removed at 6 s; held 30 s, left at 10 s, no error.
 - `--app Notepad` found nothing: `.exe` optional on Windows (unit tests).
 - Notepad's tip was listed twice, and `click --name "Got it"` raised its popup's window, which
-  failed and hid it: read once, raised by Notepad's window (unit tests for both).
+  failed and hid it: read once (unit test).
 
 On another fresh `windows-11`: the first `ui --app Notepad` put in agent-desktop and the runtime
 and listed Notepad, the installer gone from `%TEMP%`; `--app Explorer` and `--app explorer.EXE`
 listed Explorer; `click --name "Got it" --app notepad` raised Notepad from behind Explorer and
 closed its tip (`windows-ui-14-gotit.png`).
+
+The re-check found `click --name "Got it"` still failing with the tip on top of Notepad, which
+had no focus: the raise minimized Notepad, which took the tip off the screen. Now a window is
+raised only when another covers the element, a popup is uncovered, and the window it is for
+doesn't cover it (unit tests). On a third fresh `windows-11`, Notepad's settings copied before the tip
+was closed and put back to show it again:
+
+- The tip on top: clicked with no raise, in 4 s, the tip gone (`windows-ui-29-tip-top.png`,
+  `windows-ui-30-tip-top-gotit.png`).
+- The tip behind a maximized Explorer: Explorer's window minimized, the tip clicked, in 11 s
+  (`windows-ui-22-tip-behind.png`, `windows-ui-23-tip-behind-gotit.png`); behind two, both
+  minimized (`windows-ui-28-tip-behind-gotit.png`).
+- Notepad behind Explorer, `click --name Edit --app notepad`: raised, its menu open
+  (`windows-ui-26-edit-behind.png`).
