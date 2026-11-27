@@ -17,8 +17,8 @@ VMs:
                           macos-26, macos-15, ubuntu-24.04, ubuntu-22.04, debian-13, fedora-45,
                           windows-11 (needs brew install qemu swtpm wimlib). --screen: its size
                           in points, a shot's pixels, at 1 or 2 pixels each on macOS, 1 on
-                          Linux; 1600x900@2 on macOS and 1920x1080 on Linux when left out;
-                          Windows' is 1920x1080
+                          Linux and Windows; 1600x900@2 on macOS and 1920x1080 on the others
+                          when left out
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states

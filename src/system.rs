@@ -212,7 +212,9 @@ pub fn create(
     disk: disk.unwrap_or(sys.disk),
     screen: screen.map(|x| Screen::parse(x, sys.os)).transpose()?,
   };
-  let vm = Vm { mac: vm::random_mac()?, setup: true, ..Vm::at(&name, config) };
+  // A new Windows VM gets virtio-gpu's driver.
+  let gpu = sys.os == Os::Windows;
+  let vm = Vm { mac: vm::random_mac()?, setup: true, gpu, ..Vm::at(&name, config) };
   if vm.conf.exists() {
     return Err(bad(format!("{name} exists; trivm delete {name} first")));
   }

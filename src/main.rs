@@ -201,7 +201,8 @@ pub fn start(name: &str) -> io::Result<()> {
     }
   };
 
-  if vm.pid().is_none() {
+  let ran = vm.pid().is_some();
+  if !ran {
     match vm.config.os() {
       Os::Windows => {
         let cds = system::windows_cds(&vm)?;
@@ -231,6 +232,15 @@ pub fn start(name: &str) -> io::Result<()> {
   }
 
   system::desktop(&vm)?;
+  // The screen of a QEMU this start ran, or Windows' setup restarted; a running VM's may differ.
+  if vm.config.os() == Os::Windows && vm.gpu && (!ran || vm.setup) {
+    let (w, h) = (vm.config.screen().width, vm.config.screen().height);
+    let was = ssh::output(&vm, &windows::screen(w, h))?;
+    if !was.is_empty() {
+      eprintln!("{name}: Windows drew {was}, set to {w}x{h}");
+    }
+  }
+
   // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
   if vm.setup {
     vm.setup = false;

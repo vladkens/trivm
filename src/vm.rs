@@ -160,7 +160,8 @@ impl Screen {
   }
 
   /// `<w>x<h>[@<scale>]`, the scale the system's when left out: macOS draws at 1x or 2x, Linux's
-  /// desktops at 1x here, as VZ gives them no density and each scales by its own settings.
+  /// desktops at 1x here, as VZ gives them no density and each scales by its own settings, and
+  /// Windows at 1x, its scaling the user's setting.
   pub fn parse(x: &str, os: Os) -> io::Result<Self> {
     let wrong = || bad(format!("not a screen size: {x}, e.g. 1152x720@2"));
     let num = |x: &str| x.parse::<u32>().map_err(|_| wrong());
@@ -172,16 +173,28 @@ impl Screen {
     match (os, scale) {
       (Os::Macos, 1 | 2) | (Os::Linux | Os::Windows, 1) => {}
       (Os::Macos, _) => return Err(bad(format!("{x}: macOS draws at 1x or 2x"))),
-      _ => return Err(bad(format!("{x}: Linux draws at 1x here; its desktop has its own scale"))),
+      (Os::Linux, _) => {
+        return Err(bad(format!("{x}: Linux draws at 1x here; its desktop has its own scale")));
+      }
+      (Os::Windows, _) => {
+        return Err(bad(format!("{x}: Windows draws at 1x here; its scaling is the user's own")));
+      }
     }
 
     // A mode of Linux's virtio-gpu is CVT's, a multiple of 8 pixels wide: 1366 draws 1360.
-    if os != Os::Macos && w % 8 != 0 {
+    // Windows' viogpudo takes the scanout's size as it is.
+    if os == Os::Linux && w % 8 != 0 {
       return Err(bad(format!("{x}: Linux's width is a multiple of 8, as {}x{h}", w / 8 * 8)));
     }
 
     if w < 640 || h < 480 || w > 7680 / scale || h > 4320 / scale {
       return Err(bad(format!("{x}: from 640x480 points up to 7680x4320 pixels")));
+    }
+
+    // Windows' viogpudo showed nothing at 7680×4320, whose frame it keeps in 133 MB of non-paged
+    // pool; it draws 5120×2880.
+    if os == Os::Windows && (w > 5120 || h > 2880) {
+      return Err(bad(format!("{x}: Windows draws up to 5120x2880 here")));
     }
 
     Ok(Self { width: w as f64, height: h as f64, scale: scale as f64 })
@@ -689,6 +702,11 @@ pub mod tests {
       ("640x480@1", Os::Linux, "640x480@1"),
       ("3840x2160@2", Os::Macos, "3840x2160@2"),
       ("1470x956", Os::Macos, "1470x956@2"),
+      ("1366x768", Os::Windows, "1366x768@1"),
+      ("1280x800@1", Os::Windows, "1280x800@1"),
+      ("3840x2160", Os::Windows, "3840x2160@1"),
+      ("5120x2880", Os::Windows, "5120x2880@1"),
+      ("7680x4320", Os::Linux, "7680x4320@1"),
     ] {
       assert_eq!(at(x, os).unwrap(), want);
     }
@@ -707,7 +725,10 @@ pub mod tests {
       ("2147483648x480@2", Os::Macos),
       ("4294967295x480", Os::Linux),
       ("1366x768", Os::Linux),
-      ("1281x800", Os::Windows),
+      ("1366x768@2", Os::Windows),
+      ("639x480", Os::Windows),
+      ("7680x4320", Os::Windows),
+      ("5128x2880", Os::Windows),
     ] {
       assert!(at(x, os).is_err(), "{x}");
     }
@@ -715,6 +736,10 @@ pub mod tests {
     assert_eq!(
       at("1280x800@2", Os::Linux).unwrap_err().to_string(),
       "1280x800@2: Linux draws at 1x here; its desktop has its own scale"
+    );
+    assert_eq!(
+      at("1280x800@2", Os::Windows).unwrap_err().to_string(),
+      "1280x800@2: Windows draws at 1x here; its scaling is the user's own"
     );
     let odd = at("1366x768", Os::Linux).unwrap_err().to_string();
     assert_eq!(odd, "1366x768: Linux's width is a multiple of 8, as 1360x768");

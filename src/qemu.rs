@@ -46,13 +46,14 @@ pub fn platform(vm: &Vm) -> io::Result<()> {
   Ok(())
 }
 
-/// The VM's display: virtio-gpu at its EDID's mode, drawn by virtio-win's viogpudo, which Setup
-/// adds; ramfb (800×600) while Setup's media is attached, as Windows PE draws nothing on
-/// virtio-gpu, and for a VM made before, with no driver for it. Both would be two monitors.
-fn display(vm: &Vm, setup: bool) -> &'static str {
+/// The VM's display: virtio-gpu at its screen, drawn by virtio-win's viogpudo, which Setup adds;
+/// ramfb (800×600) while Setup's media is attached, as Windows PE draws nothing on virtio-gpu, and
+/// for a VM made before, with no driver for it. Both would be two monitors.
+fn display(vm: &Vm, setup: bool) -> String {
+  let screen = vm.config.screen();
   match vm.gpu && !setup {
-    true => "virtio-gpu-pci,xres=1920,yres=1080",
-    false => "ramfb",
+    true => format!("virtio-gpu-pci,xres={},yres={}", screen.width, screen.height),
+    false => "ramfb".into(),
   }
 }
 
@@ -82,7 +83,7 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-device".into(),
     "nvme,drive=disk,serial=trivm,bootindex=0".into(),
     "-device".into(),
-    display(vm, !cds.is_empty()).into(),
+    display(vm, !cds.is_empty()),
     "-device".into(),
     "qemu-xhci,id=usb".into(),
     "-device".into(),
@@ -196,7 +197,8 @@ pub fn cancel(vm: &Vm) -> io::Result<()> {
 }
 
 /// Checks that the VM's folders can be given to swtpm, which splits its options at commas, with
-/// no escape for one in a path, and that it has the screen ramfb draws, the firmware's 800×600.
+/// no escape for one in a path, and that a screen set for it is drawn: a VM made before trivm
+/// gave Windows virtio-gpu's driver draws on ramfb, the firmware's 800×600.
 pub fn fits(vm: &Vm) -> io::Result<()> {
   for dir in [&vm.dir, &vm.state_dir] {
     if dir.to_string_lossy().contains(',') {
@@ -204,8 +206,11 @@ pub fn fits(vm: &Vm) -> io::Result<()> {
     }
   }
 
-  if let Some(x) = vm.config.screen {
-    return Err(bad(format!("screen = {x}: Windows' screen is ramfb's here, 800x600 only")));
+  if let Some(x) = vm.config.screen
+    && !vm.gpu
+  {
+    let why = "made with no virtio-gpu driver and draws on ramfb, 800x600 only";
+    return Err(bad(format!("screen = {x}: {} was {why}", vm.name)));
   }
 
   Ok(())
@@ -691,14 +696,22 @@ mod tests {
     let setup = args(&vm, Path::new("/q"), &cds).join(" ");
     assert!(setup.contains("-device ramfb -device") && !setup.contains("virtio-gpu"));
 
+    // At the VM's screen, read at each start.
+    let screen = Some(Screen { width: 1366.0, height: 768.0, scale: 1.0 });
+    let vm = Vm { config: Config { screen, ..vm.config.clone() }, setup: false, ..vm };
+    let set = args(&vm, Path::new("/q"), &[]).join(" ");
+    assert!(set.contains("-device virtio-gpu-pci,xres=1366,yres=768 -device"));
+
     // QEMU's paths take a comma doubled; swtpm's none.
     assert!(fits(&vm).is_err());
     let vm = Vm { dir: "/v/a".into(), state_dir: "/s/a".into(), ..vm };
     assert!(fits(&vm).is_ok());
-    // Its screen is ramfb's.
-    let screen = Some(Screen { width: 1280.0, height: 800.0, scale: 1.0 });
-    let config = Config { screen, ..vm.config.clone() };
-    assert!(fits(&Vm { config, ..vm }).is_err());
+    // A screen set for a VM on ramfb, made before the driver, is refused, while set up too.
+    let old = Vm { gpu: false, setup: true, ..vm };
+    let err = fits(&old).unwrap_err().to_string();
+    assert!(err.starts_with("screen = 1366x768@1: w was made with no virtio-gpu driver"), "{err}");
+    let old = Vm { config: Config { screen: None, ..old.config.clone() }, ..old };
+    assert!(fits(&old).is_ok());
   }
 
   #[test]
