@@ -516,12 +516,12 @@ pub fn size(path: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
   use super::*;
 
   /// Tried again for up to a second: a process another test starts meanwhile shares the locks
   /// open in this one until it execs, 8 ms here.
-  fn soon<T>(f: impl Fn() -> io::Result<T>) -> T {
+  pub fn soon<T>(f: impl Fn() -> io::Result<T>) -> T {
     let t = std::time::Instant::now();
     loop {
       match f() {

@@ -459,6 +459,7 @@ mod tests {
 
   use super::*;
   use crate::vm::Config;
+  use crate::vm::tests::soon;
 
   #[test]
   fn removes() {
@@ -485,7 +486,7 @@ mod tests {
     assert!(vm.dir.exists() && vm.conf.exists());
 
     // Its own, then one whose delete was cut short after its data folder.
-    remove(&vm, data_ino(&vm)).unwrap();
+    soon(|| remove(&vm, data_ino(&vm)));
     assert!(none());
     fs::create_dir_all(&vm.state_dir).unwrap();
     fs::write(&vm.conf, "").unwrap();
