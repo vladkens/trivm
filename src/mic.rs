@@ -358,7 +358,7 @@ fn serve(vm: &Vm, rx: &mpsc::Receiver<(Vec<u8>, UnixStream)>) -> io::Result<()> 
 /// The connection of a listener registered with QEMU's display, which QEMU authenticates as its
 /// server, then asks for its properties.
 fn register(vm: &Vm) -> io::Result<dbus::Conn> {
-  let sock = qemu::display(vm)?;
+  let sock = qemu::dbus_display(vm)?;
   sock.set_read_timeout(Some(Duration::from_secs(10)))?;
   let mut display = dbus::Conn::client(sock, true)?;
   let (ours, theirs) = UnixStream::pair()?;
