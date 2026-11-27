@@ -9,7 +9,7 @@ use std::time::Duration;
 use std::{env, fs, thread};
 
 use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
-use crate::{apfs, bad, qcow2, qemu, run, ssh, vz, windows};
+use crate::{apfs, bad, cinnamon, qcow2, qemu, run, ssh, vz, windows};
 
 pub struct System {
   pub name: &'static str,
@@ -38,6 +38,8 @@ pub enum Desktop {
   Plasma,
   /// GNOME with GDM, Wayland off.
   Gnome,
+  /// Linux Mint 22.3's Cinnamon, built from Mint's sources, with LightDM and slick-greeter.
+  Cinnamon,
 }
 
 impl System {
@@ -82,6 +84,15 @@ pub const SYSTEMS: &[System] = &[
     "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
     Desktop::Xfce,
     &["xfce4", "xfce4-terminal", "lightdm", "lightdm-gtk-greeter", "xserver-xorg", "dbus-x11"],
+  ),
+  // Mint 22's base; the rest comes with Cinnamon (`cinnamon.rs`). Mint's font, its terminal, which
+  // apt left for Zutty (no accessibility), and `lpstat`, which Cinnamon's printers applet runs.
+  System::linux(
+    "ubuntu-24.04-cinnamon",
+    "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img",
+    "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
+    Desktop::Cinnamon,
+    &["xserver-xorg", "x11-utils", "dconf-cli", "fonts-ubuntu", "gnome-terminal", "cups-client"],
   ),
   System::linux(
     "ubuntu-22.04",
@@ -482,10 +493,65 @@ fn linux(vm: &Vm, sys: &System, qcow2: &Path) -> io::Result<()> {
   fs::write(seed.join("user-data"), user_data(sys, &ssh::public_key()?, &timezone()))?;
   fs::write(seed.join("meta-data"), meta_data(&vm.name, &vm.mac))?;
   fs::write(seed.join("network-config"), NETWORK_CONFIG)?;
+  if sys.desktop == Desktop::Cinnamon {
+    cinnamon_seed(&seed.join("mint"))?;
+  }
+
   let mut hdiutil = Command::new("hdiutil");
   hdiutil.args(["makehybrid", "-quiet", "-iso", "-joliet", "-default-volume-name", "cidata", "-o"]);
   run(hdiutil.arg(vm.path("seed.iso")).arg(&seed).stdin(Stdio::null()))?;
   fs::remove_dir_all(&seed)
+}
+
+/// The seed's `mint` folder: the script that builds and installs Cinnamon, Mint's packages for any
+/// architecture, and the packages built for an earlier VM, else the sources to build them from.
+fn cinnamon_seed(dir: &Path) -> io::Result<()> {
+  let copy = |from: &Path, to: &Path| -> io::Result<()> {
+    fs::create_dir_all(to)?;
+    fs::copy(from, to.join(from.file_name().unwrap_or_default()))?;
+    Ok(())
+  };
+
+  fs::create_dir_all(dir)?;
+  fs::write(dir.join("build.sh"), cinnamon::script())?;
+  for (url, sha256) in cinnamon::ALL {
+    copy(&download(url, sha256)?, &dir.join("all"))?;
+  }
+
+  let cached = cinnamon::cached();
+  if cached.exists() {
+    for x in fs::read_dir(&cached)? {
+      copy(&x?.path(), &dir.join("debs"))?;
+    }
+
+    return Ok(());
+  }
+
+  for (url, sha256) in cinnamon::SOURCES {
+    copy(&download(url, sha256)?, &dir.join("src"))?;
+  }
+
+  eprintln!("Linux Mint's Cinnamon is built in the VM this once (about 20 minutes), then kept");
+  Ok(())
+}
+
+/// After the first boot: the packages the guest built kept in the cache, and its folder gone.
+fn cinnamon_keep(vm: &Vm) -> io::Result<()> {
+  let cached = cinnamon::cached();
+  let _lock = lock(&cached)?;
+  if !cached.exists() {
+    let part = cached.with_extension("part");
+    let _ = fs::remove_dir_all(&part);
+    let from = format!("{}:{}/debs", vm.name, cinnamon::BUILT);
+    if !ssh::cp(&from, &part.to_string_lossy())?.success() {
+      return Err(bad(format!("copying Cinnamon's packages from {} failed", vm.name)));
+    }
+
+    fs::rename(&part, &cached)?;
+  }
+
+  ssh::output(vm, &format!("sudo -n rm -rf {}", cinnamon::BUILT))?;
+  Ok(())
 }
 
 fn hostname(name: &str) -> String {
@@ -526,7 +592,10 @@ fn user_data(sys: &System, key: &str, tz: &str) -> String {
   let (dm, files, run) = match sys.desktop {
     Desktop::Xfce => ("lightdm", XFCE.to_string(), String::new()),
     Desktop::Plasma => ("sddm", PLASMA.to_string(), String::new()),
-    Desktop::Gnome => ("gdm3", [GNOME, NM].concat(), [GNOME_RUN, NM_RUN].concat()),
+    Desktop::Gnome => ("gdm3", [GNOME, DCONF, NM].concat(), [GNOME_RUN, NM_RUN].concat()),
+    Desktop::Cinnamon => {
+      ("lightdm", [CINNAMON, DCONF].concat(), [CINNAMON_RUN, NM_UBUNTU].concat())
+    }
     Desktop::Own => ("", String::new(), String::new()),
   };
 
@@ -630,10 +699,6 @@ const GNOME: &str = r#"  - path: /etc/gdm3/daemon.conf
       AutomaticLoginEnable=true
       AutomaticLogin={user}
       WaylandEnable=false
-  - path: /etc/dconf/profile/user
-    content: |
-      user-db:user
-      system-db:local
   - path: /etc/dconf/db/local.d/00-trivm
     content: |
       [org/gnome/desktop/session]
@@ -650,6 +715,51 @@ const GNOME: &str = r#"  - path: /etc/gdm3/daemon.conf
       Exec=sh -c "for i in 1 2 3 4 5; do sleep 2; gdbus call -e -d org.gnome.Shell -o /org/gnome/Shell -m org.freedesktop.DBus.Properties.Set org.gnome.Shell OverviewActive '<false>'; done"
       OnlyShowIn=GNOME;
       NoDisplay=true
+"#;
+
+/// LightDM logs in to Cinnamon, its greeter Mint's slick-greeter, which sets itself as the greeter;
+/// Cinnamon's screen saver, which locks, and its power manager, which blanks, off for every user.
+const CINNAMON: &str = r#"  - path: /etc/lightdm/lightdm.conf.d/50-trivm.conf
+    content: |
+      [Seat:*]
+      autologin-user={user}
+      autologin-user-timeout=0
+      autologin-session=cinnamon
+      user-session=cinnamon
+      xserver-command=X -s 0 -dpms
+  - path: /etc/dconf/db/local.d/00-trivm
+    content: |
+      [org/cinnamon/desktop/session]
+      idle-delay=uint32 0
+      [org/cinnamon/desktop/screensaver]
+      idle-activation-enabled=false
+      lock-enabled=false
+      [org/cinnamon/settings-daemon/plugins/power]
+      sleep-display-ac=0
+"#;
+
+/// Cinnamon built or installed from the seed, which holds Mint's packages, then its defaults. Linux
+/// reads hdiutil's Rock Ridge before its Joliet, and its Rock Ridge has no names, so `norock`.
+const CINNAMON_RUN: &str = r#"  - "mkdir -p /run/seed && mount -o ro,norock LABEL=cidata /run/seed && sh /run/seed/mint/build.sh /run/seed/mint && umount /run/seed || exit 1"
+  - [dconf, update]
+"#;
+
+/// Cinnamon brings NetworkManager, which Ubuntu's netplan won't give a NIC matched by its driver
+/// (`NM`): it takes every NIC as on Ubuntu's desktop, by DHCP with the MAC address too, once
+/// netplan's rule against it and networkd go, with networkd's address, which it would only watch.
+const NM_UBUNTU: &str = r#"  - [rm, -f, /etc/netplan/50-cloud-init.yaml, /run/udev/rules.d/90-netplan.rules]
+  - [netplan, set, --origin-hint, 90-trivm, renderer=NetworkManager]
+  - [systemctl, disable, --now, systemd-networkd-wait-online.service, systemd-networkd.service, systemd-networkd.socket]
+  - [netplan, apply]
+  - [ip, address, flush, scope, global]
+  - [systemctl, restart, NetworkManager]
+"#;
+
+/// dconf's system database `local` under the user's, for a desktop's defaults for every user.
+const DCONF: &str = r#"  - path: /etc/dconf/profile/user
+    content: |
+      user-db:user
+      system-db:local
 "#;
 
 /// GNOME brings the user's D-Bus under systemd, which the user's systemd, up since trivm's first
@@ -684,6 +794,10 @@ pub fn linux_setup(vm: &Vm) -> io::Result<()> {
   eprintln!("waiting for cloud-init to install the desktop (several minutes)");
   ssh::wait(vm, Duration::from_secs(600))?;
   ssh::output(vm, CLOUD_INIT_WAIT)?;
+  if find(&vm.config.system)?.desktop == Desktop::Cinnamon {
+    cinnamon_keep(vm)?;
+  }
+
   match fs::remove_file(vm.path("seed.iso")) {
     Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
     _ => Ok(()),
@@ -807,26 +921,45 @@ pub fn windows_setup(vm: &Vm) -> io::Result<()> {
 /// Waits for the desktop: its processes running, then the screen lit, which takes macOS up to
 /// half a minute more while it is busy starting.
 pub fn desktop(vm: &Vm) -> io::Result<()> {
-  let names = match (vm.config.os(), find(&vm.config.system)?.desktop) {
+  let desktop = find(&vm.config.system)?.desktop;
+  let names = match (vm.config.os(), desktop) {
     (Os::Macos, _) => "Dock Finder WallpaperAgent",
     (_, Desktop::Xfce) => "xfce4-session xfce4-panel xfdesktop",
     (_, Desktop::Plasma) => "ksmserver kwin_x11 plasmashell",
     (_, Desktop::Gnome) => "gnome-shell",
+    (_, Desktop::Cinnamon) => "cinnamon nemo-desktop",
     _ => "",
+  };
+
+  // Cinnamon now and then crashes within a second of its start, in Mesa's llvmpipe copying a
+  // window's pixmap (`dri_set_tex_buffer2`), and its launcher runs Metacity: LightDM logs in
+  // again. So Cinnamon is up once it has run for 3 seconds.
+  let (again, steady) = match desktop {
+    Desktop::Cinnamon => (
+      format!("pgrep -u {USER} -x metacity >/dev/null && sudo -n systemctl restart lightdm; "),
+      format!("sleep 3 && pgrep -u {USER} -x cinnamon >/dev/null && "),
+    ),
+    _ => (String::new(), String::new()),
   };
 
   let script = match vm.config.os() {
     Os::Windows => windows::DESKTOP.to_string(),
     _ => format!(
-      "for i in $(seq 150); do up=1; for x in {names}; do pgrep -u {USER} -x $x >/dev/null || up=; \
-      done; [ $up ] && exit 0; sleep 2; done; echo 'no desktop in 5 minutes'; exit 1"
+      "for i in $(seq 150); do {again}up=1; for x in {names}; do pgrep -u {USER} -x $x >/dev/null \
+      || up=; done; [ $up ] && {steady}exit 0; sleep 2; done; echo 'no desktop in 5 minutes'; exit 1"
     ),
   };
 
   ssh::output(vm, &script)?;
 
-  // A dark wallpaper would never count as lit, hence no error.
-  for _ in 0..60 {
+  // A dark wallpaper would never count as lit, hence no error. Mint's is dark (a third of it lit),
+  // and Cinnamon draws its desktop as it starts.
+  let wait = match desktop {
+    Desktop::Cinnamon => 0,
+    _ => 60,
+  };
+
+  for _ in 0..wait {
     let lit = crate::ask(vm, "lit", "").ok().and_then(|x| x.parse::<f64>().ok());
     if lit.is_some_and(|x| x > 0.5) {
       break;
@@ -913,12 +1046,20 @@ mod tests {
         Desktop::Xfce => ("lightdm", "autologin-user=user\n", false),
         Desktop::Plasma => ("sddm", "[Autologin]\n      User=user\n", false),
         Desktop::Gnome => ("gdm3", "AutomaticLogin=user\n", true),
+        Desktop::Cinnamon => ("lightdm", "autologin-session=cinnamon\n", true),
         Desktop::Own => unreachable!(),
       };
 
       assert!(text.contains(&format!("[systemctl, enable, {dm}]\n")), "{}", sys.name);
       assert!(text.contains(login), "{}", sys.name);
       assert_eq!(text.contains("[netplan, apply]\n"), nm, "{}", sys.name);
+      let mint =
+        text.contains("norock LABEL=cidata /run/seed && sh /run/seed/mint/build.sh /run/seed/mint");
+      assert_eq!(mint, sys.desktop == Desktop::Cinnamon, "{}", sys.name);
+      let ubuntu = text.contains("renderer=NetworkManager]\n");
+      assert_eq!(ubuntu, sys.desktop == Desktop::Cinnamon, "{}", sys.name);
+      assert_eq!(text.contains("renderer: NetworkManager\n"), nm && !ubuntu, "{}", sys.name);
+      assert_eq!(text.contains("system-db:local\n"), nm, "{}", sys.name);
     }
 
     assert_eq!(

@@ -2,12 +2,14 @@
 //! trivm: macOS, Linux and Windows VMs on Apple silicon for coding agents to test apps in. A
 //! macOS or Linux VM runs in a process of its own (`vz.rs`), a Windows VM is QEMU's (`qemu.rs`);
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
-//! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), `clone`
-//! and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app under test its macOS
-//! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
+//! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`,
+//! `cinnamon.rs`), `clone` and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app
+//! under test its macOS permissions (`permissions.rs`), and `ui` reads the desktop's elements
+//! (`ui.rs`).
 
 mod apfs;
 mod args;
+mod cinnamon;
 mod clone;
 mod display;
 mod permissions;

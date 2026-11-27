@@ -8,6 +8,7 @@ the terminal. When you want to look, `trivm open` shows the VM in a window.
 
 - macOS 15, 26 and 27 on Apple's Virtualization.framework.
 - Ubuntu 24.04 (Xfce) and 22.04 (KDE Plasma), Debian 13 (GNOME) and Fedora 45 (Xfce), on X11.
+- Linux Mint 22.3's desktop, Cinnamon 6.6, built from Mint's sources on Ubuntu 24.04.
 - Windows 11 Pro on QEMU with HVF, from the ESD of Microsoft's Media Creation Tool.
 - Systems from their own sources (Apple's IPSWs, the distros' cloud images, Microsoft's ESD),
   pinned by SHA-256.
@@ -30,6 +31,7 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 trivm create macos-27          # downloads 25 GB once, installs, starts: about 20 minutes
 trivm create macos-15          # the last IPSW of each older macOS: 15.6.1, 26.6.2
 trivm create ubuntu-24.04      # downloads 600 MB once: about 3 minutes
+trivm create ubuntu-24.04-cinnamon   # Linux Mint's desktop: built once in 20 minutes, then 3
 trivm list
 
 trivm exec macos-27 -- sw_vers
@@ -98,6 +100,22 @@ trivm ui macos-27 --app Wavo
 #     radiobutton "Models" 710,110 56x48
 #   combobox "Microphone" = "Automatic" 939,211 111x24
 trivm click macos-27 --name Models   # raises Wavo's window first if another is in front
+```
+
+### Linux Mint's desktop
+
+Linux Mint has no arm64 build, and an app's bugs on Mint are its desktop's: `ubuntu-24.04-cinnamon`
+is Mint 22.3's Cinnamon, built from Mint's own source packages on Ubuntu 24.04, Mint 22's base,
+with Mint's slick-greeter, themes and fonts, on X11. The first `create` builds it in the VM and
+keeps the packages in the cache (8 MB) for the next. Mint's own apps and tools aren't in it.
+Cinnamon's settings are gsettings, such as its text scaling and its keyboard layouts, switched
+with Super+Space; which layout is on, Cinnamon tells over D-Bus (its gsettings' `current` stays 0):
+
+```sh
+trivm exec ubuntu-24.04-cinnamon 'gsettings set org.cinnamon.desktop.interface text-scaling-factor 1.5'
+trivm exec ubuntu-24.04-cinnamon "gsettings set org.cinnamon.desktop.input-sources sources \"[('xkb', 'us'), ('xkb', 'ru')]\""
+trivm key ubuntu-24.04-cinnamon super+space
+trivm exec ubuntu-24.04-cinnamon 'gdbus call --session --dest org.Cinnamon --object-path /org/Cinnamon --method org.Cinnamon.GetInputSources'   # ru: true
 ```
 
 ### Windows
