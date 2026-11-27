@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::io::{self, Read, Seek, Write};
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::{env, fs, process};
+use std::{env, fmt, fs, process};
 
 use crate::bad;
 
@@ -73,6 +73,8 @@ pub struct Config {
   pub memory: u32,
   /// GiB.
   pub disk: u32,
+  /// `screen`, set by the person; else the system's.
+  pub screen: Option<Screen>,
 }
 
 impl Config {
@@ -103,6 +105,10 @@ impl Config {
     self.disk as u64 * GIB
   }
 
+  pub fn screen(&self) -> Screen {
+    self.screen.unwrap_or(Screen::of(self.os()))
+  }
+
   fn parse(text: &str) -> io::Result<Self> {
     let get = |key: &str| {
       let line = text.lines().find_map(|x| {
@@ -115,17 +121,89 @@ impl Config {
       get(key)?.parse().map_err(|_| bad(format!("{key} is not a number")))
     };
 
-    Ok(Self {
+    let mut c = Self {
       system: get("system")?,
       cpus: number("cpus")?,
       memory: number("memory")?,
       disk: number("disk")?,
-    })
+      screen: None,
+    };
+    c.screen = get("screen").ok().map(|x| Screen::parse(&x, c.os())).transpose()?;
+    Ok(c)
   }
 
   fn text(&self) -> String {
-    let Self { system, cpus, memory, disk } = self;
-    format!("system = {system}\ncpus = {cpus}\nmemory = {memory}\ndisk = {disk}\n")
+    let Self { system, cpus, memory, disk, screen } = self;
+    let text = format!("system = {system}\ncpus = {cpus}\nmemory = {memory}\ndisk = {disk}\n");
+    match screen {
+      Some(x) => format!("{text}screen = {x}\n"),
+      None => text,
+    }
+  }
+}
+
+/// A guest's screen: its size in points, a shot's pixels, and the display's pixels per point.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Screen {
+  pub width: f64,
+  pub height: f64,
+  pub scale: f64,
+}
+
+impl Screen {
+  /// The system's: on macOS twice 1600×900 points at a Retina density, which it draws HiDPI.
+  pub fn of(os: Os) -> Self {
+    match os {
+      Os::Macos => Self { width: 1600.0, height: 900.0, scale: 2.0 },
+      Os::Linux | Os::Windows => Self { width: 1920.0, height: 1080.0, scale: 1.0 },
+    }
+  }
+
+  /// `<w>x<h>[@<scale>]`, the scale the system's when left out: macOS draws at 1x or 2x, Linux's
+  /// desktops at 1x here, as VZ gives them no density and each scales by its own settings, and
+  /// Windows at 1x, its scaling the user's setting.
+  pub fn parse(x: &str, os: Os) -> io::Result<Self> {
+    let wrong = || bad(format!("not a screen size: {x}, e.g. 1152x720@2"));
+    let num = |x: &str| x.parse::<u32>().map_err(|_| wrong());
+    let (size, scale) = x.split_once('@').map_or((x, None), |(a, b)| (a, Some(b)));
+    let (w, h) = size.split_once('x').ok_or_else(wrong)?;
+    let (w, h) = (num(w)?, num(h)?);
+    let scale = scale.map(num).transpose()?.unwrap_or(Self::of(os).scale as u32);
+
+    match (os, scale) {
+      (Os::Macos, 1 | 2) | (Os::Linux | Os::Windows, 1) => {}
+      (Os::Macos, _) => return Err(bad(format!("{x}: macOS draws at 1x or 2x"))),
+      (Os::Linux, _) => {
+        return Err(bad(format!("{x}: Linux draws at 1x here; its desktop has its own scale")));
+      }
+      (Os::Windows, _) => {
+        return Err(bad(format!("{x}: Windows draws at 1x here; its scaling is the user's own")));
+      }
+    }
+
+    // A mode of Linux's virtio-gpu is CVT's, a multiple of 8 pixels wide: 1366 draws 1360.
+    // Windows' viogpudo takes the scanout's size as it is.
+    if os == Os::Linux && w % 8 != 0 {
+      return Err(bad(format!("{x}: Linux's width is a multiple of 8, as {}x{h}", w / 8 * 8)));
+    }
+
+    if w < 640 || h < 480 || w > 7680 / scale || h > 4320 / scale {
+      return Err(bad(format!("{x}: from 640x480 points up to 7680x4320 pixels")));
+    }
+
+    // Windows' viogpudo showed nothing at 7680×4320, whose frame it keeps in 133 MB of non-paged
+    // pool; it draws 5120×2880.
+    if os == Os::Windows && (w > 5120 || h > 2880) {
+      return Err(bad(format!("{x}: Windows draws up to 5120x2880 here")));
+    }
+
+    Ok(Self { width: w as f64, height: h as f64, scale: scale as f64 })
+  }
+}
+
+impl fmt::Display for Screen {
+  fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    write!(f, "{}x{}@{}", self.width, self.height, self.scale)
   }
 }
 
@@ -582,11 +660,23 @@ pub mod tests {
 
   #[test]
   fn config() {
-    let c = Config { system: "macos-27".into(), cpus: 4, memory: 8, disk: 64 };
+    let c = Config { system: "macos-27".into(), cpus: 4, memory: 8, disk: 64, screen: None };
     assert_eq!(c.text(), "system = macos-27\ncpus = 4\nmemory = 8\ndisk = 64\n");
     assert_eq!(Config::parse(&c.text()).unwrap(), c);
     assert_eq!(c.os(), Os::Macos);
     assert_eq!(c.memory_bytes(), 8 << 30);
+    assert_eq!(c.screen(), Screen { width: 1600.0, height: 900.0, scale: 2.0 });
+
+    // A screen set: written and read back; on Linux at 1x when left out.
+    let retina = Screen { width: 1152.0, height: 720.0, scale: 2.0 };
+    let set = Config { screen: Some(retina), ..c.clone() };
+    assert!(set.text().ends_with("disk = 64\nscreen = 1152x720@2\n"));
+    assert_eq!(Config::parse(&set.text()).unwrap(), set);
+    let linux = Config::parse("system = debian-13\ncpus=1\nmemory=2\ndisk=3\nscreen = 1280x800\n");
+    assert_eq!(linux.unwrap().screen().to_string(), "1280x800@1");
+    assert!(
+      Config::parse("system = debian-13\ncpus=1\nmemory=2\ndisk=3\nscreen = 1280\n").is_err()
+    );
 
     // Made by VZ's provisioning from 27 on.
     assert!(c.provisioned());
@@ -602,10 +692,65 @@ pub mod tests {
   }
 
   #[test]
+  fn screens() {
+    let at = |x: &str, os: Os| Screen::parse(x, os).map(|x| x.to_string());
+    for (x, os, want) in [
+      ("1152x720@2", Os::Macos, "1152x720@2"),
+      ("1152x720", Os::Macos, "1152x720@2"),
+      ("1440x900@1", Os::Macos, "1440x900@1"),
+      ("1280x800", Os::Linux, "1280x800@1"),
+      ("640x480@1", Os::Linux, "640x480@1"),
+      ("3840x2160@2", Os::Macos, "3840x2160@2"),
+      ("1470x956", Os::Macos, "1470x956@2"),
+      ("1366x768", Os::Windows, "1366x768@1"),
+      ("1280x800@1", Os::Windows, "1280x800@1"),
+      ("3840x2160", Os::Windows, "3840x2160@1"),
+      ("5120x2880", Os::Windows, "5120x2880@1"),
+      ("7680x4320", Os::Linux, "7680x4320@1"),
+    ] {
+      assert_eq!(at(x, os).unwrap(), want);
+    }
+
+    for (x, os) in [
+      ("1152x720@3", Os::Macos),
+      ("1280x800@2", Os::Linux),
+      ("1152", Os::Macos),
+      ("x720", Os::Macos),
+      ("1152x720@", Os::Macos),
+      ("1152 x 720", Os::Macos),
+      ("-1x720", Os::Macos),
+      ("639x480", Os::Linux),
+      ("3841x2160@2", Os::Macos),
+      ("7680x4321", Os::Linux),
+      ("2147483648x480@2", Os::Macos),
+      ("4294967295x480", Os::Linux),
+      ("1366x768", Os::Linux),
+      ("1366x768@2", Os::Windows),
+      ("639x480", Os::Windows),
+      ("7680x4320", Os::Windows),
+      ("5128x2880", Os::Windows),
+    ] {
+      assert!(at(x, os).is_err(), "{x}");
+    }
+
+    assert_eq!(
+      at("1280x800@2", Os::Linux).unwrap_err().to_string(),
+      "1280x800@2: Linux draws at 1x here; its desktop has its own scale"
+    );
+    assert_eq!(
+      at("1280x800@2", Os::Windows).unwrap_err().to_string(),
+      "1280x800@2: Windows draws at 1x here; its scaling is the user's own"
+    );
+    let odd = at("1366x768", Os::Linux).unwrap_err().to_string();
+    assert_eq!(odd, "1366x768: Linux's width is a multiple of 8, as 1360x768");
+  }
+
+  #[test]
   fn claim() {
     use std::os::unix::fs::PermissionsExt;
     let root = std::env::temp_dir().join(format!("trivm-claim-{}", process::id()));
-    let config = Config { system: "ubuntu-24.04".into(), cpus: 1, memory: 2, disk: 3 };
+    let config =
+      Config { system: "ubuntu-24.04".into(), cpus: 1, memory: 2, disk: 3, screen: None };
     let mac = "02:00:00:00:00:01";
     let at = |name: &str| Vm {
       conf: root.join(format!("config/{name}.conf")),

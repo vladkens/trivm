@@ -21,7 +21,7 @@ use objc2_foundation::{NSArray, NSData, NSDate, NSError, NSRunLoop, NSString, NS
 use objc2_virtualization::*;
 
 use crate::bad;
-use crate::display::{self, Act, Display, Screen};
+use crate::display::{self, Act, Display};
 use crate::vm::{Os, PASSWORD, USER, Vm};
 
 pub fn url(path: &Path) -> Retained<NSURL> {
@@ -57,14 +57,6 @@ fn wait<T>(rx: &mpsc::Receiver<T>) -> T {
   }
 }
 
-pub fn screen(os: Os) -> Screen {
-  match os {
-    // Twice 1600×900 points at a Retina density: macOS draws it HiDPI.
-    Os::Macos => Screen { width: 1600.0, height: 900.0, scale: 2.0 },
-    Os::Linux | Os::Windows => Screen { width: 1920.0, height: 1080.0, scale: 1.0 },
-  }
-}
-
 // MARK: Configuration
 
 pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
@@ -73,7 +65,7 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
     return Err(bad(format!("{} runs on QEMU", vm.name)));
   }
 
-  let screen = screen(os);
+  let screen = vm.config.screen();
   let (w, h) = ((screen.width * screen.scale) as isize, (screen.height * screen.scale) as isize);
 
   // SAFETY: plain configuration objects, used on this thread only.
@@ -129,7 +121,8 @@ pub fn config(vm: &Vm) -> io::Result<Retained<VZVirtualMachineConfiguration>> {
             VZMacGraphicsDisplayConfiguration::alloc(),
             w,
             h,
-            220,
+            // 220 at 2x, a Retina density, at which macOS draws a point as 2 pixels; 110 at 1x.
+            (110.0 * screen.scale) as isize,
           );
         let g = VZMacGraphicsDeviceConfiguration::new();
         g.setDisplays(&NSArray::from_retained_slice(&[d]));
@@ -411,7 +404,7 @@ pub fn serve(vm: Vm, recovery: bool) -> io::Result<()> {
     _ => unsafe { machine.startWithCompletionHandler(&block) },
   }
 
-  let display = Display::new(mtm, &machine, screen(vm.config.os()), &vm.name);
+  let display = Display::new(mtm, &machine, vm.config.screen(), &vm.name);
   STATE.with(|s| *s.borrow_mut() = Some(State { machine, display }));
 
   let sock = vm.state("ctl.sock");
@@ -506,12 +499,12 @@ fn handle(req: &str) -> io::Result<String> {
       Ok(String::new())
     }),
 
-    ["shot"] => {
-      let path = body.to_string();
+    ["shot"] | ["shot", "full"] => {
+      let (path, full) = (body.to_string(), words.len() == 2);
       // A display just shown needs a moment for its first frame.
       for _ in 0..50 {
         let path = path.clone();
-        match main(move |s, _| s.display.shot(Path::new(&path))) {
+        match main(move |s, _| s.display.shot(Path::new(&path), full)) {
           Ok((w, h)) => return Ok(format!("{w}x{h}")),
           Err(_) => thread::sleep(Duration::from_millis(100)),
         }

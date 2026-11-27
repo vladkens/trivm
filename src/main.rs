@@ -54,9 +54,9 @@ fn start_cli() -> io::Result<ExitCode> {
   match args::parse(env::args().skip(1))? {
     Cmd::Help => print!("{}", args::HELP),
     Cmd::Version => println!("trivm {}", env!("CARGO_PKG_VERSION")),
-    Cmd::Create { system, name, cpus, memory, disk } => {
+    Cmd::Create { system, name, cpus, memory, disk, screen } => {
       signed()?;
-      system::create(&system, name, cpus, memory, disk)?;
+      system::create(&system, name, cpus, memory, disk, screen.as_deref())?;
     }
     Cmd::Start { vm } => start(&vm)?,
     Cmd::Stop { vm, force } => stop(&Vm::open(&vm)?, force)?,
@@ -77,14 +77,14 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Ssh { vm } => return Ok(status(ssh::interactive(&Vm::open(&vm)?)?)),
     Cmd::Cp { src, dst } => return Ok(status(ssh::cp(&src, &dst)?)),
     Cmd::Ip { vm } => println!("{}", ssh::address(&Vm::open(&vm)?)?),
-    Cmd::Shot { vm, file } => {
+    Cmd::Shot { vm, file, full } => {
       let vm = Vm::open(&vm)?;
       let path = match file {
         Some(x) => std::path::absolute(x)?,
         None => env::temp_dir().join(format!("trivm-{}-{}.png", vm.name, unix_ms())),
       };
 
-      ask(&vm, "shot", &path.to_string_lossy())?;
+      ask(&vm, if full { "shot full" } else { "shot" }, &path.to_string_lossy())?;
       println!("{}", path.display());
     }
     Cmd::Click { vm, x, y, right, double } => {
@@ -201,7 +201,8 @@ pub fn start(name: &str) -> io::Result<()> {
     }
   };
 
-  if vm.pid().is_none() {
+  let ran = vm.pid().is_some();
+  if !ran {
     match vm.config.os() {
       Os::Windows => {
         let cds = system::windows_cds(&vm)?;
@@ -231,6 +232,15 @@ pub fn start(name: &str) -> io::Result<()> {
   }
 
   system::desktop(&vm)?;
+  // The screen of a QEMU this start ran, or Windows' setup restarted; a running VM's may differ.
+  if vm.config.os() == Os::Windows && vm.gpu && (!ran || vm.setup) {
+    let (w, h) = (vm.config.screen().width, vm.config.screen().height);
+    let was = ssh::output(&vm, &windows::screen(w, h))?;
+    if !was.is_empty() {
+      eprintln!("{name}: Windows drew {was}, set to {w}x{h}");
+    }
+  }
+
   // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
   if vm.setup {
     vm.setup = false;

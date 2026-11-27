@@ -12,9 +12,13 @@ Usage: trivm <command> [args]
 
 VMs:
   create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]
+         [--screen <w>x<h>[@<scale>]]
                           install a system unattended and start it; systems: macos-27,
                           macos-26, macos-15, ubuntu-24.04, ubuntu-22.04, debian-13, fedora-45,
-                          windows-11 (needs brew install qemu swtpm wimlib)
+                          windows-11 (needs brew install qemu swtpm wimlib). --screen: its size
+                          in points, a shot's pixels, at 1 or 2 pixels each on macOS, 1 on
+                          Linux and Windows; 1600x900@2 on macOS and 1920x1080 on the others
+                          when left out
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
@@ -46,7 +50,9 @@ Commands and files, through SSH:
   ip <vm>                 the guest's address
 
 The screen, from the host:
-  shot <vm> [file]        a PNG of the screen, to `file` or a temporary file, its path printed
+  shot <vm> [file] [--full]
+                          a PNG of the screen, to `file` or a temporary file, its path printed;
+                          --full at the display's own pixels, a shot's times the scale
   click <vm> <x> <y> [--right] [--double]
                           click at a point in the shot's pixels
   move <vm> <x> <y>       move the pointer there
@@ -64,10 +70,14 @@ The desktop's elements, read by agent-desktop, which trivm puts in the guest at 
 
 The guest's user is `user`, password `1234`, sudo without one (an administrator on Windows).
 Files, by the XDG Base Directory spec: each VM's settings in ~/.config/trivm/<vm>.conf
-(XDG_CONFIG_HOME), its disks in ~/.local/share/trivm (XDG_DATA_HOME), downloads in
-~/.cache/trivm (XDG_CACHE_HOME), logs, locks and sockets in ~/.local/state/trivm
-(XDG_STATE_HOME).
+(XDG_CONFIG_HOME; cpus, memory and screen are read at each start), its disks in
+~/.local/share/trivm (XDG_DATA_HOME), downloads in ~/.cache/trivm (XDG_CACHE_HOME), logs, locks
+and sockets in ~/.local/state/trivm (XDG_STATE_HOME).
 ";
+
+/// `create`'s arguments, for its usage.
+const CREATE: &str =
+  "<system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>] [--screen <w>x<h>[@<s>]]";
 
 #[derive(Debug, PartialEq)]
 pub enum Cmd {
@@ -79,6 +89,7 @@ pub enum Cmd {
     cpus: Option<u32>,
     memory: Option<u32>,
     disk: Option<u32>,
+    screen: Option<String>,
   },
   Start {
     vm: String,
@@ -111,6 +122,7 @@ pub enum Cmd {
   Shot {
     vm: String,
     file: Option<String>,
+    full: bool,
   },
   Click {
     vm: String,
@@ -209,11 +221,13 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
     match x.as_str() {
       // `type` takes any text, dashes included.
       _ if cmd == "type" => pos.push(x),
-      "--name" | "--app" | "--cpus" | "--memory" | "--disk" => {
+      "--name" | "--app" | "--cpus" | "--memory" | "--disk" | "--screen" => {
         let value = it.next().ok_or_else(|| bad(format!("{x}: no value given")))?;
         flags.push((x, Some(value)));
       }
-      "--force" | "--right" | "--double" | "--recovery" | "-h" | "--help" => flags.push((x, None)),
+      "--force" | "--right" | "--double" | "--full" | "--recovery" | "-h" | "--help" => {
+        flags.push((x, None))
+      }
       _ if x.starts_with("--") => return Err(bad(format!("unknown flag {x}"))),
       _ => pos.push(x),
     }
@@ -244,13 +258,14 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
   let cmd = match cmd.as_str() {
     "-V" | "--version" | "version" => Cmd::Version,
     "create" => {
-      want(1, "<system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]")?;
+      want(1, CREATE)?;
       Cmd::Create {
         system: pos[0].clone(),
         name: value("--name"),
         cpus: number("--cpus")?,
         memory: number("--memory")?,
         disk: number("--disk")?,
+        screen: value("--screen"),
       }
     }
     "start" | "stop" | "delete" | "open" | "ssh" | "ip" | "_run" => {
@@ -293,8 +308,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
       Cmd::Cp { src: pos[0].clone(), dst: pos[1].clone() }
     }
     "shot" => match pos.len() {
-      1 | 2 => Cmd::Shot { vm: pos[0].clone(), file: pos.get(1).cloned() },
-      _ => return Err(bad("usage: trivm shot <vm> [file]")),
+      1 | 2 => Cmd::Shot { vm: pos[0].clone(), file: pos.get(1).cloned(), full: flag("--full") },
+      _ => return Err(bad("usage: trivm shot <vm> [file] [--full]")),
     },
 
     "click" if value("--name").is_some() => {
@@ -353,13 +368,14 @@ mod tests {
 
     assert_eq!(args("stop a --force").unwrap(), Cmd::Stop { vm: "a".into(), force: true });
     assert_eq!(
-      args("create macos-27 --name m --disk 80").unwrap(),
+      args("create macos-27 --name m --disk 80 --screen 1152x720@2").unwrap(),
       Cmd::Create {
         system: "macos-27".into(),
         name: Some("m".into()),
         cpus: None,
         memory: None,
         disk: Some(80),
+        screen: Some("1152x720@2".into()),
       }
     );
     assert!(args("create windows-11 --iso /x/w.iso").is_err());
@@ -367,7 +383,11 @@ mod tests {
       args("click a 10 20.5 --double").unwrap(),
       Cmd::Click { vm: "a".into(), x: 10.0, y: 20.5, right: false, double: true }
     );
-    assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None });
+    assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None, full: false });
+    assert_eq!(
+      args("shot a x.png --full").unwrap(),
+      Cmd::Shot { vm: "a".into(), file: Some("x.png".into()), full: true }
+    );
 
     assert_eq!(args("ui a").unwrap(), Cmd::Ui { vm: "a".into(), app: None });
     assert_eq!(

@@ -132,6 +132,35 @@ pub const DESKTOP: &str = r#"for ($i = 0; $i -lt 150; $i++) {
 }
 'no desktop in 5 minutes'; exit 1"#;
 
+/// Sets the screen's mode, unless Windows draws at it, and says the one it had: Windows keeps a
+/// monitor's mode by an id holding one byte of its EDID, the checksum, so a size may get another's,
+/// and takes none from an EDID that names it in no first block. In the desktop's session.
+pub fn screen(width: f64, height: f64) -> String {
+  SCREEN.replace("WIDTH", &width.to_string()).replace("HEIGHT", &height.to_string())
+}
+
+const SCREEN: &str = r#"$want = 'WIDTHxHEIGHT'
+function mode { $c = @(Get-CimInstance Win32_VideoController)[0]; '{0}x{1}' -f $c.CurrentHorizontalResolution, $c.CurrentVerticalResolution }
+$was = mode
+if ($was -eq $want) { exit 0 }
+# DEVMODEW, 220 bytes: dmSize at 68, dmFields at 72, dmPelsWidth at 172, dmPelsHeight at 176;
+# CDS_UPDATEREGISTRY keeps the mode for the monitor. The display's name a null pointer, which
+# PowerShell's $null as a string isn't.
+$set = @'
+$u = Add-Type -Name Display -Namespace Trivm -PassThru -MemberDefinition '[DllImport("user32.dll")] public static extern int ChangeDisplaySettingsExW(IntPtr name, byte[] mode, IntPtr hwnd, int flags, IntPtr param);'
+$m = New-Object byte[] 220
+[BitConverter]::GetBytes([int16]220).CopyTo($m, 68)
+[BitConverter]::GetBytes(0x180000).CopyTo($m, 72)
+[BitConverter]::GetBytes(WIDTH).CopyTo($m, 172)
+[BitConverter]::GetBytes(HEIGHT).CopyTo($m, 176)
+exit $u::ChangeDisplaySettingsExW([IntPtr]::Zero, $m, [IntPtr]::Zero, 1, [IntPtr]::Zero)
+'@
+$enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($set))
+desktop powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $enc
+for ($i = 0; $i -lt 40 -and (mode) -ne $want; $i++) { Start-Sleep -Milliseconds 250 }
+if ((mode) -ne $want) { "Windows draws at $(mode), not $want"; exit 1 }
+$was"#;
+
 // MARK: The install
 
 /// The seed's file that the first logon runs; Setup finds `autounattend.xml` beside it.
@@ -314,6 +343,15 @@ mod tests {
     let v = |x: &[&str]| x.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     assert_eq!(line(&v(&["Get-Date | Format-List"])), "Get-Date | Format-List");
     assert_eq!(line(&v(&["cmd", "/c", "it's"])), "& 'cmd' '/c' 'it''s'");
+  }
+
+  #[test]
+  fn screens() {
+    let script = screen(1366.0, 768.0);
+    assert!(script.starts_with("$want = '1366x768'\n"));
+    assert!(script.contains("GetBytes(1366).CopyTo($m, 172)\n[BitConverter]::GetBytes(768)"));
+    assert!(!script.contains("WIDTH") && !script.contains("HEIGHT"));
+    assert!(powershell(&script).is_ok());
   }
 
   #[test]
