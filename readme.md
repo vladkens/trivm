@@ -128,6 +128,18 @@ was locked restarts once at `start`, as macOS would lock it again. Coordinates f
 pixels of a shot. The guest's user is `user`, password `1234`, sudo without a password (an
 administrator on Windows).
 
+A macOS VM has no developer tools: `python3`, `git`, `make` and `cc` are Apple's stubs, which fail
+and open a dialog offering the Command Line Tools. It stays on the desktop, in shots and `ui`,
+until quit. The tools install from Apple with no dialog, a 500 MB download, by the label
+`softwareupdate` lists while a marker file says they were asked for:
+
+```sh
+trivm exec macos-27 -- osascript -e 'quit app "Install Command Line Developer Tools"'
+trivm exec macos-27 'touch /tmp/.com.apple.dt.CommandLineTools.installondemand.in-progress &&
+  softwareupdate -l | grep "Label: Command Line Tools"'
+trivm exec macos-27 -- sudo softwareupdate -i 'Command Line Tools for Xcode 27.2-27.2'
+```
+
 ## Files
 
 trivm keeps its files as Linux tools do, by the XDG Base Directory spec, each folder moved by its
