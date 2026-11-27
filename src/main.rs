@@ -192,7 +192,8 @@ fn signed() -> io::Result<()> {
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
   let mut vm = Vm::open(name)?;
-  if vm.pid().is_none() {
+  let boots = vm.pid().is_none();
+  if boots {
     match vm.config.os() {
       Os::Windows => {
         let cds = system::windows_cds(&vm)?;
@@ -217,8 +218,12 @@ pub fn start(name: &str) -> io::Result<()> {
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
+  // Unlocked at a boot of this start's only: a restart would close what a running VM runs.
   if vm.config.os() == Os::Macos {
     system::macos_idle(&vm)?;
+    if boots {
+      system::macos_unlock(&vm)?;
+    }
   }
 
   system::desktop(&vm)?;

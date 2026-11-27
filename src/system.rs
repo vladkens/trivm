@@ -451,11 +451,17 @@ sudo -n ln -sf "/var/db/timezone/zoneinfo/$1" /etc/localtime
 "#;
 
 /// macOS 27's restart after its setup, at the boot that made the user only: a start meanwhile may
-/// have done it. In the background, so a shutdown that stalls is the caller's to time out.
-const MAC_RESTART: &str = r#"boot=$(sysctl -n kern.boottime | sed 's/^{ sec = \([0-9]*\),.*/\1/')
+/// have done it.
+const MAC_MADE: &str = r#"boot=$(sysctl -n kern.boottime | sed 's/^{ sec = \([0-9]*\),.*/\1/')
 [ "$(stat -f %B "$HOME")" -ge "$boot" ] || exit 0
-sudo -n nohup shutdown -r now >/dev/null 2>&1 &
-echo restarting
+"#;
+
+/// loginwindow's mark of a locked screen, set when it locks and cleared when unlocked, so kept by a
+/// shutdown while locked: the next boot's automatic login sees it and locks again at once. Deleted,
+/// the boot after logs in unlocked.
+const MAC_LOCKED: &str = r#"prefs=/Library/Preferences/com.apple.loginwindow
+[ "$(defaults read $prefs autoLoginUserScreenLocked 2>/dev/null)" = 1 ] || exit 0
+sudo -n defaults delete $prefs autoLoginUserScreenLocked || exit 1
 "#;
 
 /// The first boot of a new macOS VM, which made the user: the key, then the tuning. macOS 27 made
@@ -473,12 +479,27 @@ pub fn macos_setup(vm: &Vm) -> io::Result<()> {
   }
 
   macos_idle(vm)?;
+  macos_restart(vm, MAC_MADE, "after its setup")
+}
+
+/// A screen locked at shutdown locks again at each boot, until someone types the password: at a
+/// boot that came up so, `MAC_LOCKED`'s mark goes and macOS restarts unlocked. No API unlocks a
+/// session; the password typed through the display needs the lock screen's field to take the keys.
+pub fn macos_unlock(vm: &Vm) -> io::Result<()> {
+  macos_restart(vm, MAC_LOCKED, "to unlock its screen")
+}
+
+/// Restarts macOS unless `check`, a script, exits first, and waits for the new boot, told by
+/// `kern.boottime`. The shutdown runs in the background, so one that stalls times out here.
+fn macos_restart(vm: &Vm, check: &str, why: &str) -> io::Result<()> {
   let boot = || ssh::output(vm, "sysctl -n kern.boottime");
   let was = boot()?;
-  if ssh::output(vm, MAC_RESTART)? != "restarting" {
+  let script = format!("{check}sudo -n nohup shutdown -r now >/dev/null 2>&1 &\necho restarting");
+  if ssh::output(vm, &script)? != "restarting" {
     return Ok(());
   }
 
+  eprintln!("restarting {} {why}", vm.name);
   let t = Instant::now();
   while t.elapsed() < Duration::from_secs(300) {
     ssh::wait(vm, Duration::from_secs(300))?;
@@ -489,7 +510,7 @@ pub fn macos_setup(vm: &Vm) -> io::Result<()> {
     thread::sleep(Duration::from_secs(2));
   }
 
-  Err(bad(format!("{} didn't restart after its setup", vm.name)))
+  Err(bad(format!("{} didn't restart {why}", vm.name)))
 }
 
 /// No screen saver or lock, at each start: macOS keeps both per host, lost to a clone (a new one).
@@ -938,7 +959,8 @@ mod tests {
     assert!(lint("plutil", &["-lint", "-s", "-"], &mac_daemon()));
     assert!(mac_daemon().contains("<string>/private/var/db/trivm-setup.sh</string>"));
     assert!(lint("sh", &["-n"], MAC_TUNE));
-    assert!(lint("sh", &["-n"], MAC_RESTART));
+    assert!(lint("sh", &["-n"], MAC_MADE));
+    assert!(lint("sh", &["-n"], MAC_LOCKED));
   }
 
   #[test]
