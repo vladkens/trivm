@@ -26,8 +26,8 @@ pub struct System {
   pub packages: &'static [&'static str],
 }
 
-/// The desktop a system starts to, logged in automatically; Linux's on X11, so an app started
-/// over SSH shows on `DISPLAY=:0`.
+/// The desktop a system starts to, logged in automatically; Linux's on X11, where an app started
+/// over SSH shows on `DISPLAY=:0`, or on Wayland.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Desktop {
   /// The system's own: macOS's, Windows'.
@@ -38,6 +38,17 @@ pub enum Desktop {
   Plasma,
   /// GNOME with GDM, Wayland off.
   Gnome,
+  /// GNOME with GDM, on Wayland.
+  GnomeWayland,
+  /// KDE Plasma 6 with SDDM, on Wayland.
+  PlasmaWayland,
+}
+
+impl Desktop {
+  /// Whether it is on Wayland, where an app doesn't know where its windows are.
+  pub fn wayland(self) -> bool {
+    matches!(self, Desktop::GnomeWayland | Desktop::PlasmaWayland)
+  }
 }
 
 impl System {
@@ -82,6 +93,39 @@ pub const SYSTEMS: &[System] = &[
     "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
     Desktop::Xfce,
     &["xfce4", "xfce4-terminal", "lightdm", "lightdm-gtk-greeter", "xserver-xorg", "dbus-x11"],
+  ),
+  System::linux(
+    "ubuntu-26.04-gnome",
+    "https://cloud-images.ubuntu.com/releases/resolute/release-20261108/ubuntu-26.04-server-cloudimg-arm64.img",
+    "cf3b8472b84e7de37cdc2d2e9a9bf82b3edf0ab97113a1422eff048f26688e2f",
+    Desktop::GnomeWayland,
+    &[
+      "gdm3",
+      "ubuntu-session",
+      "ubuntu-settings",
+      "gnome-shell-ubuntu-extensions",
+      "yaru-theme-gtk",
+      "yaru-theme-icon",
+      "fonts-ubuntu",
+      "ptyxis",
+      "nautilus",
+      "x11-utils",
+    ],
+  ),
+  System::linux(
+    "ubuntu-26.04-kde",
+    "https://cloud-images.ubuntu.com/releases/resolute/release-20261108/ubuntu-26.04-server-cloudimg-arm64.img",
+    "cf3b8472b84e7de37cdc2d2e9a9bf82b3edf0ab97113a1422eff048f26688e2f",
+    Desktop::PlasmaWayland,
+    &[
+      "kde-plasma-desktop",
+      "plasma-session-wayland",
+      "kwin-wayland",
+      "sddm",
+      "sddm-theme-breeze",
+      "konsole",
+      "x11-utils",
+    ],
   ),
   System::linux(
     "ubuntu-22.04",
@@ -519,14 +563,18 @@ ethernets:
     dhcp-identifier: mac
 "#;
 
-/// cloud-init's config: the desktop on X11, logged in automatically, never blanked, locked or
-/// asleep; SSH sessions on its display, so an app started over SSH shows on it. The display
-/// manager starts at the end, so no reboot.
+/// cloud-init's config: the desktop, logged in automatically, never blanked, locked or asleep;
+/// SSH sessions on X11's display, so an app started over SSH shows on it. The display manager
+/// starts at the end, so no reboot.
 fn user_data(sys: &System, key: &str, tz: &str) -> String {
   let (dm, files, run) = match sys.desktop {
     Desktop::Xfce => ("lightdm", XFCE.to_string(), String::new()),
     Desktop::Plasma => ("sddm", PLASMA.to_string(), String::new()),
     Desktop::Gnome => ("gdm3", [GNOME, NM].concat(), [GNOME_RUN, NM_RUN].concat()),
+    Desktop::GnomeWayland => {
+      ("gdm3", [GNOME_WAYLAND, &gnome_extension()].concat(), [GNOME_RUN, NM_UBUNTU].concat())
+    }
+    Desktop::PlasmaWayland => ("sddm", PLASMA_WAYLAND.to_string(), NM_UBUNTU.to_string()),
     Desktop::Own => ("", String::new(), String::new()),
   };
 
@@ -652,6 +700,132 @@ const GNOME: &str = r#"  - path: /etc/gdm3/daemon.conf
       NoDisplay=true
 "#;
 
+/// Ubuntu's GDM reads `custom.conf`, Wayland on by default.
+const GNOME_WAYLAND: &str = r#"  - path: /etc/gdm3/custom.conf
+    defer: true
+    content: |
+      [daemon]
+      AutomaticLoginEnable=true
+      AutomaticLogin={user}
+  - path: /etc/dconf/profile/user
+    content: |
+      user-db:user
+      system-db:local
+  - path: /etc/dconf/db/local.d/00-trivm
+    content: |
+      [org/gnome/desktop/session]
+      idle-delay=uint32 0
+      [org/gnome/desktop/screensaver]
+      lock-enabled=false
+      [org/gnome/settings-daemon/plugins/power]
+      sleep-inactive-ac-type='nothing'
+      [org/gnome/shell]
+      enabled-extensions=['trivm@vladkens.github.io']
+"#;
+
+/// trivm's GNOME Shell extension for `ui` on Wayland (`ui.rs`): the windows the shell shows, top
+/// to bottom, with their places, and one raised. A Wayland app doesn't know where its window is,
+/// and GNOME's `org.gnome.Shell.Introspect` gives no places and answers only callers it allows.
+const EXTENSION_METADATA: &str = r#"{
+  "uuid": "trivm@vladkens.github.io",
+  "name": "trivm",
+  "description": "The windows' places for trivm's ui and click --name.",
+  "url": "https://github.com/vladkens/trivm",
+  "shell-version": ["50"]
+}
+"#;
+
+const EXTENSION: &str = r#"// Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
+import Gio from 'gi://Gio';
+import Meta from 'gi://Meta';
+import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
+
+const IFACE = `<node><interface name="trivm.Windows">
+  <method name="List"><arg type="s" direction="out"/></method>
+  <method name="Activate"><arg type="t" direction="in"/><arg type="b" direction="out"/></method>
+</interface></node>`;
+
+const T = Meta.WindowType;
+const POPUPS = [T.MENU, T.DROPDOWN_MENU, T.POPUP_MENU, T.COMBO, T.TOOLTIP];
+const rect = r => [r.x, r.y, r.width, r.height];
+
+// Where a window's own coordinates are: a Wayland toolkit's start at the frame, which its title
+// bar is in; an X11 client's inside Mutter's title bar, or its shadow.
+const client = w => w.get_client_type() === Meta.WindowClientType.WAYLAND
+    ? w.get_frame_rect() : w.frame_rect_to_client_rect(w.get_frame_rect());
+
+export default class Trivm extends Extension {
+    enable() {
+        this._dbus = Gio.DBusExportedObject.wrapJSObject(IFACE, this);
+        this._dbus.export(Gio.DBus.session, '/trivm');
+    }
+
+    disable() {
+        this._dbus.unexport();
+        this._dbus = null;
+    }
+
+    List() {
+        const display = global.display;
+        const workspace = global.workspace_manager.get_active_workspace();
+        const all = display.sort_windows_by_stacking(display.list_all_windows()).reverse();
+        return JSON.stringify(all.map(w => ({
+            id: String(w.get_id()),
+            pid: w.get_pid(),
+            title: w.get_title() ?? '',
+            frame: rect(w.get_frame_rect()),
+            client: rect(client(w)),
+            popup: POPUPS.includes(w.get_window_type()),
+            shown: w.showing_on_its_workspace() && w.located_on_workspace(workspace),
+            focused: w === display.focus_window,
+            owner: String(w.get_transient_for()?.get_id() ?? ''),
+        })));
+    }
+
+    Activate(id) {
+        const w = global.display.list_all_windows().find(x => x.get_id() === id);
+        if (w)
+            Main.activateWindow(w);
+        return !!w;
+    }
+}
+"#;
+
+/// trivm's GNOME Shell extension for every user: GNOME Shell finds a new one only as it starts, so
+/// it is there before the first login.
+fn gnome_extension() -> String {
+  let dir = "/usr/share/gnome-shell/extensions/trivm@vladkens.github.io";
+  let file = |name: &str, content: &str| {
+    let lines: String =
+      content.lines().map(|x| format!("      {x}").trim_end().to_string() + "\n").collect();
+    format!("  - path: {dir}/{name}\n    content: |\n{lines}")
+  };
+
+  [file("metadata.json", EXTENSION_METADATA), file("extension.js", EXTENSION)].concat()
+}
+
+/// Plasma 6's defaults for every user: no screen locker, and PowerDevil's AC profile with no
+/// dimming, no display off and no suspend.
+const PLASMA_WAYLAND: &str = r#"  - path: /etc/sddm.conf.d/50-trivm.conf
+    content: |
+      [Autologin]
+      User={user}
+      Session=plasma
+  - path: /etc/xdg/kscreenlockerrc
+    content: |
+      [Daemon]
+      Autolock=false
+      LockOnResume=false
+  - path: /etc/xdg/powerdevilrc
+    content: |
+      [AC][Display]
+      DimDisplayWhenIdle=false
+      TurnOffDisplayWhenIdle=false
+      [AC][SuspendAndShutdown]
+      AutoSuspendAction=0
+"#;
+
 /// GNOME brings the user's D-Bus under systemd, which the user's systemd, up since trivm's first
 /// SSH login, gets when it starts again: GNOME and SSH sessions then share `/run/user/<uid>/bus`.
 const GNOME_RUN: &str = r#"  - [dconf, update]
@@ -672,6 +846,17 @@ const NM: &str = r#"  - path: /etc/netplan/90-trivm.yaml
 "#;
 
 const NM_RUN: &str = "  - [netplan, apply]\n";
+
+/// 26.04's GNOME and Plasma bring NetworkManager, which netplan won't give a NIC matched by its
+/// driver (`NM`): it takes every NIC, by DHCP with the MAC address too, once netplan's rule against
+/// it and networkd go, with networkd's address, which it would only watch.
+const NM_UBUNTU: &str = r#"  - [rm, -f, /etc/netplan/50-cloud-init.yaml, /run/udev/rules.d/90-netplan.rules]
+  - [netplan, set, --origin-hint, 90-trivm, renderer=NetworkManager]
+  - [systemctl, disable, --now, systemd-networkd-wait-online.service, systemd-networkd.service, systemd-networkd.socket]
+  - [netplan, apply]
+  - [ip, address, flush, scope, global]
+  - [systemctl, restart, NetworkManager]
+"#;
 
 /// Root's, as Fedora's `/run/cloud-init` is root's only. 2 is done with recoverable errors, such
 /// as Fedora's hostname, which cloud-init sets only on a later try.
@@ -811,7 +996,8 @@ pub fn desktop(vm: &Vm) -> io::Result<()> {
     (Os::Macos, _) => "Dock Finder WallpaperAgent",
     (_, Desktop::Xfce) => "xfce4-session xfce4-panel xfdesktop",
     (_, Desktop::Plasma) => "ksmserver kwin_x11 plasmashell",
-    (_, Desktop::Gnome) => "gnome-shell",
+    (_, Desktop::Gnome | Desktop::GnomeWayland) => "gnome-shell",
+    (_, Desktop::PlasmaWayland) => "kwin_wayland plasmashell",
     _ => "",
   };
 
@@ -913,13 +1099,29 @@ mod tests {
         Desktop::Xfce => ("lightdm", "autologin-user=user\n", false),
         Desktop::Plasma => ("sddm", "[Autologin]\n      User=user\n", false),
         Desktop::Gnome => ("gdm3", "AutomaticLogin=user\n", true),
+        Desktop::GnomeWayland => ("gdm3", "AutomaticLogin=user\n", true),
+        Desktop::PlasmaWayland => ("sddm", "[Autologin]\n      User=user\n", true),
         Desktop::Own => unreachable!(),
       };
 
       assert!(text.contains(&format!("[systemctl, enable, {dm}]\n")), "{}", sys.name);
       assert!(text.contains(login), "{}", sys.name);
       assert_eq!(text.contains("[netplan, apply]\n"), nm, "{}", sys.name);
+
+      let extension = "/usr/share/gnome-shell/extensions/trivm@vladkens.github.io/extension.js\n";
+      let wayland = sys.desktop == Desktop::GnomeWayland;
+      assert_eq!(text.contains(extension), wayland, "{}", sys.name);
+      assert_eq!(text.contains("enabled-extensions=['trivm@vladkens.github.io']\n"), wayland);
     }
+
+    // The extension as GNOME Shell reads it, out of the seed's YAML.
+    let gnome = SYSTEMS.iter().find(|x| x.desktop == Desktop::GnomeWayland).unwrap();
+    let text = user_data(gnome, "ssh-ed25519 AAAA trivm", "UTC");
+    let js = text.split("extension.js\n    content: |\n").nth(1).unwrap();
+    let js = js.split("runcmd:\n").next().unwrap();
+    let js: Vec<&str> = js.lines().map(|x| x.strip_prefix("      ").unwrap_or(x)).collect();
+    assert_eq!(js.join("\n").trim_end(), EXTENSION.trim_end());
+    assert!(EXTENSION_METADATA.contains(r#""uuid": "trivm@vladkens.github.io""#));
 
     assert_eq!(
       meta_data("ubuntu-24.04", "02:aa:00:00:00:01"),

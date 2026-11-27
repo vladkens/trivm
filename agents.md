@@ -49,7 +49,10 @@ what trivm does, so the two aren't mixed up:
   missing: the VM's view in a hidden window for shots and input (`display.rs`); TCC's database
   written and recoveryOS read with Vision (`permissions.rs`); macOS's Shut Down at its power
   button read with Vision and clicked (`main.rs`'s `stop`); `/etc/kcpassword` written for the
-  automatic login (`system.rs`); agent-desktop as a launchd job for its grant (`ui.rs`);
+  automatic login (`system.rs`); agent-desktop as a launchd job for its grant, and on Wayland
+  the windows' places from trivm's GNOME Shell extension (which the seed in `system.rs` puts in)
+  or a KWin script read back from the journal, and GTK 4's frames from agent-desktop's refmaps
+  (`ui.rs`);
   `desktop`'s launchd job on macOS (`ssh.rs`); `LabConfig`'s skipped checks and `desktop`'s
   scheduled task (`windows.rs`).
 - A hack goes with the last system that needs it: macOS 27 makes its user itself, so `apfs.rs`

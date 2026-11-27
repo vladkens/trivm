@@ -8,6 +8,7 @@ the terminal. When you want to look, `trivm open` shows the VM in a window.
 
 - macOS 15, 26 and 27 on Apple's Virtualization.framework.
 - Ubuntu 24.04 (Xfce) and 22.04 (KDE Plasma), Debian 13 (GNOME) and Fedora 45 (Xfce), on X11.
+- Ubuntu 26.04 with GNOME 50 or KDE Plasma 6.6, on Wayland.
 - Windows 11 Pro on QEMU with HVF, from the ESD of Microsoft's Media Creation Tool.
 - Systems from their own sources (Apple's IPSWs, the distros' cloud images, Microsoft's ESD),
   pinned by SHA-256.
@@ -30,6 +31,7 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 trivm create macos-27          # downloads 25 GB once, installs, starts: about 20 minutes
 trivm create macos-15          # the last IPSW of each older macOS: 15.6.1, 26.6.2
 trivm create ubuntu-24.04      # downloads 600 MB once: about 3 minutes
+trivm create ubuntu-26.04-kde  # KDE Plasma on Wayland; ubuntu-26.04-gnome for GNOME
 trivm list
 
 trivm exec macos-27 -- sw_vers
@@ -95,6 +97,15 @@ the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`). An ap
 toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once started after the
 first `ui`. Not supported yet on Ubuntu 22.04 (agent-desktop needs 24.04's accessibility) and
 Windows.
+
+On Wayland an app doesn't know where its window is, so trivm asks the compositor where the
+windows are and which has the focus: GNOME Shell through an extension of trivm's, which it puts in
+the system, KDE's KWin through a script. GTK 4 there gives frames only of the elements to act on
+(buttons, fields, cells, menu items), not of labels and groups, which `ui` leaves out, and some
+off by up to 25 pixels (a dialog's buttons), their middles still on them; an open GTK 4 menu's
+items, laid out in their window, are centered in the popup the compositor shows the menu in.
+Qt's popup menus (Konsole's, Dolphin's) aren't in accessibility on Wayland: click their items by
+their place in a shot. An app on Xwayland is placed as on X11.
 
 ```sh
 trivm ui macos-27 --app Wavo
