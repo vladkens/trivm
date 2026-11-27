@@ -211,9 +211,9 @@ EOF
 }
 "#;
 
-/// `desktop <program> [args]` on Linux: a service of the user's systemd, out of the SSH session,
-/// with the desktop's environment (Wayland's or X11's), sshd's `DISPLAY` when it gave none. A
-/// failed unit stays listed until reset: one that ended within 0.2 s is read and reset.
+/// `desktop <program> [args]` on Linux: a service of the user's systemd, with the desktop's
+/// environment (sshd's `DISPLAY` if it gave none), its `$` doubled against systemd's expansion,
+/// what it forks kept. A unit that ended within 0.2 s is read and reset.
 const LINUX_DESKTOP: &str = r#"desktop() {
   if [ $# -eq 0 ]; then
     echo 'usage: desktop <program> [args]' >&2
@@ -234,13 +234,14 @@ const LINUX_DESKTOP: &str = r#"desktop() {
   fi
   shift
   set -- "$exe" "$@"
+  set -- "${@//\$/\$\$}"
   if ! systemctl --user show-environment | grep -Eq '^(WAYLAND_)?DISPLAY='; then
     set -- -E "DISPLAY=$DISPLAY" "$@"
   fi
   unit=trivm-desktop-$(date +%s%N)
   systemd-run --user --quiet --unit="$unit" --service-type=exec --same-dir -E "PATH=$PATH" \
-    -p StandardOutput=null -p StandardError=null "$@" || {
-    systemctl --user reset-failed "$unit" 2>/dev/null
+    -p KillMode=process -p StandardOutput=null -p StandardError=null "$@" || {
+    systemctl --user reset-failed "$unit" 2>/dev/null || true
     echo "desktop: $exe couldn't be executed" >&2
     return 1
   }
@@ -255,7 +256,7 @@ const LINUX_DESKTOP: &str = r#"desktop() {
 $(systemctl --user show -p ActiveState -p ExecMainCode -p ExecMainStatus "$unit")
 EOF
   [ "$state" = active ] && return
-  systemctl --user reset-failed "$unit" 2>/dev/null
+  systemctl --user reset-failed "$unit" 2>/dev/null || true
   case $code:$status in
     *:0) return 0 ;;
     1:*) echo "desktop: $exe exited: $status" >&2 ;;
