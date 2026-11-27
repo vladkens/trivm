@@ -151,7 +151,11 @@ pub fn find(name: &str) -> io::Result<&'static System> {
 
 /// A file in the cache, downloaded (resumed after a break) and checked first.
 pub fn download(url: &str, sha256: &str) -> io::Result<PathBuf> {
-  let name = url.rsplit('/').next().unwrap_or(url);
+  download_as(url, url.rsplit('/').next().unwrap_or(url), sha256)
+}
+
+/// `download` to the cache's file `name`: for a URL whose name stays as its file changes.
+pub fn download_as(url: &str, name: &str, sha256: &str) -> io::Result<PathBuf> {
   let path = vm::cache_dir().join(name);
   vm::made(&vm::cache_dir())?;
   let _lock = lock(&path)?;

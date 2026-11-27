@@ -54,10 +54,12 @@ The screen, from the host:
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
 The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
-(on macOS with its Accessibility grant, which needs SIP off; not on ubuntu-22.04 or Windows):
-  ui <vm> [--app <name>]  the visible windows, all apps' or one's, and macOS's menu bar, with
-                          their elements, a line each: role, \"name\", = \"value\", [states] and
-                          frame (x,y wxh in a shot's pixels)
+(on macOS with its Accessibility grant, which needs SIP off; on Windows with Microsoft's Visual
+C++ runtime; not on ubuntu-22.04):
+  ui <vm> [--app <name>]  the visible windows, all apps' or one's (its name in any case, .exe
+                          optional on Windows), and macOS's menu bar, with their elements, a line
+                          each: role, \"name\", = \"value\", [states] and frame (x,y wxh in a
+                          shot's pixels)
   click <vm> --name <text> [--app <name>] [--right] [--double]
                           click the element of that name, else of it in any case, else the one
                           whose name holds it, its window raised first
