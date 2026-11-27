@@ -193,7 +193,7 @@ fn signed() -> io::Result<()> {
 pub fn start(name: &str) -> io::Result<()> {
   // One start sets a new VM up; another waits for it, then finds the VM set up: Windows' setup
   // restarts the VM, which two at once would race.
-  let (_setup, mut vm) = loop {
+  let (setup, mut vm) = loop {
     let setup = Vm::open(name)?.setting_up(true)?;
     let vm = Vm::open(name)?;
     if vm.holds(&setup)? {
@@ -216,7 +216,11 @@ pub fn start(name: &str) -> io::Result<()> {
       thread::sleep(Duration::from_millis(200));
     }
 
+    // A VM deleted meanwhile and made again of the name is set up by its own start.
     vm = Vm::open(name)?;
+    if !vm.holds(&setup)? {
+      return Err(bad(format!("{name} was deleted meanwhile; see trivm list")));
+    }
   }
 
   match (vm.setup, vm.config.os()) {
