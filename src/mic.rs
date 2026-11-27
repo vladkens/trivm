@@ -5,6 +5,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -273,6 +274,7 @@ pub fn listen(name: &str) -> io::Result<()> {
   let path = vm.state("mic.sock");
   let _ = fs::remove_file(&path);
   let sock = UnixListener::bind(&path)?;
+  let ino = fs::metadata(&path)?.ino();
 
   let (tx, rx) = mpsc::channel();
   thread::spawn(move || {
@@ -286,7 +288,12 @@ pub fn listen(name: &str) -> io::Result<()> {
   });
 
   let res = serve(&vm, &rx);
-  let _ = fs::remove_file(&path);
+  // Its own only: QEMU restarted, as at the end of Windows' setup, has a listener of its own,
+  // which may have bound the path before this one saw its QEMU quit.
+  if fs::metadata(&path).is_ok_and(|x| x.ino() == ino) {
+    let _ = fs::remove_file(&path);
+  }
+
   res
 }
 
