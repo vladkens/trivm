@@ -318,6 +318,8 @@ fn request(client: &mut UnixStream) -> io::Result<Vec<u8>> {
 fn serve(vm: &Vm, rx: &mpsc::Receiver<(Vec<u8>, UnixStream)>) -> io::Result<()> {
   let mut listener = register(vm)?;
   let (mut channels, mut play) = (0, None::<Play>);
+  // The guest's mute and input level, which QEMU leaves to the listener: full until it sets them.
+  let mut levels = vec![];
   loop {
     if let Ok((pcm, client)) = rx.try_recv() {
       play = Some(Play { pcm, pos: 0, start: Instant::now(), client });
@@ -347,14 +349,23 @@ fn serve(vm: &Vm, rx: &mpsc::Receiver<(Vec<u8>, UnixStream)>) -> io::Result<()> 
       "Read" => {
         let mut a = msg.args();
         let (_, size) = (a.u64()?, a.u64()? as usize);
-        let data = match &mut play {
+        let mut data = match &mut play {
           Some(x) => read(&x.pcm, &mut x.pos, x.start.elapsed(), size, channels),
           None => vec![0; size],
         };
 
+        gain(&mut data, channels, &levels);
         let mut body = dbus::Buf::default();
         body.bytes(&data);
         listener.reply(&msg, "ay", &body.0)?;
+      }
+      "SetVolume" => {
+        let mut a = msg.args();
+        let (_, mute) = (a.u64()?, a.bool()?);
+        levels = if mute { vec![0] } else { a.bytes()? };
+        if msg.wants_reply() {
+          listener.reply(&msg, "", &[])?;
+        }
       }
       _ if msg.wants_reply() => listener.error(&msg, "org.freedesktop.DBus.Error.UnknownMethod")?,
       _ => {}
@@ -412,6 +423,20 @@ fn read(pcm: &[u8], pos: &mut usize, elapsed: Duration, size: usize, channels: u
   out
 }
 
+/// The guest's input level on 16-bit frames, 0 to 255 a channel, the last for any more, linear
+/// as QEMU's own mixer applies it for other sound cards; none given is full.
+fn gain(data: &mut [u8], channels: usize, levels: &[u8]) {
+  if levels.iter().all(|&x| x == u8::MAX) {
+    return;
+  }
+
+  for (i, x) in data.as_chunks_mut::<2>().0.iter_mut().enumerate() {
+    let level = levels.get(i % channels.max(1)).or(levels.last()).copied().unwrap_or(u8::MAX);
+    let sample = i16::from_le_bytes(*x) as i32 * level as i32 / u8::MAX as i32;
+    *x = (sample as i16).to_le_bytes();
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use std::path::Path;
@@ -449,6 +474,15 @@ mod tests {
     // A second on, no one having read: the read starts at the clock.
     assert_eq!(read(&pcm, &mut pos, Duration::from_secs(1), 4, 1), [0, 0, 0, 0]);
     assert_eq!(pos, RATE as usize);
+
+    // The guest's level a channel, then its mute; none set is full.
+    let mut data = vec![0x00, 0x10, 0x00, 0xf0, 0x00, 0x10, 0x00, 0xf0];
+    gain(&mut data, 2, &[]);
+    assert_eq!(data, [0x00, 0x10, 0x00, 0xf0, 0x00, 0x10, 0x00, 0xf0]);
+    gain(&mut data, 2, &[255, 51]);
+    assert_eq!(data, [0x00, 0x10, 0xcd, 0xfc, 0x00, 0x10, 0xcd, 0xfc]);
+    gain(&mut data, 2, &[0]);
+    assert_eq!(data, [0; 8]);
 
     // The sound card's input is in the format `mic` sends.
     let config = Config { system: "windows-11".into(), cpus: 1, memory: 1, disk: 1 };

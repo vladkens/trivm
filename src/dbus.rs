@@ -117,6 +117,12 @@ impl Args<'_> {
     Ok(self.u32()? != 0)
   }
 
+  /// An array of bytes, `ay`.
+  pub fn bytes(&mut self) -> io::Result<Vec<u8>> {
+    let n = self.u32()? as usize;
+    (0..n).map(|_| self.u8()).collect()
+  }
+
   fn str(&mut self) -> io::Result<String> {
     let n = self.u32()? as usize;
     self.text(n)
@@ -459,5 +465,15 @@ mod tests {
     assert_eq!((a.u32().unwrap(), a.u8().unwrap(), a.u32().unwrap()), (48_000, 1, 2));
     assert_eq!((a.u32().unwrap(), a.bool().unwrap()), (96_000, false));
     assert!(a.u32().is_err());
+
+    // QEMU's SetVolume(t b ay): unmuted, a level a channel.
+    let mut body = Buf(42u64.to_le_bytes().to_vec());
+    body.u32(0);
+    body.bytes(&[255, 128]);
+    let msg = Msg { body: body.0, ..Default::default() };
+    let mut a = msg.args();
+    assert_eq!((a.u64().unwrap(), a.bool().unwrap()), (42, false));
+    assert_eq!(a.bytes().unwrap(), [255, 128]);
+    assert!(a.u8().is_err());
   }
 }
