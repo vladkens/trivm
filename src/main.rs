@@ -217,6 +217,10 @@ pub fn start(name: &str) -> io::Result<()> {
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
+  if vm.config.os() == Os::Macos {
+    system::macos_idle(&vm)?;
+  }
+
   system::desktop(&vm)?;
   // Set up only once the desktop is up: a setup that didn't bring it up runs again next time.
   if vm.setup {
