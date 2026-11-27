@@ -433,7 +433,8 @@ fn unescape(x: &str) -> String {
 /// The windows, all apps' or one's, each followed by its elements, after the menu bar on macOS,
 /// the frontmost app's: agent-desktop reads their trees in one batch.
 fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
-  let wanted = |x: &str| app.is_none_or(|a| x.eq_ignore_ascii_case(a));
+  let exe = vm.config.os() == Os::Windows;
+  let wanted = |x: &str| app.is_none_or(|a| same_app(x, a, exe));
   let windows: Vec<&Node> = all.iter().filter(|w| wanted(&w.app)).collect();
 
   let snapshot = |scope: String| {
@@ -483,6 +484,20 @@ fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
   }
 
   Ok(out)
+}
+
+/// Whether a window's app is the one named: in any case, and with `exe`, as on Windows, which
+/// names an app by its program, `Notepad.exe`, with `.exe` left out or not.
+fn same_app(app: &str, name: &str, exe: bool) -> bool {
+  fn bare(x: &str, exe: bool) -> &str {
+    let cut = x.len().saturating_sub(4);
+    match x.get(cut..) {
+      Some(ext) if exe && ext.eq_ignore_ascii_case(".exe") => &x[..cut],
+      _ => x,
+    }
+  }
+
+  bare(app, exe).eq_ignore_ascii_case(bare(name, exe))
 }
 
 /// Leaves out a popup's element alike in all but its window to one in a window before, unless
@@ -1262,6 +1277,22 @@ _NET_WM_NAME:  not found."#;
       {"bounds":{"height":29.0,"width":222.0,"x":90.0,"y":513.0},"name":"Select all","role":"menuitem"}]}]}"#;
   const BAR: &str =
     r#"{"bounds":{"height":33.0,"width":1428.0,"x":32.0,"y":68.0},"role":"group","children":[%]}"#;
+
+  #[test]
+  fn apps() {
+    let same =
+      [("Notepad.exe", "Notepad"), ("Notepad.exe", "notepad.EXE"), ("explorer.exe", "Explorer")];
+    for (app, name) in same.into_iter().chain([("Wavo", "wavo"), ("ñexe", "ñexe")]) {
+      assert!(same_app(app, name, true), "{app} {name}");
+    }
+
+    for (app, name) in [("Notepad.exe", "Note"), ("Wavo", "Wavo.app"), ("exe", "")] {
+      assert!(!same_app(app, name, true), "{app} {name}");
+    }
+
+    // Elsewhere the name is the app's whole.
+    assert!(same_app("Wavo", "WAVO", false) && !same_app("foo", "foo.exe", false));
+  }
 
   #[test]
   fn popups() {

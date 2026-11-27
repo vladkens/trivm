@@ -86,6 +86,7 @@ value, state and frame in a shot's pixels, read through the system's accessibili
 the first use. On macOS its grant needs SIP off (`trivm os sip <vm> off`); on Windows it needs
 Microsoft's Visual C++ runtime, which trivm puts in too, and `click --name` raises a window by
 minimizing and restoring it, as Windows lets no program in the background bring one to the front.
+`--app` takes an app's name in any case, `notepad` for Windows' `Notepad.exe`.
 An app shows what its toolkit gives accessibility: on Linux GTK's do, and Qt's and Chromium's once
 started after the first `ui`. Not supported yet on Ubuntu 22.04 (agent-desktop needs 24.04's
 accessibility).
