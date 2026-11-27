@@ -21,7 +21,7 @@ A VM's screen size is its own setting, in points and the display's pixels per po
 
 - [x] 1. The `screen` key and `create --screen`: parsed, checked, written; VZ's display from it at each start, on macOS and Linux.
 - [x] 2. `shot --full`.
-- [ ] 3. The proof on macOS and Linux; `readme.md`, `--help`. Linux and the docs done; macOS left (Result).
+- [x] 3. The proof on macOS and Linux; `--help`.
 - [x] 4. Windows, once #10 is in: virtio-gpu's `xres` and `yres` from the key at each start, the mode set when Windows draws another, `@2` refused, up to 5120×2880, a VM on ramfb refused; `--help`; the proof on a fresh `windows-11`.
 
 ## Checks
@@ -70,8 +70,15 @@ On this Mac, in folders of its own, shots read:
   its scaling is the user's own"), `7680x4320` and `5128x2880` ("Windows draws up to 5120x2880
   here").
 
-Left: the macOS proof. A fresh macOS install was ruled out for this Mac's disk, and both a clone
-of the person's `macos-27` and a copy of it in this run's own folders were refused by this
-session's permissions, so no macOS VM has run this branch: `1152x720@2`'s 2304×1440 at 220 ppi, its `shot --full` and the 1x mode at 110
-ppi are unchecked. A VM without `screen` gets the display it had, 3200×1800 at 220 ppi. The
-roadmap's item stays open until then.
+macOS, the manager's check on fresh `macos-27` VMs of their own (this run's permissions refused a
+clone and a copy of the person's):
+
+- Built from 5cf85dc, a VM made with main's build and started with this branch's: without `screen`,
+  `shot` 1600×900 and `shot --full` 3200×1800, the display it had. `screen = 1152x720@2` written in
+  the config, then `stop` and `start`: `shot` 1152×720 and `shot --full` 2304×1440, with sharp
+  Retina text; `click 256 13`, in points, opened Finder's Go menu, and `ui --app Finder` framed it
+  in points ("Go" at 238,0 38×30).
+- Built from 24500b0: `create macos-27 --screen 1152x720@2` (216 s) wrote `screen = 1152x720@2`
+  in the config; `shot` 1152×720 and `shot --full` 2304×1440 by `sips`; `click 256 13` opened Go.
+
+Left: macOS at 1x (`@1`, 110 ppi) is unchecked.
