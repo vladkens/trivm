@@ -291,6 +291,16 @@ unsafe extern "C" {
   fn setsid() -> i32;
 }
 
+/// Keeps the Mac from idle sleep while the process `pid`, a VM's, runs: `caffeinate` detached, and
+/// with no stdio of ours, which would keep a pipe from `trivm` open until the VM stops.
+pub fn awake(pid: u32) {
+  let mut cmd = Command::new("caffeinate");
+  cmd.args(["-i", "-w", &pid.to_string()]);
+  cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+  detach(&mut cmd);
+  let _ = cmd.spawn();
+}
+
 /// Shuts the guest down from inside, or by its power button when its SSH doesn't answer, or with
 /// `force` stops it at once; waits for the process.
 pub fn stop(vm: &Vm, force: bool) -> io::Result<()> {
