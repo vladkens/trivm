@@ -352,9 +352,9 @@ impl Vm {
     Ok(f)
   }
 
-  /// Waits while another process sets the VM up, then holds that for as long as the file returned
-  /// is open: a lock on its `setup` mark; none for a VM that is set up.
-  pub fn setting_up(&self) -> io::Result<Option<fs::File>> {
+  /// Holds the VM's setup for as long as the file returned is open, waiting while another process
+  /// sets it up, or failing unless `wait`: a lock on its `setup` mark; none for a VM set up.
+  pub fn setting_up(&self, wait: bool) -> io::Result<Option<fs::File>> {
     let f = match fs::File::open(self.path(SETUP)) {
       Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
       x => x?,
@@ -362,9 +362,12 @@ impl Vm {
 
     match f.try_lock() {
       Ok(()) => {}
-      Err(fs::TryLockError::WouldBlock) => {
+      Err(fs::TryLockError::WouldBlock) if wait => {
         eprintln!("waiting for another start setting {} up", self.name);
         f.lock()?;
+      }
+      Err(fs::TryLockError::WouldBlock) => {
+        return Err(bad(format!("{} is in use: a start sets it up", self.name)));
       }
       Err(fs::TryLockError::Error(e)) => return Err(e),
     }
@@ -650,25 +653,27 @@ mod tests {
     // Set up by one process at a time; nothing to wait for once it is.
     vm.setup = true;
     vm.save().unwrap();
-    let first = vm.setting_up().unwrap();
+    let first = vm.setting_up(true).unwrap();
     let second = std::thread::spawn({
       let vm = Vm { mac: String::new(), ..at("a") };
-      move || vm.setting_up().unwrap().is_some()
+      move || vm.setting_up(true).unwrap().is_some()
     });
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(!second.is_finished());
     assert!(vm.holds(&first).unwrap() && !vm.holds(&None).unwrap());
+    let err = vm.setting_up(false).unwrap_err();
+    assert_eq!(err.to_string(), "a is in use: a start sets it up");
     drop(first);
     assert!(second.join().unwrap());
 
     // A lock on the mark of a VM deleted meanwhile isn't the new one's; none on a VM set up is.
-    let stale = vm.setting_up().unwrap();
+    let stale = vm.setting_up(true).unwrap();
     fs::remove_file(vm.path(SETUP)).unwrap();
     vm.save().unwrap();
     assert!(!vm.holds(&stale).unwrap());
     vm.setup = false;
     vm.save().unwrap();
-    assert!(vm.setting_up().unwrap().is_none() && vm.holds(&None).unwrap());
+    assert!(vm.setting_up(true).unwrap().is_none() && vm.holds(&None).unwrap());
 
     // Removed, the name is free; its data folder left with no config is in the way.
     vm.remove().unwrap();

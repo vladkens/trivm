@@ -194,7 +194,7 @@ pub fn start(name: &str) -> io::Result<()> {
   // One start sets a new VM up; another waits for it, then finds the VM set up: Windows' setup
   // restarts the VM, which two at once would race.
   let (_setup, mut vm) = loop {
-    let setup = Vm::open(name)?.setting_up()?;
+    let setup = Vm::open(name)?.setting_up(true)?;
     let vm = Vm::open(name)?;
     if vm.holds(&setup)? {
       break (setup, vm);
@@ -410,8 +410,10 @@ fn shut_down(vm: &Vm) -> io::Result<()> {
 }
 
 /// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
-/// and one being made or cloned isn't removed under it.
+/// and one being made, cloned or set up isn't removed under it.
 fn delete(vm: &Vm) -> io::Result<()> {
+  // A start setting the VM up restarts it, unheld between its two processes.
+  let _setup = vm.setting_up(false)?;
   let was = data_ino(vm);
   stop(vm, true)?;
   remove(vm, was)
