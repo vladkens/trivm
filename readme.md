@@ -52,7 +52,8 @@ A program started over SSH is the SSH session's, not the desktop's: `desktop <pr
 which `exec` defines on every system, starts it in the user's desktop session, in the current
 folder, its output dropped, and returns once it runs, with an error if it ended at once. On macOS
 launchd starts it, so macOS gives it the grants `os grant` gave it, where a program started over
-SSH has sshd's; an app goes to `open -a`, which does the same.
+SSH has sshd's; an app goes to `open -a`, which does the same. On Linux the user's systemd starts
+it with the environment the desktop gave it, so on Wayland it is a Wayland app, not Xwayland's.
 
 A test that needs a clean system each time runs against a throwaway clone of a stopped VM: an
 APFS copy made in a second that shares the VM's disk until written. `run` starts one, runs the

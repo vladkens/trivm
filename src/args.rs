@@ -40,7 +40,8 @@ Commands and files, through SSH:
                           are passed as they are; on Windows PowerShell 5.1, which drops a
                           program's empty arguments and the double quotes in them. In it,
                           `desktop <program> [args]` starts a program on the guest's desktop;
-                          on macOS launchd starts it, so it has its own grants, not sshd's
+                          on macOS launchd starts it, so it has its own grants, not sshd's; on
+                          Linux the user's systemd, so it is a Wayland app on Wayland
   ssh <vm>                an interactive shell
   cp <src> <dst>          copy files, `<vm>:<path>` on either side, folders too
   ip <vm>                 the guest's address
