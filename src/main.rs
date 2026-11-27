@@ -192,7 +192,16 @@ fn signed() -> io::Result<()> {
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
   let _one = one_start(&Vm::open(name)?)?;
-  let mut vm = Vm::open(name)?;
+  // One start sets a new VM up; another waits for it, then finds the VM set up: Windows' setup
+  // restarts the VM, which two at once would race.
+  let (setup, mut vm) = loop {
+    let setup = Vm::open(name)?.setting_up(true)?;
+    let vm = Vm::open(name)?;
+    if vm.holds(&setup)? {
+      break (setup, vm);
+    }
+  };
+
   let boots = vm.pid().is_none();
   if boots {
     match vm.config.os() {
@@ -209,13 +218,17 @@ pub fn start(name: &str) -> io::Result<()> {
       thread::sleep(Duration::from_millis(200));
     }
 
+    // A VM deleted meanwhile and made again of the name is set up by its own start.
     vm = Vm::open(name)?;
+    if !vm.holds(&setup)? {
+      return Err(bad(format!("{name} was deleted meanwhile; see trivm list")));
+    }
   }
 
   match (vm.setup, vm.config.os()) {
     (true, Os::Macos) => system::macos_setup(&vm)?,
     (true, Os::Linux) => system::linux_setup(&vm)?,
-    (true, Os::Windows) => system::windows_setup(&vm)?,
+    (true, Os::Windows) => system::windows_setup(&mut vm)?,
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
@@ -444,9 +457,16 @@ fn shut_down(vm: &Vm) -> io::Result<()> {
 }
 
 /// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
-/// and one being made or cloned isn't removed under it.
+/// and one being made, cloned or set up isn't removed under it.
 fn delete(vm: &Vm) -> io::Result<()> {
   let was = data_ino(vm);
+  // A start setting the VM up restarts it, unheld between its two processes. The lock is checked
+  // to be on the mark of the VM `was` names, not on one made again of its name.
+  let setup = vm.setting_up(false)?;
+  if !vm.holds(&setup)? || data_ino(vm) != was {
+    return Err(bad(format!("{} was deleted meanwhile; see trivm list", vm.name)));
+  }
+
   stop(vm, true)?;
   remove(vm, was)
 }
@@ -502,6 +522,7 @@ mod tests {
 
   use super::*;
   use crate::vm::Config;
+  use crate::vm::tests::soon;
 
   #[test]
   fn removes() {
@@ -528,7 +549,7 @@ mod tests {
     assert!(vm.dir.exists() && vm.conf.exists());
 
     // Its own, then one whose delete was cut short after its data folder.
-    remove(&vm, data_ino(&vm)).unwrap();
+    soon(|| remove(&vm, data_ino(&vm)));
     assert!(none());
     fs::create_dir_all(&vm.state_dir).unwrap();
     fs::write(&vm.conf, "").unwrap();
