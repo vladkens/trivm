@@ -212,8 +212,8 @@ EOF
 "#;
 
 /// `desktop <program> [args]` on Linux: a service of the user's systemd, with the desktop's
-/// environment (sshd's `DISPLAY` if it gave none), its arguments' `$` doubled against systemd's
-/// expansion, what it forks kept. Units that failed are reset: this call's after 0.2 s, read.
+/// environment (sshd's `DISPLAY` if it gave none), arguments' `$` doubled against systemd's
+/// expansion, forks kept; a failed unit is reset once read, or 10 s on by a later call.
 const LINUX_DESKTOP: &str = r#"desktop() {
   if [ $# -eq 0 ]; then
     echo 'usage: desktop <program> [args]' >&2
@@ -237,8 +237,14 @@ const LINUX_DESKTOP: &str = r#"desktop() {
   if ! systemctl --user show-environment | grep -Eq '^(WAYLAND_)?DISPLAY='; then
     set -- -E "DISPLAY=$DISPLAY" "$@"
   fi
-  systemctl --user reset-failed 'trivm-desktop-*' 2>/dev/null || true
   unit=trivm-desktop-$(date +%s%N)
+  systemctl --user list-units --state=failed --plain --no-legend 'trivm-desktop-*' |
+    while read -r k v; do
+      k=${k#trivm-desktop-}
+      if [ "${k%.service}" -lt "$((${unit#trivm-desktop-} - 10000000000))" ]; then
+        systemctl --user reset-failed "trivm-desktop-$k" 2>/dev/null || true
+      fi
+    done
   systemd-run --user --quiet --unit="$unit" --service-type=exec --same-dir -E "PATH=$PATH" \
     -p KillMode=process -p StandardOutput=null -p StandardError=null "$@" || {
     systemctl --user reset-failed "$unit" 2>/dev/null || true
