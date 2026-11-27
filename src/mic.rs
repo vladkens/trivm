@@ -219,6 +219,9 @@ fn feed(vm: &Vm, script: &str, data: &[u8]) -> io::Result<ExitStatus> {
 /// QEMU's D-Bus object for the sound card (its `ui/dbus-display1.xml`).
 const AUDIO: (&str, &str) = ("/org/qemu/Display1/Audio", "org.qemu.Display1.Audio");
 
+/// The most a `mic` sends the listener: an hour.
+const MAX: usize = RATE as usize * 2 * 3600;
+
 /// Hands the samples to the VM's listener (`listen`) and waits until they have played; with none,
 /// only checks that the listener is there.
 fn windows(vm: &Vm, pcm: Option<&[u8]>) -> io::Result<()> {
@@ -227,6 +230,10 @@ fn windows(vm: &Vm, pcm: Option<&[u8]>) -> io::Result<()> {
   })?;
 
   let Some(pcm) = pcm else { return Ok(()) };
+  if pcm.len() > MAX {
+    return Err(bad("a file of more than an hour"));
+  }
+
   sock.write_all(&(pcm.len() as u64).to_le_bytes())?;
   sock.write_all(pcm)?;
   let secs = (pcm.len() / 2) as f64 / RATE as f64;
@@ -266,22 +273,38 @@ pub fn listen(name: &str) -> io::Result<()> {
   let path = vm.state("mic.sock");
   let _ = fs::remove_file(&path);
   let sock = UnixListener::bind(&path)?;
+
   let (tx, rx) = mpsc::channel();
   thread::spawn(move || {
     for mut client in sock.incoming().flatten() {
-      let mut len = [0; 8];
-      let _ = client.read_exact(&mut len).and_then(|_| {
-        let mut pcm = vec![0; u64::from_le_bytes(len) as usize];
-        client.read_exact(&mut pcm)?;
-        client.set_nonblocking(true)?;
-        tx.send((pcm, client)).map_err(|_| bad("the listener quit"))
-      });
+      if let Ok(pcm) = request(&mut client)
+        && tx.send((pcm, client)).is_err()
+      {
+        break;
+      }
     }
   });
 
   let res = serve(&vm, &rx);
   let _ = fs::remove_file(&path);
   res
+}
+
+/// A `mic`'s samples: their length, then them, each read in 10 seconds, so a `mic` that stops
+/// sending holds up no other.
+fn request(client: &mut UnixStream) -> io::Result<Vec<u8>> {
+  client.set_read_timeout(Some(Duration::from_secs(10)))?;
+  let mut len = [0; 8];
+  client.read_exact(&mut len)?;
+  let len = u64::from_le_bytes(len) as usize;
+  if len > MAX {
+    return Err(bad("a file of more than an hour"));
+  }
+
+  let mut pcm = vec![0; len];
+  client.read_exact(&mut pcm)?;
+  client.set_nonblocking(true)?;
+  Ok(pcm)
 }
 
 /// Answers QEMU's calls until it quits.
