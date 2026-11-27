@@ -1,3 +1,5 @@
+Done: 2026-11-27
+
 # The accessibility tree on Windows
 
 `trivm ui <vm>` and `trivm click <vm> --name <text>` work on Windows 11 as on macOS and Linux: agent-desktop's arm64 build for Windows, which reads UI Automation, put in the guest at the first use, pinned by version and SHA-256 like its other two builds, run in the user's desktop session, its frames in a shot's pixels. Done when, on this Mac, on a fresh `windows-11`, `ui` lists Notepad's and Explorer's windows and elements with frames where the shot has them, and `click --name` clicks a menu and a button by name, raising the window first when another covers it (shots read).
@@ -16,9 +18,35 @@
 
 - [x] 1. agent-desktop's Windows build and the Visual C++ runtime pinned and cached, installed in the guest, run in the desktop's session, its output read.
 - [x] 2. `ui` and `click --name` on Windows: the frames, the popups, the raise, the click through QMP.
-- [ ] 3. The proof on a fresh `windows-11` with Notepad and Explorer; `readme.md`, `--help` and `agents.md`'s hacks.
+- [x] 3. The proof on a fresh `windows-11` with Notepad and Explorer; `readme.md`, `--help` and `agents.md`'s hacks.
 
 ## Checks
 
 - `make check`, `make test`; unit tests for the batch file's line, a popup read once and the windows in front.
 - Task 3 on this Mac, with the shots read.
+
+## Result
+
+On this Mac, in folders of its own, a fresh `trivm create windows-11` from this branch (main's
+ramfb, 800×600: the screen at 1920×1080 is the other branch's), Notepad and Explorer opened by
+`desktop`, shots read:
+
+- The first `ui`: downloaded and checked agent-desktop's Windows build and Microsoft's Visual C++
+  runtime, put both in, then listed Explorer's window, maximized, and Notepad's with their
+  elements, Notepad's tip in its `PopupHost` (26 s; later runs 5–7 s). Their frames are where
+  `windows-ui-3.png` shows them: the toolbar's buttons, the tree's items, the status bar.
+- `click --name Edit`: Notepad, behind Explorer, raised and its Edit menu open
+  (`windows-ui-4-edit.png`, 20 s); `click --name Time/Date`, an item of that menu, wrote the time
+  into Notepad (`windows-ui-5-timedate.png`).
+- `click --name "More options"`: Explorer, behind Notepad now, raised and its menu open
+  (`windows-ui-6-more.png`); `ui --app explorer.exe` listed the menu's items where the shot has
+  them; `click --name Options` opened Folder Options (`windows-ui-7-options.png`).
+- `click --name View`: three elements of that name, listed with their frames, nothing clicked;
+  `click 102 115`, the tab's, showed its View tab (`windows-ui-9-viewtab.png`); `click --name
+  Cancel`, a Win32 dialog's button, closed it (`windows-ui-10-cancel.png`).
+- Before: at 150% on another VM, frames in the shot's pixels and clicks on them
+  (`windows-ui-x11-150.png`, `windows-ui-x12-150-edit.png`).
+
+The fresh VM showed Start open at its first sign-in; `ui` doesn't list it, as agent-desktop leaves
+out the shell's windows (the taskbar too), and `key escape` closed it. Left: the roadmap's item is
+in the other branch's roadmap, to be ticked once both are in.
