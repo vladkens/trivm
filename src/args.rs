@@ -39,8 +39,9 @@ The guest system's own integrations, macOS's so far (not supported on Linux or W
 Commands and files, through SSH:
   exec <vm> [--] <cmd>... run a command, exit with its code; one argument is a shell line, more
                           are passed as they are; on Windows PowerShell 5.1, which drops a
-                          program's empty arguments and the double quotes in them, and where
-                          `desktop <program>` starts a program on the desktop
+                          program's empty arguments and the double quotes in them. In it,
+                          `desktop <program> [args]` starts a program on the guest's desktop;
+                          on macOS launchd starts it, so it has its own grants, not sshd's
   ssh <vm>                an interactive shell
   cp <src> <dst>          copy files, `<vm>:<path>` on either side, folders too
   ip <vm>                 the guest's address
