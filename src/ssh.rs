@@ -1,6 +1,7 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
-//! Commands and files through the system's `ssh` and `scp` with trivm's own key; the password
-//! for a guest's first login comes from trivm itself as `SSH_ASKPASS`.
+//! Commands and files through the system's `ssh` and `scp` with trivm's own key, `exec`'s with
+//! `desktop` on macOS and Linux; the password for a guest's first login comes from trivm itself
+//! as `SSH_ASKPASS`.
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
@@ -132,12 +133,116 @@ pub fn quote(x: &str) -> String {
   }
 }
 
-pub fn exec(vm: &Vm, cmd: &[String]) -> io::Result<ExitStatus> {
-  let line = match vm.config.os() {
-    Os::Windows => windows::line(cmd),
-    _ => line(cmd),
-  };
+/// `desktop <program> [args]` on macOS: a launchd job in the user's GUI session, as SSH has no API
+/// to start one there; launchd's, the program has its own TCC grants, not sshd's. Booting a job out
+/// kills its program: finished jobs go at a later call, once their folder, their call's, is gone.
+const MACOS_DESKTOP: &str = r#"desktop() {
+  if [ $# -eq 0 ]; then
+    echo 'usage: desktop <program> [args]' >&2
+    return 2
+  fi
+  local exe=$1 uid tmp d job s=0 x n=0 up=0
+  case $exe in
+    */*) ;;
+    *) exe=$(command -v -- "$exe") || exe= ;;
+  esac
+  case $exe in
+    /*) ;;
+    ?*) exe=$PWD/$exe ;;
+  esac
+  exe=${exe%/}
+  if [ -d "$exe" ] && [ "${exe%.app}" != "$exe" ]; then
+    shift
+    if [ $# -gt 0 ]; then open -a "$exe" --args "$@"; else open -a "$exe"; fi
+    return
+  fi
+  if [ ! -f "$exe" ] || [ ! -x "$exe" ]; then
+    echo "desktop: no program $1" >&2
+    return 127
+  fi
+  shift
+  uid=$(id -u)
+  tmp=$(getconf DARWIN_USER_TEMP_DIR)
+  launchctl print "gui/$uid" | awk '$1 == 0 && $3 ~ /^trivm\.desktop\./ { print $3 }' |
+    while read -r x; do
+      [ -d "$tmp/$x" ] || launchctl bootout "gui/$uid/$x" 2>/dev/null || :
+    done
+  d=$(mktemp -d "$tmp/trivm.desktop.XXXXXXXXXX") || return
+  job=${d##*/}
+  cat > "$d/job.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+<key>Label</key><string>$job</string>
+<key>ProgramArguments</key><array/>
+<key>EnvironmentVariables</key><dict/>
+<key>ProcessType</key><string>Interactive</string>
+<key>AbandonProcessGroup</key><true/>
+<key>RunAtLoad</key><true/>
+</dict></plist>
+EOF
+  for x in "$exe" "$@"; do
+    plutil -insert ProgramArguments -string "$x" -append "$d/job.plist" || s=1
+  done
+  [ $s -eq 0 ] && plutil -insert WorkingDirectory -string "$PWD" "$d/job.plist" &&
+    plutil -insert EnvironmentVariables.PATH -string "$PATH" "$d/job.plist" &&
+    launchctl bootstrap "gui/$uid" "$d/job.plist" || { rm -rf "$d"; return 1; }
+  # The domain's line of the job: its pid and last status, not its arguments, which may say
+  # anything. A pid may be there before the program fails to run: it counts once seen for 0.2 s.
+  while [ $n -lt 100 ]; do
+    s=$(launchctl print "gui/$uid" | awk -v job="$job" '$3 == job { print $1, $2 }')
+    case $s in
+      '' | '0 -') ;;
+      0\ *) s=${s#0 } && break ;;
+      *) up=$((up + 1)) && [ $up -eq 3 ] && s=up && break ;;
+    esac
+    n=$((n + 1))
+    sleep 0.1
+  done
+  [ "$s" = up ] || launchctl bootout "gui/$uid/$job"
+  rm -rf "$d"
+  case $s in
+    up | 0) return 0 ;;
+    '' | '0 -') echo "desktop: $exe didn't start in 10 seconds" >&2 ;;
+    78) echo "desktop: $exe exited: 78, launchd's EX_CONFIG when it can't run it" >&2 ;;
+    -*) echo "desktop: $exe ended on signal ${s#-}" >&2 ;;
+    *) echo "desktop: $exe exited: $s" >&2 ;;
+  esac
+  return 1
+}
+"#;
 
+/// `desktop <program> [args]` on Linux: the program out of the SSH session, on its display.
+const LINUX_DESKTOP: &str = r#"desktop() {
+  if [ $# -eq 0 ]; then
+    echo 'usage: desktop <program> [args]' >&2
+    return 2
+  fi
+  if ! command -v -- "$1" >/dev/null; then
+    echo "desktop: no program $1" >&2
+    return 127
+  fi
+  local s=0
+  setsid "$@" >/dev/null 2>&1 </dev/null &
+  sleep 0.2
+  kill -0 $! 2>/dev/null && return
+  wait $! || s=$?
+  [ $s -eq 0 ] && return
+  echo "desktop: $1 exited: $s" >&2
+  return 1
+}
+"#;
+
+/// `exec`'s command line: `desktop` defined, then the command.
+fn exec_line(os: Os, cmd: &[String]) -> String {
+  match os {
+    Os::Macos => format!("{MACOS_DESKTOP}{}", line(cmd)),
+    Os::Linux => format!("{LINUX_DESKTOP}{}", line(cmd)),
+    Os::Windows => windows::line(cmd),
+  }
+}
+
+pub fn exec(vm: &Vm, cmd: &[String]) -> io::Result<ExitStatus> {
+  let line = exec_line(vm.config.os(), cmd);
   ssh(vm)?.arg("--").arg(remote(vm, &line)?).status()
 }
 
@@ -279,6 +384,19 @@ mod tests {
       r"echo 'a b' 'it'\''s' 'x=1' '=ls'"
     );
     assert_eq!(quote(""), "''");
+  }
+
+  #[test]
+  fn desktop() {
+    // Each system's `desktop` in its shell, refusing no program and a missing one.
+    let cmd = vec!["desktop; echo $?; desktop /nope 2>&1; echo $?".to_string()];
+    for (shell, os) in [("zsh", Os::Macos), ("bash", Os::Linux)] {
+      let line = exec_line(os, &cmd);
+      assert!(line.ends_with(&format!("}}\n{}", cmd[0])));
+      let out = Command::new(shell).args(["-c", &line]).output().unwrap();
+      let out = String::from_utf8_lossy(&out.stdout);
+      assert_eq!(out, "2\ndesktop: no program /nope\n127\n", "{shell}");
+    }
   }
 
   #[test]

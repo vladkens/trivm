@@ -51,7 +51,8 @@ what trivm does, so the two aren't mixed up:
   button read with Vision and clicked (`main.rs`'s `stop`); `/etc/kcpassword` written for the
   automatic login (`system.rs`); agent-desktop as a launchd job for its grant, and on Windows
   as a scheduled task in the desktop's session, a window raised by minimizing and restoring it,
-  a popup uncovered by minimizing the windows in front of it (`ui.rs`); `LabConfig`'s skipped checks and `desktop`'s scheduled task (`windows.rs`).
+  a popup uncovered by minimizing the windows in front of it (`ui.rs`); `desktop`'s launchd job
+  on macOS (`ssh.rs`); `LabConfig`'s skipped checks and `desktop`'s scheduled task (`windows.rs`).
 - A hack goes with the last system that needs it: macOS 27 makes its user itself, so `apfs.rs`
   goes with 15 and 26. Keep this list current in the commit that adds or removes one.
 
