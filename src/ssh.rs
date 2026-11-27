@@ -144,7 +144,7 @@ const MACOS_DESKTOP: &str = r#"desktop() {
   local exe=$1 uid tmp d job s=0 x n=0 up=0
   case $exe in
     */*) ;;
-    *) exe=$(command -v -- "$exe") || exe= ;;
+    *) exe=$(whence -p -- "$exe") || exe= ;;
   esac
   case $exe in
     /*) ;;
@@ -211,23 +211,63 @@ EOF
 }
 "#;
 
-/// `desktop <program> [args]` on Linux: the program out of the SSH session, on its display.
+/// `desktop <program> [args]` on Linux: a service of the user's systemd, with the desktop's
+/// environment (sshd's `DISPLAY` if it gave none), arguments' `$` doubled against systemd's
+/// expansion, forks kept; a failed unit is reset once read, or 10 s on by a later call.
 const LINUX_DESKTOP: &str = r#"desktop() {
   if [ $# -eq 0 ]; then
     echo 'usage: desktop <program> [args]' >&2
     return 2
   fi
-  if ! command -v -- "$1" >/dev/null; then
+  local exe=$1 unit k v state= code= status=
+  case $exe in
+    */*) ;;
+    *) exe=$(type -P -- "$exe") || exe= ;;
+  esac
+  case $exe in
+    /*) ;;
+    ?*) exe=$PWD/$exe ;;
+  esac
+  if [ ! -f "$exe" ] || [ ! -x "$exe" ]; then
     echo "desktop: no program $1" >&2
     return 127
   fi
-  local s=0
-  setsid "$@" >/dev/null 2>&1 </dev/null &
+  shift
+  set -- "$exe" "${@//\$/\$\$}"
+  if ! systemctl --user show-environment | grep -Eq '^(WAYLAND_)?DISPLAY='; then
+    set -- -E "DISPLAY=$DISPLAY" "$@"
+  fi
+  unit=trivm-desktop-$(date +%s%N)
+  systemctl --user list-units --state=failed --plain --no-legend 'trivm-desktop-*' |
+    while read -r k v; do
+      k=${k#trivm-desktop-}
+      if [ "${k%.service}" -lt "$((${unit#trivm-desktop-} - 10000000000))" ]; then
+        systemctl --user reset-failed "trivm-desktop-$k" 2>/dev/null || true
+      fi
+    done
+  systemd-run --user --quiet --unit="$unit" --service-type=exec --same-dir -E "PATH=$PATH" \
+    -p KillMode=process -p StandardOutput=null -p StandardError=null "$@" || {
+    systemctl --user reset-failed "$unit" 2>/dev/null || true
+    echo "desktop: $exe couldn't be executed" >&2
+    return 1
+  }
   sleep 0.2
-  kill -0 $! 2>/dev/null && return
-  wait $! || s=$?
-  [ $s -eq 0 ] && return
-  echo "desktop: $1 exited: $s" >&2
+  while IFS== read -r k v; do
+    case $k in
+      ActiveState) state=$v ;;
+      ExecMainCode) code=$v ;;
+      ExecMainStatus) status=$v ;;
+    esac
+  done <<EOF
+$(systemctl --user show -p ActiveState -p ExecMainCode -p ExecMainStatus "$unit")
+EOF
+  [ "$state" = active ] && return
+  systemctl --user reset-failed "$unit" 2>/dev/null || true
+  case $code:$status in
+    *:0) return 0 ;;
+    1:*) echo "desktop: $exe exited: $status" >&2 ;;
+    *) echo "desktop: $exe ended on signal $status" >&2 ;;
+  esac
   return 1
 }
 "#;
