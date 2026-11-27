@@ -7,7 +7,6 @@ lets an agent (or you) run commands in it, copy files, take screenshots, click a
 the terminal. When you want to look, `trivm open` shows the VM in a window.
 
 - macOS 15, 26 and 27; Ubuntu, Debian and Fedora with their desktops; Windows 11.
-- Ubuntu 26.04 with GNOME 50 or KDE Plasma 6.6, on Wayland.
 - Systems from their own sources (Apple, the distros, Microsoft), pinned by SHA-256.
 - Throwaway clones of a VM, for tests that need a clean system each time.
 - The screen's windows and buttons by name, so an agent clicks by name, not by pixel.
@@ -29,7 +28,6 @@ trivm signs itself ad hoc with the virtualization entitlement the first time it 
 ```sh
 trivm create macos-27        # downloads 25 GB once, installs, starts: about 20 minutes
 trivm create ubuntu-24.04    # about 3 minutes
-trivm create ubuntu-26.04-kde  # KDE Plasma on Wayland; ubuntu-26.04-gnome for GNOME
 trivm create windows-11      # about 25 minutes
 trivm list
 
