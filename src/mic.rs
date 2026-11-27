@@ -3,15 +3,16 @@
 //! is tested with no microphone of the Mac's: the audio server's virtual devices on Linux,
 //! BlackHole on macOS, QEMU's sound card fed over D-Bus on Windows (`dbus.rs`).
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use std::{env, fs};
+use std::{env, fs, thread};
 
 use crate::vm::{Os, Vm};
-use crate::{bad, dbus, qemu, run, ssh, system, unix_ms};
+use crate::{bad, dbus, detach, qemu, run, ssh, system, unix_ms};
 
 /// The microphone's samples: 16-bit little-endian mono PCM at 48 kHz.
 const RATE: u32 = 48_000;
@@ -101,11 +102,7 @@ pub fn mic(name: &str, file: Option<&str>) -> io::Result<()> {
   match vm.config.os() {
     Os::Linux => guest(&vm, LINUX_HAS, LINUX_PLAY, wav.as_deref().map(samples).transpose()?),
     Os::Macos => guest(&vm, MACOS_HAS, MACOS_PLAY, wav.as_deref()),
-    // The sound card is QEMU's: checked by the listener's registration.
-    Os::Windows => match wav {
-      Some(wav) => windows(&vm, samples(&wav)?),
-      None => listen(&vm).map(|_| ()),
-    },
+    Os::Windows => windows(&vm, wav.as_deref().map(samples).transpose()?),
   }
 }
 
@@ -222,41 +219,123 @@ fn feed(vm: &Vm, script: &str, data: &[u8]) -> io::Result<ExitStatus> {
 /// QEMU's D-Bus object for the sound card (its `ui/dbus-display1.xml`).
 const AUDIO: (&str, &str) = ("/org/qemu/Display1/Audio", "org.qemu.Display1.Audio");
 
-/// Windows' microphone: trivm, a client of QEMU's D-Bus display, is the listener of the sound
-/// card's input, whose `Read` QEMU calls for the samples as the guest records; answered from
-/// `pcm` by the clock from now, silence after it. Returns once it has played.
-fn windows(vm: &Vm, pcm: &[u8]) -> io::Result<()> {
-  let (_display, mut listener) = listen(vm)?;
+/// Hands the samples to the VM's listener (`listen`) and waits until they have played; with none,
+/// only checks that the listener is there.
+fn windows(vm: &Vm, pcm: Option<&[u8]>) -> io::Result<()> {
+  let mut sock = UnixStream::connect(vm.state("mic.sock")).map_err(|_| {
+    bad(format!("{} has no microphone yet; trivm stop {0}, then start it", vm.name))
+  })?;
 
-  let start = Instant::now();
-  let end = Duration::from_secs_f64((pcm.len() / 2) as f64 / RATE as f64 + 0.5);
-  let (mut channels, mut pos) = (0, 0);
-  while start.elapsed() < end {
-    let Some(msg) = listener.next()? else { continue };
+  let Some(pcm) = pcm else { return Ok(()) };
+  sock.write_all(&(pcm.len() as u64).to_le_bytes())?;
+  sock.write_all(pcm)?;
+  let secs = (pcm.len() / 2) as f64 / RATE as f64;
+  sock.set_read_timeout(Some(Duration::from_secs_f64(secs + 10.0)))?;
+  let mut rep = Vec::new();
+  sock.read_to_end(&mut rep)?;
+  match rep == b"ok" {
+    true => Ok(()),
+    false => Err(bad(format!("{}'s microphone was cut off: another mic, or a stop", vm.name))),
+  }
+}
+
+/// Runs the microphone's listener (`_mic <vm>`) beside a Windows VM's QEMU, in a session of its
+/// own: it ends when QEMU does.
+pub fn spawn(vm: &Vm) -> io::Result<()> {
+  let log = fs::OpenOptions::new().create(true).append(true).open(vm.state("log"))?;
+  let mut cmd = Command::new(env::current_exe()?);
+  cmd.args(["_mic", &vm.name]).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+  detach(&mut cmd);
+  cmd.spawn()?;
+  Ok(())
+}
+
+/// A file a `mic` sends, played from `start`, until it ends or that `mic` does.
+struct Play {
+  pcm: Vec<u8>,
+  pos: usize,
+  start: Instant,
+  client: UnixStream,
+}
+
+/// `_mic <vm>`: the sound card's listener from the VM's start until QEMU quits, as with none QEMU
+/// hands the guest its buffer unwritten. Its `Read` answered with silence, or by the clock with
+/// the samples a `mic` sends on `mic.sock` (their length, then them); "ok" to it once played.
+pub fn listen(name: &str) -> io::Result<()> {
+  let vm = Vm::open(name)?;
+  let path = vm.state("mic.sock");
+  let _ = fs::remove_file(&path);
+  let sock = UnixListener::bind(&path)?;
+  let (tx, rx) = mpsc::channel();
+  thread::spawn(move || {
+    for mut client in sock.incoming().flatten() {
+      let mut len = [0; 8];
+      let _ = client.read_exact(&mut len).and_then(|_| {
+        let mut pcm = vec![0; u64::from_le_bytes(len) as usize];
+        client.read_exact(&mut pcm)?;
+        client.set_nonblocking(true)?;
+        tx.send((pcm, client)).map_err(|_| bad("the listener quit"))
+      });
+    }
+  });
+
+  let res = serve(&vm, &rx);
+  let _ = fs::remove_file(&path);
+  res
+}
+
+/// Answers QEMU's calls until it quits.
+fn serve(vm: &Vm, rx: &mpsc::Receiver<(Vec<u8>, UnixStream)>) -> io::Result<()> {
+  let mut listener = register(vm)?;
+  let (mut channels, mut play) = (0, None::<Play>);
+  loop {
+    if let Ok((pcm, client)) = rx.try_recv() {
+      play = Some(Play { pcm, pos: 0, start: Instant::now(), client });
+    }
+
+    // Played, or its `mic` gone: a read of 0 is its end, as it writes nothing more.
+    if let Some(x) = &mut play {
+      let end = Duration::from_secs_f64((x.pcm.len() / 2) as f64 / RATE as f64 + 0.5);
+      if x.start.elapsed() > end {
+        let _ = x.client.write_all(b"ok");
+        play = None;
+      } else if x.client.read(&mut [0]).is_ok_and(|n| n == 0) {
+        play = None;
+      }
+    }
+
+    let msg = match listener.next() {
+      Ok(Some(x)) => x,
+      Ok(None) => continue,
+      // QEMU quit: the VM stopped.
+      Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+      Err(e) => return Err(e),
+    };
+
     match msg.member.as_str() {
       "Init" => channels = init(&msg)?,
       "Read" => {
         let mut a = msg.args();
         let (_, size) = (a.u64()?, a.u64()? as usize);
+        let data = match &mut play {
+          Some(x) => read(&x.pcm, &mut x.pos, x.start.elapsed(), size, channels),
+          None => vec![0; size],
+        };
+
         let mut body = dbus::Buf::default();
-        body.bytes(&read(pcm, &mut pos, start.elapsed(), size, channels));
+        body.bytes(&data);
         listener.reply(&msg, "ay", &body.0)?;
       }
       _ if msg.wants_reply() => listener.error(&msg, "org.freedesktop.DBus.Error.UnknownMethod")?,
       _ => {}
     }
   }
-
-  Ok(())
 }
 
-/// The connections to QEMU's display and of the listener registered with it, which QEMU
-/// authenticates as its server, then asks for its properties.
-fn listen(vm: &Vm) -> io::Result<(dbus::Conn, dbus::Conn)> {
-  let sock = qemu::display(vm).map_err(|e| {
-    bad(format!("{} has no sound card yet; trivm stop, then start it ({e})", vm.name))
-  })?;
-
+/// The connection of a listener registered with QEMU's display, which QEMU authenticates as its
+/// server, then asks for its properties.
+fn register(vm: &Vm) -> io::Result<dbus::Conn> {
+  let sock = qemu::display(vm)?;
   sock.set_read_timeout(Some(Duration::from_secs(10)))?;
   let mut display = dbus::Conn::client(sock, true)?;
   let (ours, theirs) = UnixStream::pair()?;
@@ -265,9 +344,14 @@ fn listen(vm: &Vm) -> io::Result<(dbus::Conn, dbus::Conn)> {
   let fd = Some(theirs.as_raw_fd());
   let serial = display.call(AUDIO.0, AUDIO.1, "RegisterInListener", "h", &body.0, fd)?;
   display.wait(serial)?;
+  // Kept open and read, so what QEMU sends on it doesn't pile up.
+  thread::spawn(move || while display.next().is_ok() {});
 
-  ours.set_read_timeout(Some(Duration::from_millis(50)))?;
-  Ok((display, dbus::Conn::client(ours, false)?))
+  // `next` polls it once authenticated, so `serve` checks its `mic` between QEMU's calls.
+  ours.set_read_timeout(Some(Duration::from_secs(10)))?;
+  let listener = dbus::Conn::client(ours, false)?;
+  listener.timeout(Duration::from_millis(50))?;
+  Ok(listener)
 }
 
 /// The channels of the sound card's input from QEMU's `Init`, whose format must be the

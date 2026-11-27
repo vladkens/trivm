@@ -177,6 +177,10 @@ pub enum Cmd {
   },
   /// The process that deletes a `run`'s clone if `run` ends without doing it.
   Reap,
+  /// The process beside a Windows VM's QEMU that feeds its microphone, started by `start`.
+  Listen {
+    vm: String,
+  },
 }
 
 pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
@@ -261,7 +265,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         disk: number("--disk")?,
       }
     }
-    "start" | "stop" | "delete" | "open" | "ssh" | "ip" | "_run" => {
+    "start" | "stop" | "delete" | "open" | "ssh" | "ip" | "_run" | "_mic" => {
       want(1, "<vm>")?;
       let vm = pos[0].clone();
       match cmd.as_str() {
@@ -271,6 +275,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
         "open" => Cmd::Open { vm },
         "ssh" => Cmd::Ssh { vm },
         "ip" => Cmd::Ip { vm },
+        "_mic" => Cmd::Listen { vm },
         _ => Cmd::Serve { vm, recovery: flag("--recovery") },
       }
     }
@@ -431,6 +436,7 @@ mod tests {
     assert_eq!(args("os grant --help").unwrap(), Cmd::Help);
     assert_eq!(args("_run a").unwrap(), Cmd::Serve { vm: "a".into(), recovery: false });
     assert_eq!(args("_run a --recovery").unwrap(), Cmd::Serve { vm: "a".into(), recovery: true });
+    assert_eq!(args("_mic a").unwrap(), Cmd::Listen { vm: "a".into() });
     assert_eq!(args("type a --x").unwrap(), Cmd::Type { vm: "a".into(), text: "--x".into() });
     assert_eq!(args("type a --help").unwrap(), Cmd::Type { vm: "a".into(), text: "--help".into() });
   }

@@ -106,10 +106,12 @@ An app's dictation is tested with sound from a file on the host, never the Mac's
 once it has played. Any format macOS reads: WAV, AIFF, MP3, AAC, FLAC. trivm puts the microphone
 in the guest at the first `mic`, or with `mic <vm>` alone before the app starts:
 
-- macOS: [BlackHole](https://github.com/ExistentialAudio/BlackHole) 2ch (GPL-3.0), from its
-  author. An app records only with the microphone grant; the guest's own sounds go to it too.
+- macOS: [BlackHole](https://github.com/ExistentialAudio/BlackHole) 2ch (GPL-3.0), which hears
+  the guest's sounds too.
 - Linux: the audio server's virtual devices, PulseAudio's or PipeWire's, kept for later logins.
-- Windows: a sound card that QEMU feeds from trivm, in a VM started after this version.
+- Windows: a sound card that QEMU feeds from trivm, in a VM started since this version.
+
+On macOS the app records only with the microphone grant:
 
 ```sh
 trivm mic macos-27                                         # before the app starts

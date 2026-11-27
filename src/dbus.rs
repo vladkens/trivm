@@ -7,6 +7,7 @@
 use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 use crate::bad;
 
@@ -286,7 +287,13 @@ impl Conn {
     self.send(ERROR, &[Field::ReplyTo(to.serial), Field::Error(name)], &[], None).map(|_| ())
   }
 
-  /// The next message, or none when the socket's read timeout passes first.
+  /// Sets how long `next` waits for a message.
+  pub fn timeout(&self, x: Duration) -> io::Result<()> {
+    self.sock.set_read_timeout(Some(x))
+  }
+
+  /// The next message, or none when the socket's read timeout passes first; `UnexpectedEof` once
+  /// the peer has closed the connection.
   pub fn next(&mut self) -> io::Result<Option<Msg>> {
     loop {
       if let Some((msg, n)) = decode(&self.buf)? {
@@ -296,7 +303,7 @@ impl Conn {
 
       let mut chunk = [0; 65536];
       match self.sock.read(&mut chunk) {
-        Ok(0) => return Err(bad("the D-Bus peer closed the connection")),
+        Ok(0) => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "D-Bus peer gone")),
         Ok(n) => self.buf.extend(&chunk[..n]),
         Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
           return Ok(None);

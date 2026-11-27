@@ -107,6 +107,7 @@ fn start_cli() -> io::Result<ExitCode> {
       vz::serve(Vm::open(&vm)?, recovery)?;
     }
     Cmd::Reap => clone::reap()?,
+    Cmd::Listen { vm } => mic::listen(&vm)?,
   }
 
   Ok(ExitCode::SUCCESS)
@@ -200,7 +201,8 @@ pub fn start(name: &str) -> io::Result<()> {
     match vm.config.os() {
       Os::Windows => {
         let cds = system::windows_cds(&vm)?;
-        qemu::spawn(&mut vm, &cds)?
+        qemu::spawn(&mut vm, &cds)?;
+        mic::spawn(&vm)?;
       }
       _ => spawn(&vm, false)?,
     }
