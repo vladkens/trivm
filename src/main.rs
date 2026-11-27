@@ -193,8 +193,14 @@ fn signed() -> io::Result<()> {
 pub fn start(name: &str) -> io::Result<()> {
   // One start sets a new VM up; another waits for it, then finds the VM set up: Windows' setup
   // restarts the VM, which two at once would race.
-  let _setup = Vm::open(name)?.setting_up()?;
-  let mut vm = Vm::open(name)?;
+  let (_setup, mut vm) = loop {
+    let setup = Vm::open(name)?.setting_up()?;
+    let vm = Vm::open(name)?;
+    if vm.holds(&setup)? {
+      break (setup, vm);
+    }
+  };
+
   if vm.pid().is_none() {
     match vm.config.os() {
       Os::Windows => {

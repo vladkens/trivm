@@ -372,6 +372,18 @@ impl Vm {
     Ok(Some(f))
   }
 
+  /// Whether `lock`, from `setting_up`, is on the VM's own `setup` mark, or none on a VM set up: a
+  /// VM deleted meanwhile and made again of the name has a mark of its own to wait on.
+  pub fn holds(&self, lock: &Option<fs::File>) -> io::Result<bool> {
+    let mark = match fs::metadata(self.path(SETUP)) {
+      Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+      x => Some(x?.ino()),
+    };
+
+    let held = lock.as_ref().map(|f| f.metadata().map(|x| x.ino())).transpose()?;
+    Ok(mark == held)
+  }
+
   /// Checks that the `pid` this process locked is still the VM's: a `delete` removes it, maybe
   /// while another has it open, and a VM made again of the name has one of its own.
   fn current(&self, f: &fs::File) -> io::Result<()> {
@@ -638,18 +650,25 @@ mod tests {
     // Set up by one process at a time; nothing to wait for once it is.
     vm.setup = true;
     vm.save().unwrap();
-    let first = vm.setting_up().unwrap().unwrap();
+    let first = vm.setting_up().unwrap();
     let second = std::thread::spawn({
       let vm = Vm { mac: String::new(), ..at("a") };
       move || vm.setting_up().unwrap().is_some()
     });
     std::thread::sleep(std::time::Duration::from_millis(50));
     assert!(!second.is_finished());
+    assert!(vm.holds(&first).unwrap() && !vm.holds(&None).unwrap());
     drop(first);
     assert!(second.join().unwrap());
+
+    // A lock on the mark of a VM deleted meanwhile isn't the new one's; none on a VM set up is.
+    let stale = vm.setting_up().unwrap();
+    fs::remove_file(vm.path(SETUP)).unwrap();
+    vm.save().unwrap();
+    assert!(!vm.holds(&stale).unwrap());
     vm.setup = false;
     vm.save().unwrap();
-    assert!(vm.setting_up().unwrap().is_none());
+    assert!(vm.setting_up().unwrap().is_none() && vm.holds(&None).unwrap());
 
     // Removed, the name is free; its data folder left with no config is in the way.
     vm.remove().unwrap();
