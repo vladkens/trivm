@@ -812,7 +812,7 @@ pub fn windows_setup(vm: &mut Vm) -> io::Result<()> {
   eprintln!("restarting {} on virtio-gpu", vm.name);
   crate::stop(vm, false)?;
   vm::gone(fs::remove_file(vm.path("seed.iso")))?;
-  qemu::spawn(vm, &[])?;
+  crate::spawn_qemu(vm, &[])?;
   ssh::wait(vm, Duration::from_secs(300))
 }
 

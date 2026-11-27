@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,7 @@ use std::{env, fs, thread};
 
 use crate::display::{self, Act};
 use crate::vm::{PASSWORD, Vm};
-use crate::{bad, run};
+use crate::{bad, dbus, run};
 
 const QEMU: &str = "qemu-system-aarch64";
 
@@ -106,8 +106,16 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     format!("unix:{},server=on,wait=off", opt(&vm.state("qmp.sock"))),
     "-vnc".into(),
     "127.0.0.1:0,to=99,password=on".into(),
+    // A sound card whose microphone `mic` feeds over D-Bus at its rate, the Mac's sound left out;
+    // in stereo, as the guest sets a level for each channel, which QEMU leaves to `mic`.
+    "-audiodev".into(),
+    "dbus,id=mic,in.frequency=48000,in.channels=2".into(),
+    "-device".into(),
+    "ich9-intel-hda".into(),
+    "-device".into(),
+    "hda-micro,audiodev=mic".into(),
     "-display".into(),
-    "none".into(),
+    "dbus,p2p=yes,audiodev=mic".into(),
   ]
   .into();
 
@@ -356,6 +364,17 @@ impl Qmp {
   /// Runs a command with its arguments as a JSON object; returns the reply's line.
   fn call(&mut self, cmd: &str, args: &str) -> io::Result<String> {
     writeln!(self.w, r#"{{"execute": "{cmd}", "arguments": {args}}}"#)?;
+    self.reply(cmd)
+  }
+
+  /// `call` with an fd passed beside the command, as `getfd` takes one.
+  fn call_fd(&mut self, cmd: &str, args: &str, fd: RawFd) -> io::Result<String> {
+    let line = format!(r#"{{"execute": "{cmd}", "arguments": {args}}}"#) + "\n";
+    dbus::send_fd(&self.w, line.as_bytes(), fd)?;
+    self.reply(cmd)
+  }
+
+  fn reply(&mut self, cmd: &str) -> io::Result<String> {
     loop {
       let line = self.line()?;
       if line.starts_with(r#"{"return""#) {
@@ -644,6 +663,17 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
   }
 }
 
+// MARK: D-Bus
+
+/// A client's socket to QEMU's D-Bus display, handed to QEMU over QMP (`getfd`, `add_client`).
+pub fn dbus_display(vm: &Vm) -> io::Result<UnixStream> {
+  let mut qmp = Qmp::connect(vm)?;
+  let (ours, theirs) = UnixStream::pair()?;
+  qmp.call_fd("getfd", r#"{"fdname": "trivm-display"}"#, theirs.as_raw_fd())?;
+  qmp.call("add_client", r#"{"protocol": "@dbus-display", "fdname": "trivm-display"}"#)?;
+  Ok(ours)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -669,7 +699,9 @@ mod tests {
       "socket,id=tpm,path=/s/a,,b/tpm.sock",
       "tpm-tis-device,tpmdev=tpm,ppi=off -rtc base=utc",
       "-qmp unix:/s/a,,b/qmp.sock,server=on,wait=off",
-      "-vnc 127.0.0.1:0,to=99,password=on -display none",
+      "-vnc 127.0.0.1:0,to=99,password=on",
+      "-audiodev dbus,id=mic,in.frequency=48000,in.channels=2 -device ich9-intel-hda",
+      "-device hda-micro,audiodev=mic -display dbus,p2p=yes,audiodev=mic",
       "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=1",
       "file=/v/a,,b/seed.iso -device usb-storage,drive=cd1d,id=cd1",
     ] {

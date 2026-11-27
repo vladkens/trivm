@@ -4,12 +4,15 @@
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
 //! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), `clone`
 //! and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app under test its macOS
-//! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
+//! permissions (`permissions.rs`), `ui` reads the desktop's elements (`ui.rs`), and `mic` plays
+//! a file into the guest's microphone (`mic.rs`).
 
 mod apfs;
 mod args;
 mod clone;
+mod dbus;
 mod display;
+mod mic;
 mod permissions;
 mod qcow2;
 mod qemu;
@@ -22,6 +25,7 @@ mod windows;
 
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, thread};
@@ -94,6 +98,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
+    Cmd::Mic { vm, file } => mic::mic(&vm, file.as_deref())?,
     Cmd::Ui { vm, app } => ui::ui(&vm, app.as_deref())?,
     Cmd::ClickName { vm, name, app, right, double } => {
       ui::click(&vm, &name, app.as_deref(), right, double)?;
@@ -103,6 +108,7 @@ fn start_cli() -> io::Result<ExitCode> {
       vz::serve(Vm::open(&vm)?, recovery)?;
     }
     Cmd::Reap => clone::reap()?,
+    Cmd::Listen { vm } => mic::listen(&vm)?,
   }
 
   Ok(ExitCode::SUCCESS)
@@ -205,7 +211,7 @@ pub fn start(name: &str) -> io::Result<()> {
     match vm.config.os() {
       Os::Windows => {
         let cds = system::windows_cds(&vm)?;
-        qemu::spawn(&mut vm, &cds)?
+        spawn_qemu(&mut vm, &cds)?
       }
       _ => spawn(&vm, false)?,
     }
@@ -239,6 +245,13 @@ pub fn start(name: &str) -> io::Result<()> {
 
   eprintln!("{name} is up at {}", ssh::address(&vm)?);
   Ok(())
+}
+
+/// Runs a Windows VM's QEMU, then its microphone's listener, which ends with it: at a start, and
+/// again at the restart that ends Windows' setup.
+pub fn spawn_qemu(vm: &mut Vm, cds: &[PathBuf]) -> io::Result<()> {
+  qemu::spawn(vm, cds)?;
+  mic::spawn(vm)
 }
 
 /// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and
