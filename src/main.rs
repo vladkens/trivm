@@ -243,7 +243,8 @@ pub fn start(name: &str) -> io::Result<()> {
 /// open: a start's restart of macOS, after its setup or to unlock it, would fail another's SSH.
 fn one_start(vm: &Vm) -> io::Result<fs::File> {
   vm::made(&vm.state_dir)?;
-  let f = fs::OpenOptions::new().create(true).append(true).open(vm.state("start.lock"))?;
+  let path = vm.state("start.lock");
+  let f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
   match f.try_lock() {
     Ok(()) => {}
     Err(fs::TryLockError::WouldBlock) => {
@@ -253,7 +254,11 @@ fn one_start(vm: &Vm) -> io::Result<fs::File> {
     Err(fs::TryLockError::Error(e)) => return Err(e),
   }
 
-  Ok(f)
+  // A `delete` meanwhile removed it; a VM made again of the name has one of its own.
+  match fs::metadata(&path).map(|x| x.ino()).ok() == Some(f.metadata()?.ino()) {
+    true => Ok(f),
+    false => Err(bad(format!("{} was deleted meanwhile; see trivm list", vm.name))),
+  }
 }
 
 /// Runs the VM's process in a session of its own, macOS's from recoveryOS with `recovery`, and
