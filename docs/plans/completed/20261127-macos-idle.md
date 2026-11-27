@@ -1,3 +1,5 @@
+Done: 2026-11-27
+
 # No screen saver or lock on macOS VMs
 
 `MAC_TUNE` is meant to turn sleep, the screen saver and the lock off, yet a macOS 27 VM left idle
@@ -60,9 +62,9 @@ doesn't end while the VM runs.
   `-currentHost` line and its sudo lock line; macOS 27 restarts once after its setup.
 - [x] 2. `start` turns both off on macOS, as the user.
 - [x] 3. The proof: a clone of a fixed VM idle over 20 minutes, a shot read; the lock checked.
-- [ ] 4. `start` deletes loginwindow's flag and restarts, at a boot that came up locked.
-- [ ] 5. `caffeinate` with null stdio and its own session, one helper for QEMU and VZ.
-- [ ] 6. The proof: a clone locked, stopped, started, main's build first; `start | cat` returns.
+- [x] 4. `start` deletes loginwindow's flag and restarts, at a boot that came up locked.
+- [x] 5. `caffeinate` with null stdio and its own session, one helper for QEMU and VZ.
+- [x] 6. The proof: a clone locked, stopped, started, main's build first; `start | cat` returns.
 
 ## Checks
 
@@ -88,4 +90,17 @@ Run on this Mac on clones of `macos-27`, shots read:
 - The setup path run on that running clone (its `setup` mark set): the key, the time zone from
   UTC back to the host's, both `idleTime`s 0, no restart (the user older than the boot); the
   restart as `macos_setup` does it: back on a new `kern.boottime` in 19 s, the VM process kept.
-- Left: a new macOS 27 VM through `create`, for its restart, not run here: no disk room for one.
+- The lock at boot, on a clone: locked with Ctrl+Cmd+Q, `autoLoginUserScreenLocked` 1; stopped
+  and started with main's build: the lock screen, the mark still 1, the session locked
+  (`CGSSessionScreenIsLocked`), `ui --app Finder` failing with nimbo's "Global application window
+  inventory did not stabilize before deadline". The mark deleted by hand, macOS restarted: the
+  desktop, unlocked.
+- This branch: locked, stopped, started: "restarting bv to unlock its screen", up in 49 s, the
+  desktop in the shot, the mark gone, `ui` listing the windows. Stopped and started unlocked: no
+  restart, 26 s. `nimbo-x` comes up unlocked at its next `stop` and `start` with this branch.
+- `caffeinate`: main's, VZ's in the VM process, had the VM's log as stdout and stderr and the VM's
+  process group; this branch's had /dev/null for all three and a group of its own, and
+  `trivm start bv | cat` returned in 23 s.
+- Left: a new macOS 27 VM through `create`, for its restart, not run here: no disk room for one;
+  nor QEMU's `caffeinate`, the one that held the caller's pipe, as no Windows VM is here either: it
+  calls the same helper.
