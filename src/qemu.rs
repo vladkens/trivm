@@ -46,6 +46,16 @@ pub fn platform(vm: &Vm) -> io::Result<()> {
   Ok(())
 }
 
+/// The VM's display: virtio-gpu at its EDID's mode, drawn by virtio-win's viogpudo, which Setup
+/// adds; ramfb (800×600) while Setup's media is attached, as Windows PE draws nothing on
+/// virtio-gpu, and for a VM made before, with no driver for it. Both would be two monitors.
+fn display(vm: &Vm, setup: bool) -> &'static str {
+  match vm.gpu && !setup {
+    true => "virtio-gpu-pci,xres=1920,yres=1080",
+    false => "ramfb",
+  }
+}
+
 /// QEMU's command line for the VM, the CDs attached as USB drives.
 pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
   let c = &vm.config;
@@ -72,7 +82,7 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     "-device".into(),
     "nvme,drive=disk,serial=trivm,bootindex=0".into(),
     "-device".into(),
-    "ramfb".into(),
+    display(vm, !cds.is_empty()).into(),
     "-device".into(),
     "qemu-xhci,id=usb".into(),
     "-device".into(),
@@ -607,13 +617,6 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
       qmp.call("screendump", &args).map(|_| String::new())
     }
     ["lit"] => Ok(format!("{:.2}", frame(vm, &mut qmp)?.lit())),
-    ["eject"] => {
-      for id in CDS {
-        let _ = qmp.call("device_del", &format!(r#"{{"id": "{id}"}}"#));
-      }
-
-      Ok(String::new())
-    }
     ["open"] => {
       let args = format!(r#"{{"protocol": "vnc", "password": {}}}"#, json(PASSWORD));
       qmp.call("set_password", &args)?;
@@ -679,6 +682,14 @@ mod tests {
     }
 
     assert!(!args(&vm, Path::new("/q"), &[]).join(" ").contains("usb-storage"));
+
+    // A VM with viogpudo draws on virtio-gpu once set up, on ramfb for Setup; never on both.
+    let vm = Vm { gpu: true, ..vm };
+    let gpu = args(&vm, Path::new("/q"), &[]).join(" ");
+    assert!(gpu.contains("=0 -device virtio-gpu-pci,xres=1920,yres=1080 -device qemu-xhci"));
+    assert!(!gpu.contains("ramfb"));
+    let setup = args(&vm, Path::new("/q"), &cds).join(" ");
+    assert!(setup.contains("-device ramfb -device") && !setup.contains("virtio-gpu"));
 
     // QEMU's paths take a comma doubled; swtpm's none.
     assert!(fits(&vm).is_err());
