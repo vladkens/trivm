@@ -4,12 +4,15 @@
 //! commands and files go through SSH (`ssh.rs`), the screen is read and driven from the host
 //! (`display.rs`, QMP for QEMU), `create` installs a system (`system.rs`, `windows.rs`), `clone`
 //! and `run` copy one (`clone.rs`), `os grant` and `os sip` give the app under test its macOS
-//! permissions (`permissions.rs`), and `ui` reads the desktop's elements (`ui.rs`).
+//! permissions (`permissions.rs`), `ui` reads the desktop's elements (`ui.rs`), and `mic` plays
+//! a file into the guest's microphone (`mic.rs`).
 
 mod apfs;
 mod args;
 mod clone;
+mod dbus;
 mod display;
+mod mic;
 mod permissions;
 mod qcow2;
 mod qemu;
@@ -94,6 +97,7 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Move { vm, x, y } => _ = ask(&Vm::open(&vm)?, &format!("move {x} {y}"), "")?,
     Cmd::Type { vm, text } => _ = ask(&Vm::open(&vm)?, "type", &text)?,
     Cmd::Key { vm, keys } => _ = ask(&Vm::open(&vm)?, &format!("key {keys}"), "")?,
+    Cmd::Mic { vm, file } => mic::mic(&vm, file.as_deref())?,
     Cmd::Ui { vm, app } => ui::ui(&vm, app.as_deref())?,
     Cmd::ClickName { vm, name, app, right, double } => {
       ui::click(&vm, &name, app.as_deref(), right, double)?;

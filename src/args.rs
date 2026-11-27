@@ -52,6 +52,11 @@ The screen, from the host:
   type <vm> <text>        type text (US layout)
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
+A microphone, the guest's default input, which trivm puts in the guest at the first use
+(BlackHole on macOS), fed from the host, never from the Mac's microphone:
+  mic <vm> [file]         play an audio file (WAV, MP3, AAC, FLAC...) into it in real time,
+                          return when played; with no file, only put it there
+
 The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
 (on macOS with its Accessibility grant, which needs SIP off; not on ubuntu-22.04 or Windows):
   ui <vm> [--app <name>]  the visible windows, all apps' or one's, and macOS's menu bar, with
@@ -130,6 +135,10 @@ pub enum Cmd {
   Key {
     vm: String,
     keys: String,
+  },
+  Mic {
+    vm: String,
+    file: Option<String>,
   },
   Ui {
     vm: String,
@@ -324,6 +333,10 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> io::Result<Cmd> {
       want(2, "<vm> <keys>")?;
       Cmd::Key { vm: pos[0].clone(), keys: pos[1].clone() }
     }
+    "mic" => match pos.len() {
+      1 | 2 => Cmd::Mic { vm: pos[0].clone(), file: pos.get(1).cloned() },
+      _ => return Err(bad("usage: trivm mic <vm> [file]")),
+    },
     "ui" => {
       want(1, "<vm> [--app <name>]")?;
       Cmd::Ui { vm: pos[0].clone(), app: value("--app") }
@@ -367,6 +380,12 @@ mod tests {
       Cmd::Click { vm: "a".into(), x: 10.0, y: 20.5, right: false, double: true }
     );
     assert_eq!(args("shot a").unwrap(), Cmd::Shot { vm: "a".into(), file: None });
+    assert_eq!(args("mic a").unwrap(), Cmd::Mic { vm: "a".into(), file: None });
+    assert_eq!(
+      args("mic a hello.m4a").unwrap(),
+      Cmd::Mic { vm: "a".into(), file: Some("hello.m4a".into()) }
+    );
+    assert!(args("mic a b c").is_err());
 
     assert_eq!(args("ui a").unwrap(), Cmd::Ui { vm: "a".into(), app: None });
     assert_eq!(

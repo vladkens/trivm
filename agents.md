@@ -44,7 +44,8 @@ what trivm does, so the two aren't mixed up:
 - A hack that knows nothing of VMs, such as a disk format's code, is a file of its own, as an
   outside crate would be: it uses nothing of trivm's but `bad`, and its header says what trivm
   needs it for. `apfs.rs` (a file's owner set to root on a macOS disk, for 15's and 26's first
-  boot), `qcow2.rs` (the distros' disks to raw for VZ).
+  boot), `qcow2.rs` (the distros' disks to raw for VZ), `dbus.rs` (D-Bus's wire protocol, for
+  QEMU's microphone).
 - A hack inside a command stays in that command's file, its doc comment saying which API is
   missing: the VM's view in a hidden window for shots and input (`display.rs`); TCC's database
   written and recoveryOS read with Vision (`permissions.rs`); macOS's Shut Down at its power

@@ -12,6 +12,7 @@ the terminal. When you want to look, `trivm open` shows the VM in a window.
 - Systems from their own sources (Apple's IPSWs, the distros' cloud images, Microsoft's ESD),
   pinned by SHA-256.
 - No agent in the guest: commands go through SSH, the screen is driven from the host.
+- A microphone in the guest that plays an audio file from the host, not the Mac's microphone.
 - One binary in Rust, no other app driven: no UTM, no AppleScript.
 
 Requires a Mac with Apple silicon on macOS 27; Windows also needs `brew install qemu swtpm wimlib`.
@@ -98,6 +99,22 @@ trivm ui macos-27 --app Wavo
 #     radiobutton "Models" 710,110 56x48
 #   combobox "Microphone" = "Automatic" 939,211 111x24
 trivm click macos-27 --name Models   # raises Wavo's window first if another is in front
+```
+
+An app's dictation is tested with sound from a file on the host, never the Mac's microphone:
+`mic` plays the file into the guest's microphone, its default input, in real time, and returns
+once it has played. Any format macOS reads: WAV, AIFF, MP3, AAC, FLAC. trivm puts the microphone
+in the guest at the first `mic`, or with `mic <vm>` alone before the app starts:
+
+- macOS: [BlackHole](https://github.com/ExistentialAudio/BlackHole) 2ch (GPL-3.0), from its
+  author. An app records only with the microphone grant; the guest's own sounds go to it too.
+- Linux: the audio server's virtual devices, PulseAudio's or PipeWire's, kept for later logins.
+- Windows: a sound card that QEMU feeds from trivm, in a VM started after this version.
+
+```sh
+trivm mic macos-27                                         # before the app starts
+trivm os grant macos-27 /Applications/Wavo.app microphone
+trivm mic macos-27 hello.m4a                               # Wavo hears "hello"
 ```
 
 ### Windows
