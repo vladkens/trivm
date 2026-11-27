@@ -12,5 +12,6 @@ The maintainer's backlog, in order: each item is done as a plan in `docs/plans/`
 - [ ] **The accessibility tree on Windows.** agent-desktop's arm64 build for Windows (UI Automation) put in the guest, so `ui` and `click --name` work there too.
 - [ ] **Windows' screen at any size.** virtio-gpu with virtio-win's `viogpudo` display driver instead of ramfb (800×600 now, 1024×768 at most): 1920×1080 as on Linux.
 - [ ] **Cinnamon, Linux Mint's desktop.** Mint has no arm64 build, and its bugs are its desktop's, such as Wavo's on Mint 22.3 (Cinnamon's text scaling, its keyboard layout): Cinnamon on Ubuntu 24.04, Mint 22's base, beside the other desktops.
+- [ ] **Retina shots and the guest's screen size.** `shot` at the display's own pixels (macOS draws 3200×1800 at 2x now, and `shot` scales it to 1600×900), and the screen's size chosen per VM, e.g. 1152×720 points at 2x (2304×1440 pixels) as Wavo's covers were shot on UTM; on macOS, Linux and Windows.
 
 Not planned: x86 guests (emulated), Linux Mint itself (x86 only), Windows 10, macOS 11–14, images hosted by us, an app of our own beyond the VM's window.
