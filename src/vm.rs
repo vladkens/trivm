@@ -146,6 +146,9 @@ pub struct Vm {
   /// The host's port forwarded to the guest's SSH, for a VM on QEMU's user network: `port` in the
   /// state folder, chosen at each start.
   pub port: Option<u16>,
+  /// Whether Windows has virtio-win's display driver and draws on virtio-gpu: the mark `gpu` in
+  /// the data folder, which `create` writes; a Windows VM made before has neither, and ramfb.
+  pub gpu: bool,
 }
 
 impl Vm {
@@ -153,8 +156,8 @@ impl Vm {
   pub fn at(name: &str, config: Config) -> Self {
     let conf = config_dir().join(format!("{name}.conf"));
     let (dir, state_dir) = (data_dir().join(name), state_dir().join(name));
-    let (mac, setup, port) = (String::new(), false, None);
-    Self { name: name.into(), conf, dir, state_dir, config, mac, setup, port }
+    let (mac, setup, port, gpu) = (String::new(), false, None, false);
+    Self { name: name.into(), conf, dir, state_dir, config, mac, setup, port, gpu }
   }
 
   pub fn open(name: &str) -> io::Result<Self> {
@@ -182,6 +185,7 @@ impl Vm {
     };
 
     self.setup = self.path(SETUP).exists();
+    self.gpu = self.path(GPU).exists();
     self.port = self.saved_port();
     Ok(())
   }
@@ -348,6 +352,26 @@ impl Vm {
     Ok(f)
   }
 
+  /// Waits while another process sets the VM up, then holds that for as long as the file returned
+  /// is open: a lock on its `setup` mark; none for a VM that is set up.
+  pub fn setting_up(&self) -> io::Result<Option<fs::File>> {
+    let f = match fs::File::open(self.path(SETUP)) {
+      Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+      x => x?,
+    };
+
+    match f.try_lock() {
+      Ok(()) => {}
+      Err(fs::TryLockError::WouldBlock) => {
+        eprintln!("waiting for another start setting {} up", self.name);
+        f.lock()?;
+      }
+      Err(fs::TryLockError::Error(e)) => return Err(e),
+    }
+
+    Ok(Some(f))
+  }
+
   /// Checks that the `pid` this process locked is still the VM's: a `delete` removes it, maybe
   /// while another has it open, and a VM made again of the name has one of its own.
   fn current(&self, f: &fs::File) -> io::Result<()> {
@@ -379,6 +403,9 @@ impl Vm {
 
 /// The mark of a VM whose first boot hasn't finished, in its data folder.
 const SETUP: &str = "setup";
+
+/// The mark of a Windows VM whose disk has virtio-gpu's driver, in its data folder.
+pub const GPU: &str = "gpu";
 
 fn taken(name: &str) -> io::Error {
   let msg = format!("{name} exists; trivm delete {name} first");
@@ -601,6 +628,28 @@ mod tests {
     read.read().unwrap();
     assert_eq!((&read.config, read.mac.as_str(), read.setup), (&config, mac, false));
     assert_eq!((read.port, read.ip().as_deref()), (Some(50022), Some("127.0.0.1")));
+    assert!(!read.gpu);
+
+    // A Windows VM with virtio-gpu's driver, as `create` marks one.
+    fs::write(vm.path(GPU), "").unwrap();
+    read.read().unwrap();
+    assert!(read.gpu);
+
+    // Set up by one process at a time; nothing to wait for once it is.
+    vm.setup = true;
+    vm.save().unwrap();
+    let first = vm.setting_up().unwrap().unwrap();
+    let second = std::thread::spawn({
+      let vm = Vm { mac: String::new(), ..at("a") };
+      move || vm.setting_up().unwrap().is_some()
+    });
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(!second.is_finished());
+    drop(first);
+    assert!(second.join().unwrap());
+    vm.setup = false;
+    vm.save().unwrap();
+    assert!(vm.setting_up().unwrap().is_none());
 
     // Removed, the name is free; its data folder left with no config is in the way.
     vm.remove().unwrap();

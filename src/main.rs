@@ -191,6 +191,9 @@ fn signed() -> io::Result<()> {
 /// Starts the VM's process unless it runs, and waits until the guest answers SSH and its desktop
 /// is up; a new VM's first boot sets it up.
 pub fn start(name: &str) -> io::Result<()> {
+  // One start sets a new VM up; another waits for it, then finds the VM set up: Windows' setup
+  // restarts the VM, which two at once would race.
+  let _setup = Vm::open(name)?.setting_up()?;
   let mut vm = Vm::open(name)?;
   if vm.pid().is_none() {
     match vm.config.os() {
@@ -213,7 +216,7 @@ pub fn start(name: &str) -> io::Result<()> {
   match (vm.setup, vm.config.os()) {
     (true, Os::Macos) => system::macos_setup(&vm)?,
     (true, Os::Linux) => system::linux_setup(&vm)?,
-    (true, Os::Windows) => system::windows_setup(&vm)?,
+    (true, Os::Windows) => system::windows_setup(&mut vm)?,
     (false, _) => ssh::wait(&vm, Duration::from_secs(300))?,
   }
 
