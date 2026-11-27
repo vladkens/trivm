@@ -15,7 +15,7 @@ VMs:
                           install a system unattended and start it; systems: macos-27,
                           macos-26, macos-15, ubuntu-24.04, ubuntu-22.04, debian-13, fedora-45,
                           windows-11 (needs brew install qemu swtpm wimlib)
-  start <vm>              start in the background, wait for the desktop
+  start <vm>              start in the background, wait for the desktop, unlocked
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
   delete <vm>             stop and remove
