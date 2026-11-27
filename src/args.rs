@@ -54,9 +54,11 @@ The screen, from the host:
   key <vm> <keys>         press keys together, e.g. enter, cmd+space, ctrl+alt+t
 
 A microphone, the guest's default input, which trivm puts in the guest at the first use
-(BlackHole on macOS), fed from the host, never from the Mac's microphone:
+(BlackHole on macOS, where an app records with `os grant`'s microphone), fed from the host,
+never from the Mac's microphone:
   mic <vm> [file]         play an audio file (WAV, MP3, AAC, FLAC...) into it in real time,
-                          return when played; with no file, only put it there
+                          return when played; with no file, only put it there, before the app
+                          starts
 
 The desktop's elements, read by agent-desktop, which trivm puts in the guest at the first use
 (on macOS with its Accessibility grant, which needs SIP off; not on ubuntu-22.04 or Windows):

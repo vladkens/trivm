@@ -11,7 +11,6 @@ the terminal. When you want to look, `trivm open` shows the VM in a window.
 - Throwaway clones of a VM, for tests that need a clean system each time.
 - The screen's windows and buttons by name, so an agent clicks by name, not by pixel.
 - macOS permissions (Accessibility, Screen Recording...) for the app, with no clicks.
-- A microphone in the guest that plays an audio file from the host, not the Mac's microphone.
 - One binary in Rust: no UTM, no AppleScript.
 
 Requires a Mac with Apple silicon on macOS 27; Windows also needs `brew install qemu swtpm wimlib`.
@@ -51,24 +50,6 @@ trivm stop macos-27
 ```
 
 `trivm --help` lists the systems and all commands. The guest's user is `user`, password `1234`.
-
-An app's dictation is tested with sound from a file on the host, never the Mac's microphone:
-`mic` plays the file into the guest's microphone, its default input, in real time, and returns
-once it has played. Any format macOS reads: WAV, AIFF, MP3, AAC, FLAC. trivm puts the microphone
-in the guest at the first `mic`, or with `mic <vm>` alone before the app starts:
-
-- macOS: [BlackHole](https://github.com/ExistentialAudio/BlackHole) 2ch (GPL-3.0), which hears
-  the guest's sounds too.
-- Linux: the audio server's virtual devices, PulseAudio's or PipeWire's, kept for later logins.
-- Windows: a sound card that QEMU feeds from trivm, in a VM started since this version.
-
-On macOS the app records only with the microphone grant:
-
-```sh
-trivm mic macos-27                                         # before the app starts
-trivm os grant macos-27 /Applications/Wavo.app microphone
-trivm mic macos-27 hello.m4a                               # Wavo hears "hello"
-```
 
 Files, by the XDG Base Directory spec: each VM's settings in `~/.config/trivm/<vm>.conf`, its
 disks in `~/.local/share/trivm`, downloads in `~/.cache/trivm`, logs and sockets in
