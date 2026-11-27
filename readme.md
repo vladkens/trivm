@@ -123,9 +123,10 @@ trivm makes Windows' install media as Microsoft's Media Creation Tool does: the 
 its catalog lists, from Microsoft's CDN, turned into an ISO of Windows 11 Pro with `wimlib-imagex`
 and `hdiutil` and kept in the cache (5 GB).
 
-`create` and `start` return when the desktop is up. Coordinates for `click` are the pixels of a
-shot. The guest's user is `user`, password `1234`, sudo without a password (an administrator on
-Windows).
+`create` and `start` return when the desktop is up, unlocked: a macOS VM stopped while its screen
+was locked restarts once at `start`, as macOS would lock it again. Coordinates for `click` are the
+pixels of a shot. The guest's user is `user`, password `1234`, sudo without a password (an
+administrator on Windows).
 
 ## Files
 
