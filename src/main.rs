@@ -412,9 +412,14 @@ fn shut_down(vm: &Vm) -> io::Result<()> {
 /// Stops the VM at once and removes it, holding its lock: it can't start or be cloned meanwhile,
 /// and one being made, cloned or set up isn't removed under it.
 fn delete(vm: &Vm) -> io::Result<()> {
-  // A start setting the VM up restarts it, unheld between its two processes.
-  let _setup = vm.setting_up(false)?;
   let was = data_ino(vm);
+  // A start setting the VM up restarts it, unheld between its two processes. The lock is checked
+  // to be on the mark of the VM `was` names, not on one made again of its name.
+  let setup = vm.setting_up(false)?;
+  if !vm.holds(&setup)? || data_ino(vm) != was {
+    return Err(bad(format!("{} was deleted meanwhile; see trivm list", vm.name)));
+  }
+
   stop(vm, true)?;
   remove(vm, was)
 }
