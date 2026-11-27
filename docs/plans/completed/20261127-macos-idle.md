@@ -34,9 +34,9 @@ doesn't end while the VM runs.
   nonzero one there (System Settings') would win.
 - A new VM has it from its first session: 15 and 26 by the setup script, before the first login;
   27, whose user VZ's provisioning makes and logs in with no step before, by one restart at the
-  end of its setup, at the boot that made the user only (a second `start` meanwhile runs the setup
-  too). The restart is told by `kern.boottime`, the shutdown run in the background so a stalled
-  one times out.
+  end of its setup, at the boot that made the user only (a start stopped before its end may have
+  restarted it already). The restart is told by `kern.boottime`, the shutdown run in the
+  background so a stalled one times out.
 - Existing VMs get it at `start`, not a one-off command: each macOS start writes the time (read
   from the next login) and turns the lock off as the user (at once). A VM made before this has the
   screen saver off from its next boot after a start, and so does every clone of it made after that
@@ -52,6 +52,11 @@ doesn't end while the VM runs.
   the keys (it needed a click first) or on the keyboard layout. It costs a restart (about 20 s),
   only at a boot that came up locked. Not at a `stop`: a forced stop, a crash or a VM locked
   already would still boot locked; not on a VM already running: a restart would close what runs.
+  The lock is turned off again after it: at a boot that came up locked, that didn't take (it
+  survives a restart).
+- One `start` of a VM at a time, the others waiting on a lock in its state folder: a start's
+  restart, after the setup or to unlock, failed another's SSH, as the review found with two starts
+  a second apart.
 - `caffeinate` gets no stdio of `trivm`'s, and a session of its own, as the VM process: QEMU's is
   spawned by `start` itself, so it held the caller's pipe, and Ctrl+C or the terminal closed ended
   it while the VM ran on. VZ's runs in the VM process, its stdio the log: one helper for both.
@@ -101,6 +106,10 @@ Run on this Mac on clones of `macos-27`, shots read:
 - `caffeinate`: main's, VZ's in the VM process, had the VM's log as stdout and stderr and the VM's
   process group; this branch's had /dev/null for all three and a group of its own, and
   `trivm start bv | cat` returned in 23 s.
+- After the review: the lock set to immediate, locked, stopped, two starts a second apart: the
+  first restarted it, the second said "waiting for another start of bv", both exited 0; the
+  desktop unlocked and the lock off (immediate before the fix, after the unlock's restart). The
+  lock turned off, then a restart by hand: still off.
 - Left: a new macOS 27 VM through `create`, for its restart, not run here: no disk room for one;
   nor QEMU's `caffeinate`, the one that held the caller's pipe, as no Windows VM is here either: it
   calls the same helper.
