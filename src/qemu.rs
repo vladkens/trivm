@@ -106,10 +106,10 @@ pub fn args(vm: &Vm, share: &Path, cds: &[PathBuf]) -> Vec<String> {
     format!("unix:{},server=on,wait=off", opt(&vm.state("qmp.sock"))),
     "-vnc".into(),
     "127.0.0.1:0,to=99,password=on".into(),
-    // A sound card whose microphone `mic` feeds over D-Bus in its format, the Mac's sound left
-    // out.
+    // A sound card whose microphone `mic` feeds over D-Bus at its rate, the Mac's sound left out;
+    // in stereo, as the guest sets a level for each channel, which QEMU leaves to `mic`.
     "-audiodev".into(),
-    "dbus,id=mic,in.frequency=48000,in.channels=1".into(),
+    "dbus,id=mic,in.frequency=48000,in.channels=2".into(),
     "-device".into(),
     "ich9-intel-hda".into(),
     "-device".into(),
@@ -700,7 +700,7 @@ mod tests {
       "tpm-tis-device,tpmdev=tpm,ppi=off -rtc base=utc",
       "-qmp unix:/s/a,,b/qmp.sock,server=on,wait=off",
       "-vnc 127.0.0.1:0,to=99,password=on",
-      "-audiodev dbus,id=mic,in.frequency=48000,in.channels=1 -device ich9-intel-hda",
+      "-audiodev dbus,id=mic,in.frequency=48000,in.channels=2 -device ich9-intel-hda",
       "-device hda-micro,audiodev=mic -display dbus,p2p=yes,audiodev=mic",
       "media=cdrom,readonly=on,file=/c/win.iso -device usb-storage,drive=cd0d,id=cd0,bootindex=1",
       "file=/v/a,,b/seed.iso -device usb-storage,drive=cd1d,id=cd1",

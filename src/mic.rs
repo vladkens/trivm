@@ -477,10 +477,13 @@ mod tests {
     gain(&mut data, 2, &[0]);
     assert_eq!(data, [0; 8]);
 
-    // The sound card's input is in the format `mic` sends.
+    // The sound card's input is at the rate `mic` sends, in stereo, a channel muted on its own.
     let config = Config { system: "windows-11".into(), cpus: 1, memory: 1, disk: 1 };
     let line = qemu::args(&Vm::at("w", config), Path::new("/q"), &[]).join(" ");
-    assert!(line.contains(&format!("dbus,id=mic,in.frequency={RATE},in.channels=1")));
+    assert!(line.contains(&format!("dbus,id=mic,in.frequency={RATE},in.channels=2")));
+    let mut data = read(&pcm, &mut 0, Duration::ZERO, 8, 2);
+    gain(&mut data, 2, &[255, 0]);
+    assert_eq!(data, [1, 0, 0, 0, 2, 0, 0, 0]);
   }
 
   fn lint(script: &str) -> bool {
