@@ -29,14 +29,7 @@ use objc2_quartz_core::CALayer;
 use objc2_virtualization::{VZVirtualMachine, VZVirtualMachineView};
 
 use crate::bad;
-
-/// A shot's size, and the display's pixels per shot pixel.
-#[derive(Clone, Copy)]
-pub struct Screen {
-  pub width: f64,
-  pub height: f64,
-  pub scale: f64,
-}
+use crate::vm::Screen;
 
 /// One input event, done on the main thread; the waits between them are the caller's.
 pub enum Act {
@@ -123,9 +116,10 @@ impl Display {
     Ok(NSBitmapImageRep::initWithCIImage(NSBitmapImageRep::alloc(), &image))
   }
 
-  /// Writes a PNG of the screen at the shot's size; returns its size in pixels.
-  pub fn shot(&self, path: &Path) -> io::Result<(isize, isize)> {
-    let rep = self.image(1.0 / self.screen.scale)?;
+  /// Writes a PNG of the screen at the shot's size, a pixel a point, or `full`, at the display's
+  /// own pixels; returns its size in pixels.
+  pub fn shot(&self, path: &Path, full: bool) -> io::Result<(isize, isize)> {
+    let rep = self.image(if full { 1.0 } else { 1.0 / self.screen.scale })?;
     let none = NSDictionary::new();
     // SAFETY: no properties, which the method takes as a dictionary of property keys to objects.
     let png = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &none) };

@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 use std::{env, fs, thread};
 
-use crate::vm::{self, Config, Os, PASSWORD, USER, Vm};
+use crate::vm::{self, Config, Os, PASSWORD, Screen, USER, Vm};
 use crate::{apfs, bad, qcow2, qemu, run, ssh, vz, windows};
 
 pub struct System {
@@ -201,6 +201,7 @@ pub fn create(
   cpus: Option<u32>,
   memory: Option<u32>,
   disk: Option<u32>,
+  screen: Option<&str>,
 ) -> io::Result<()> {
   let sys = find(system)?;
   let name = name.unwrap_or_else(|| sys.name.to_string());
@@ -209,6 +210,7 @@ pub fn create(
     cpus: cpus.unwrap_or(sys.cpus),
     memory: memory.unwrap_or(sys.memory),
     disk: disk.unwrap_or(sys.disk),
+    screen: screen.map(|x| Screen::parse(x, sys.os)).transpose()?,
   };
   let vm = Vm { mac: vm::random_mac()?, setup: true, ..Vm::at(&name, config) };
   if vm.conf.exists() {

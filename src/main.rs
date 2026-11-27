@@ -54,9 +54,9 @@ fn start_cli() -> io::Result<ExitCode> {
   match args::parse(env::args().skip(1))? {
     Cmd::Help => print!("{}", args::HELP),
     Cmd::Version => println!("trivm {}", env!("CARGO_PKG_VERSION")),
-    Cmd::Create { system, name, cpus, memory, disk } => {
+    Cmd::Create { system, name, cpus, memory, disk, screen } => {
       signed()?;
-      system::create(&system, name, cpus, memory, disk)?;
+      system::create(&system, name, cpus, memory, disk, screen.as_deref())?;
     }
     Cmd::Start { vm } => start(&vm)?,
     Cmd::Stop { vm, force } => stop(&Vm::open(&vm)?, force)?,
@@ -77,14 +77,14 @@ fn start_cli() -> io::Result<ExitCode> {
     Cmd::Ssh { vm } => return Ok(status(ssh::interactive(&Vm::open(&vm)?)?)),
     Cmd::Cp { src, dst } => return Ok(status(ssh::cp(&src, &dst)?)),
     Cmd::Ip { vm } => println!("{}", ssh::address(&Vm::open(&vm)?)?),
-    Cmd::Shot { vm, file } => {
+    Cmd::Shot { vm, file, full } => {
       let vm = Vm::open(&vm)?;
       let path = match file {
         Some(x) => std::path::absolute(x)?,
         None => env::temp_dir().join(format!("trivm-{}-{}.png", vm.name, unix_ms())),
       };
 
-      ask(&vm, "shot", &path.to_string_lossy())?;
+      ask(&vm, if full { "shot full" } else { "shot" }, &path.to_string_lossy())?;
       println!("{}", path.display());
     }
     Cmd::Click { vm, x, y, right, double } => {

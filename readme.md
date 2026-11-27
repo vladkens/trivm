@@ -47,6 +47,18 @@ trivm open macos-27            # a window onto the VM, to look or use the mouse
 trivm stop macos-27
 ```
 
+Shots, clicks and `ui`'s frames are in points, a pixel each in a shot. A macOS display draws two
+pixels a point, as a Retina Mac's does, and `shot --full` takes those, with their sharp text. The
+screen's size is a VM's own: `create --screen` sets it in points, with the pixels per point on
+macOS (1 or 2); it is kept as `screen` in the VM's settings, read at each start. Windows' is
+800×600 for now.
+
+```sh
+trivm create macos-27 --name wavo --screen 1152x720@2
+trivm shot wavo cover.png --full   # 2304×1440
+trivm create ubuntu-24.04 --screen 1280x800
+```
+
 A test that needs a clean system each time runs against a throwaway clone of a stopped VM: an
 APFS copy made in a second that shares the VM's disk until written. `run` starts one, runs the
 command on the host with the clone's name in `TRIVM_VM`, deletes the clone however the command

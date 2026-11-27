@@ -186,12 +186,16 @@ pub fn cancel(vm: &Vm) -> io::Result<()> {
 }
 
 /// Checks that the VM's folders can be given to swtpm, which splits its options at commas, with
-/// no escape for one in a path.
+/// no escape for one in a path, and that it has the screen ramfb draws, the firmware's 800×600.
 pub fn fits(vm: &Vm) -> io::Result<()> {
   for dir in [&vm.dir, &vm.state_dir] {
     if dir.to_string_lossy().contains(',') {
       return Err(bad(format!("{}: swtpm takes no path with a comma", dir.display())));
     }
+  }
+
+  if let Some(x) = vm.config.screen {
+    return Err(bad(format!("screen = {x}: Windows' screen is ramfb's here, 800x600 only")));
   }
 
   Ok(())
@@ -597,7 +601,8 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
     }
     ["stop"] => qmp.call("system_powerdown", "{}").map(|_| String::new()),
     ["kill"] => qmp.call("quit", "{}").map(|_| String::new()),
-    ["shot"] => {
+    // The screen's own pixels, a point each.
+    ["shot"] | ["shot", "full"] => {
       let args = format!(r#"{{"filename": {}, "format": "png"}}"#, json(body));
       qmp.call("screendump", &args).map(|_| String::new())
     }
@@ -644,11 +649,11 @@ pub fn ask(vm: &Vm, req: &str, body: &str) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::vm::Config;
+  use crate::vm::{Config, Screen};
 
   #[test]
   fn command_line() {
-    let config = Config { system: "windows-11".into(), cpus: 4, memory: 6, disk: 64 };
+    let config = Config { system: "windows-11".into(), cpus: 4, memory: 6, disk: 64, screen: None };
     let (dir, state_dir) = ("/v/a,b".into(), "/s/a,b".into());
     let mac = "02:00:00:00:00:01".into();
     let vm = Vm { dir, state_dir, mac, setup: true, port: Some(50022), ..Vm::at("w", config) };
@@ -677,7 +682,12 @@ mod tests {
 
     // QEMU's paths take a comma doubled; swtpm's none.
     assert!(fits(&vm).is_err());
-    assert!(fits(&Vm { dir: "/v/a".into(), state_dir: "/s/a".into(), ..vm }).is_ok());
+    let vm = Vm { dir: "/v/a".into(), state_dir: "/s/a".into(), ..vm };
+    assert!(fits(&vm).is_ok());
+    // Its screen is ramfb's.
+    let screen = Some(Screen { width: 1280.0, height: 800.0, scale: 1.0 });
+    let config = Config { screen, ..vm.config.clone() };
+    assert!(fits(&Vm { config, ..vm }).is_err());
   }
 
   #[test]
