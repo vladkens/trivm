@@ -49,18 +49,6 @@ trivm open macos-27
 trivm stop macos-27
 ```
 
-Shots, clicks and `ui`'s frames are in points, a pixel each in a shot. A macOS display draws two
-pixels a point, as a Retina Mac's does, and `shot --full` takes those, with their sharp text. The
-screen's size is a VM's own: `create --screen` sets it in points, with the pixels per point on
-macOS (1 or 2); it is kept as `screen` in the VM's settings, read at each start. Windows' is
-800×600 for now.
-
-```sh
-trivm create macos-27 --name wavo --screen 1152x720@2
-trivm shot wavo cover.png --full   # 2304×1440
-trivm create ubuntu-24.04 --screen 1280x800
-```
-
 `trivm --help` lists the systems and all commands. The guest's user is `user`, password `1234`.
 
 Files, by the XDG Base Directory spec: each VM's settings in `~/.config/trivm/<vm>.conf`, its
