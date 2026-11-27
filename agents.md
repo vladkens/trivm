@@ -52,7 +52,8 @@ what trivm does, so the two aren't mixed up:
   automatic login, macOS 27's restart after its setup, for the screen saver's time read at login,
   and loginwindow's mark of a locked screen deleted with a restart, as it would lock it again at
   each boot (`system.rs`); agent-desktop as a launchd job for its grant (`ui.rs`);
-  `LabConfig`'s skipped checks and `desktop`'s scheduled task (`windows.rs`).
+  `desktop`'s launchd job on macOS (`ssh.rs`); `LabConfig`'s skipped checks and `desktop`'s
+  scheduled task (`windows.rs`).
 - A hack goes with the last system that needs it: macOS 27 makes its user itself, so `apfs.rs`
   goes with 15 and 26. Keep this list current in the commit that adds or removes one.
 
