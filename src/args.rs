@@ -13,8 +13,9 @@ Usage: trivm <command> [args]
 VMs:
   create <system> [--name <vm>] [--cpus <n>] [--memory <GiB>] [--disk <GiB>]
                           install a system unattended and start it; systems: macos-27,
-                          macos-26, macos-15, ubuntu-24.04, ubuntu-22.04, debian-13, fedora-45,
-                          windows-11 (needs brew install qemu swtpm wimlib)
+                          macos-26, macos-15, ubuntu-24.04, ubuntu-24.04-cinnamon (Linux Mint
+                          22.3's desktop, built at its first create), ubuntu-22.04, debian-13,
+                          fedora-45, windows-11 (needs brew install qemu swtpm wimlib)
   start <vm>              start in the background, wait for the desktop
   stop <vm> [--force]     shut down; --force stops at once
   list                    the VMs, their systems and states
