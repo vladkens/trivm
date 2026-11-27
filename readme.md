@@ -36,9 +36,10 @@ trivm exec macos-27 -- sw_vers
 trivm cp ./MyApp.dmg macos-27:/tmp/
 trivm exec macos-27 'hdiutil attach /tmp/MyApp.dmg && cp -R /Volumes/MyApp/MyApp.app /Applications/'
 trivm exec macos-27 -- open -a MyApp
-trivm exec ubuntu-24.04 'nohup myapp >/dev/null 2>&1 &'   # shows on the desktop
+trivm exec macos-27 'cd /tmp && desktop ./mytool --flag'   # shows on the desktop
+trivm exec ubuntu-24.04 'desktop myapp'
 
-trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Linux and Windows
+trivm shot macos-27 shot.png   # 1600×900 on macOS, 1920×1080 on Linux, 800×600 on Windows
 trivm click macos-27 800 450
 trivm type macos-27 'hello'
 trivm key macos-27 cmd+q
@@ -46,6 +47,12 @@ trivm key macos-27 cmd+q
 trivm open macos-27            # a window onto the VM, to look or use the mouse
 trivm stop macos-27
 ```
+
+A program started over SSH is the SSH session's, not the desktop's: `desktop <program> [args]`,
+which `exec` defines on every system, starts it in the user's desktop session, in the current
+folder, its output dropped, and returns once it runs, with an error if it ended at once. On macOS
+launchd starts it, so macOS gives it the grants `os grant` gave it, where a program started over
+SSH has sshd's; an app goes to `open -a`, which does the same.
 
 A test that needs a clean system each time runs against a throwaway clone of a stopped VM: an
 APFS copy made in a second that shares the VM's disk until written. `run` starts one, runs the
@@ -115,11 +122,8 @@ trivm run windows-11 'trivm exec "$TRIVM_VM" -- cmd /c ver'   # a throwaway clon
 `exec` runs PowerShell 5.1 and exits with the last program's code (1 when a cmdlet failed); it
 doesn't wait for a windowed program, a setup among them, which `Start-Process -Wait` does.
 PowerShell 5.1 drops a program's empty arguments and the double quotes in them: write such a
-command as one line, quoted for PowerShell. An SSH session has no desktop: `desktop <program>
-[args]` starts a program in the user's desktop session. `open` hands the VM's screen to Screen
-Sharing (VNC on 127.0.0.1, password `1234`). The screen is virtio-gpu's, 1920×1080, drawn by
-virtio-win's `viogpudo`, which Setup installs; a Windows VM made by an earlier trivm keeps
-ramfb's 800×600. Windows isn't activated.
+command as one line, quoted for PowerShell. `open` hands the VM's screen to Screen Sharing (VNC
+on 127.0.0.1, password `1234`). Windows isn't activated.
 
 trivm makes Windows' install media as Microsoft's Media Creation Tool does: the English arm64 ESD
 its catalog lists, from Microsoft's CDN, turned into an ISO of Windows 11 Pro with `wimlib-imagex`
