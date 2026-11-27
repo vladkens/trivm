@@ -150,7 +150,8 @@ const WINDOWS_INSTALL: &str = r#"mkdir "C:\Program Files\agent-desktop" 2>nul & 
 const VC_COPY: &str = "AppData/Local/Temp/trivm-vc_redist.exe";
 const VC_INSTALL: &str = r#"$f = "$env:TEMP\trivm-vc_redist.exe"
 $p = Start-Process $f '/install /quiet /norestart' -Wait -PassThru
-Remove-Item $f
+# The installer, or Defender scanning it, may hold it for a while after it exits: left in TEMP then.
+foreach ($i in 1..20) { try { Remove-Item $f -ErrorAction Stop; break } catch { Start-Sleep -Milliseconds 500 } }
 # 1638: a newer one is there; 3010: done, a restart asked for files in use.
 if ($p.ExitCode -notin 0, 1638, 3010) { throw "the Visual C++ runtime's installer failed: $($p.ExitCode)" }
 "#;
