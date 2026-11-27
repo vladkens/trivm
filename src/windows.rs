@@ -24,6 +24,55 @@ pub fn line(cmd: &[String]) -> String {
   }
 }
 
+/// A program and its arguments as a batch file's line runs them: each quoted as Windows splits a
+/// command line, then for cmd `%` doubled and its operators escaped with `^` where it reads them,
+/// outside its quotes, which every `"` opens or closes.
+pub fn batch_line(cmd: &[&str]) -> String {
+  let quoted: Vec<String> = cmd.iter().map(|x| argv(x)).collect();
+  let (mut out, mut inside) = (String::new(), false);
+  for c in quoted.join(" ").chars() {
+    match c {
+      '"' => inside = !inside,
+      '%' => out.push('%'),
+      '^' | '&' | '|' | '<' | '>' | '(' | ')' if !inside => out.push('^'),
+      _ => {}
+    }
+
+    out.push(c);
+  }
+
+  out
+}
+
+/// An argument as Windows splits a command line: in quotes, a quote and the backslashes before it,
+/// or before the closing one, escaped with backslashes; one with no space or quote as it is.
+fn argv(x: &str) -> String {
+  if !x.is_empty() && !x.contains([' ', '\t', '"']) {
+    return x.to_string();
+  }
+
+  let (mut out, mut slashes) = (String::from('"'), 0);
+  for c in x.chars() {
+    match c {
+      '\\' => slashes += 1,
+      '"' => {
+        out.push_str(&"\\".repeat(2 * slashes + 1));
+        out.push(c);
+        slashes = 0;
+      }
+      _ => {
+        out.push_str(&"\\".repeat(slashes));
+        out.push(c);
+        slashes = 0;
+      }
+    }
+  }
+
+  out.push_str(&"\\".repeat(2 * slashes));
+  out.push('"');
+  out
+}
+
 /// Defined before every command: output as UTF-8 without progress records (CLIXML over SSH),
 /// and `desktop`, which starts a program in the desktop's session through a scheduled task run as
 /// the user with the interactive logon type, as an SSH session has no desktop.
@@ -73,8 +122,8 @@ const EPILOGUE: &str = r#"
 $global:trivm = if ($?) { $LASTEXITCODE } elseif ($LASTEXITCODE) { $LASTEXITCODE } else { 1 }
 "#;
 
-/// The longest command line sshd's shell, cmd, runs.
-const CMD_MAX: usize = 8191;
+/// The longest command line sshd's shell, cmd, runs, and a batch file's line.
+pub const CMD_MAX: usize = 8191;
 
 /// `powershell` running `script` after the prelude, as base64 of UTF-8, which no shell in between
 /// unquotes (sshd's shell is cmd), decoded by `-Command`: PowerShell 5.1 writes the errors of an
@@ -314,6 +363,20 @@ mod tests {
     let v = |x: &[&str]| x.iter().map(|x| x.to_string()).collect::<Vec<_>>();
     assert_eq!(line(&v(&["Get-Date | Format-List"])), "Get-Date | Format-List");
     assert_eq!(line(&v(&["cmd", "/c", "it's"])), "& 'cmd' '/c' 'it''s'");
+  }
+
+  #[test]
+  fn batch_lines() {
+    let exe = r"C:\Program Files\a\a.exe";
+    assert_eq!(batch_line(&[exe, "list"]), r#""C:\Program Files\a\a.exe" list"#);
+    // Windows' quoting: a quote, the backslashes before it and before the closing quote.
+    assert_eq!(argv(r#"a "b" c\"#), r#""a \"b\" c\\""#);
+    assert_eq!(argv(r#"x\"y"#), r#""x\\\"y""#);
+    assert_eq!((argv("").as_str(), argv(r"a\b").as_str()), (r#""""#, r"a\b"));
+    // cmd's quotes aren't Windows': `&` falls outside them, escaped, and `<` and `|` inside.
+    let json = r#"[{"a":"b c","d":"e&f"},%g%,h<i|j]"#;
+    let line = r#"a "[{\"a\":\"b c\",\"d\":\"e^&f\"},%%g%%,h<i|j]""#;
+    assert_eq!(batch_line(&["a", json]), line);
   }
 
   #[test]

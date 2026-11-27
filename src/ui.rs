@@ -1,14 +1,17 @@
 // Copyright (c) vladkens | MIT License | https://github.com/vladkens/trivm
 //! The guest's desktop as named elements: agent-desktop, which trivm puts in the guest, reads its
-//! windows' accessibility trees (AX on macOS, AT-SPI on Linux); `ui` prints them a line an
-//! element, with its role, name and frame in a shot's pixels, and `click --name` clicks one.
+//! windows' accessibility trees (AX on macOS, AT-SPI on Linux, UI Automation on Windows); `ui`
+//! prints them a line an element, with its role, name and frame in a shot's pixels, and
+//! `click --name` clicks one.
 
+use std::collections::HashSet;
+use std::io::Write;
 use std::process::Stdio;
 use std::{fmt, fs, io};
 
 use crate::system::Desktop;
 use crate::vm::{Os, Vm};
-use crate::{bad, permissions, run, ssh, system, vz};
+use crate::{bad, permissions, run, ssh, system, windows};
 
 /// agent-desktop (vercel-labs/agent-desktop, Apache-2.0): its release's arm64 archives.
 const VERSION: &str = "1.3.1";
@@ -20,9 +23,22 @@ const LINUX: (&str, &str) = (
   "https://github.com/vercel-labs/agent-desktop/releases/download/v1.3.1/agent-desktop-v1.3.1-aarch64-unknown-linux-gnu.tar.gz",
   "438990a703fbeb19775596c341c3701435e80adbfa1b2f64b82ff17567d5573b",
 );
+const WINDOWS: (&str, &str) = (
+  "https://github.com/vercel-labs/agent-desktop/releases/download/v1.3.1/agent-desktop-v1.3.1-aarch64-pc-windows-msvc.tar.gz",
+  "805f1f61890f9983fceaf38cda94a37a049c379435d65607db5cedd22c8ef97b",
+);
+
+/// The Visual C++ runtime that agent-desktop's Windows build links to, which Windows doesn't
+/// have: Microsoft's installer for arm64, 14.52.37029, its cache name, URL and SHA-256.
+const VC_REDIST: (&str, &str, &str) = (
+  "vc_redist-14.52.37029.arm64.exe",
+  "https://download.visualstudio.microsoft.com/download/pr/78d061c5-9ef3-42ab-98ed-3309d1095dc4/3C81BCF5B06156858362400D7066F65ECE38E8ACCB5E687FC65BEF5735F31FFC/VC_redist.arm64.exe",
+  "3c81bcf5b06156858362400d7066f65ece38e8accb5e687fc65bef5735f31ffc",
+);
 
 /// Where agent-desktop is in the guest.
 const BIN: &str = "/usr/local/bin/agent-desktop";
+const WINDOWS_BIN: &str = r"C:\Program Files\agent-desktop\agent-desktop.exe";
 
 /// How deep a window's tree is read, in agent-desktop's levels, which skip nameless wrappers.
 const DEPTH: u32 = 30;
@@ -69,6 +85,35 @@ cat "$d/out"
 rm -rf "$d"
 "#;
 
+/// Runs agent-desktop, `$exe`, by the batch file's line on stdin in the desktop's session as
+/// `desktop` runs a program, in a console with no window to take the focus; prints its output once
+/// it exits, failing after a minute. Exits 3 unless it is `$version`.
+const WINDOWS_RUN: &str = r#"if ("$(& $exe version 2>$null)" -notlike "*`"version`":`"$version`"*") { exit 3 }
+$dir = (New-Item -ItemType Directory "$env:TEMP\trivm-ui-$([guid]::NewGuid())").FullName
+# cmd reads a batch file in the console's code page: UTF-8 after `chcp`.
+$line = [Console]::In.ReadToEnd().TrimEnd()
+[IO.File]::WriteAllText("$dir\run.cmd", "@chcp 65001 >nul`r`n@$line >out 2>err`r`n@echo.>done`r`n")
+$run = New-ScheduledTaskAction -Execute "$env:windir\System32\conhost.exe" `
+  -Argument '--headless cmd.exe /d /v:off /c run.cmd' -WorkingDirectory $dir
+$user = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
+$set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit 0
+$name = "trivm-ui-$([guid]::NewGuid())"
+Register-ScheduledTask -TaskName $name -Action $run -Principal $user -Settings $set | Out-Null
+try {
+  Start-ScheduledTask -TaskName $name
+  for ($i = 0; $i -lt 600 -and -not (Test-Path "$dir\done"); $i++) { Start-Sleep -Milliseconds 100 }
+  if (-not (Test-Path "$dir\done")) {
+    Stop-ScheduledTask -TaskName $name
+    throw 'agent-desktop ran for a minute; stopped'
+  }
+  [Console]::Error.Write([IO.File]::ReadAllText("$dir\err"))
+  [Console]::Out.Write([IO.File]::ReadAllText("$dir\out"))
+} finally {
+  Unregister-ScheduledTask -TaskName $name -Confirm:$false
+  Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+}
+"#;
+
 /// Prints X's active window, then the windows shown on the screen, top to bottom, popups too:
 /// `window <id> <x> <y> <width> <height>`, a client's in a window manager's frame, then the frame
 /// around it, GTK's shadow inside it, the window it's for and its title, as `xprop` prints them.
@@ -96,6 +141,19 @@ const INSTALL: &str = "set -e
 sudo -n mkdir -p /usr/local/bin
 sudo -n tar -xzf - --no-same-owner -C /usr/local/bin agent-desktop
 ";
+
+/// Puts agent-desktop, its archive on stdin, in a Windows guest: Windows' own `tar`, run by cmd,
+/// sshd's shell, which leaves stdin alone.
+const WINDOWS_INSTALL: &str = r#"mkdir "C:\Program Files\agent-desktop" 2>nul & tar -xzf - -C "C:\Program Files\agent-desktop" agent-desktop.exe"#;
+
+/// Where `scp` puts the Visual C++ runtime's installer, in the user's home, and its run, quiet.
+const VC_COPY: &str = "AppData/Local/Temp/trivm-vc_redist.exe";
+const VC_INSTALL: &str = r#"$f = "$env:TEMP\trivm-vc_redist.exe"
+$p = Start-Process $f '/install /quiet /norestart' -Wait -PassThru
+Remove-Item $f
+# 1638: a newer one is there; 3010: done, a restart asked for files in use.
+if ($p.ExitCode -notin 0, 1638, 3010) { throw "the Visual C++ runtime's installer failed: $($p.ExitCode)" }
+"#;
 
 /// Switches accessibility on in the Linux session: AT-SPI's `IsEnabled`, which Chromium, Qt and
 /// AccessKit wait for before they show their elements (GTK shows them regardless).
@@ -127,23 +185,25 @@ pub fn click(
   double: bool,
 ) -> io::Result<()> {
   let vm = running(name, "click --name")?;
-  let (mut nodes, mut at) = element(&vm, text, app, None)?;
+  let (mut nodes, mut at, mut all) = element(&vm, text, app, None)?;
 
-  // The menu bar, with no id, is in front of every window.
   let window = window_of(&nodes, &nodes[at]);
-  let focused = |w: &Node| w.states.iter().any(|x| x == "focused");
-  if !window.id.is_empty() && !focused(window) {
+  if !in_front(&nodes, window) {
     // agent-desktop stops waiting for the focus at 750 ms, which macOS in a VM can pass.
     let id = window.id.clone();
-    let raised = agent_desktop(&vm, &["focus-window", "--window-id", &id]);
+    let raised = match vm.config.os() {
+      Os::Windows => raise(&vm, &id),
+      _ => agent_desktop(&vm, &["focus-window", "--window-id", &id]).map(|_| ()),
+    };
+
     if let Err(e) = raised
-      && !windows(&vm)?.iter().any(|w| w.id == id && focused(w))
+      && !windows(&vm)?.iter().any(|w| w.id == id && w.focused())
     {
       return Err(e);
     }
 
     // Read again, that window only: it may lay its elements out anew once it has the focus.
-    (nodes, at) = element(&vm, text, app, Some(&id))?;
+    (nodes, at, all) = element(&vm, text, app, Some(&id))?;
   }
 
   let (node, window) = (&nodes[at], window_of(&nodes, &nodes[at]));
@@ -179,21 +239,50 @@ pub fn click(
     }
   }
 
+  // Windows keeps an always-on-top window in front of the one raised, and a popup in front of the
+  // window it's for: the first window at the point, from the front, must be the element's.
+  if vm.config.os() == Os::Windows && !window.id.is_empty() {
+    match all.iter().find(|w| w.covers(x, y)) {
+      Some(w) if w.id == window.id => {}
+      Some(w) => return Err(bad(format!("{} is under {}", node.line(), w.line()))),
+      None => return Err(bad(format!("{} is out of its window", node.line()))),
+    }
+  }
+
   let (button, clicks) = (if right { "right" } else { "left" }, if double { 2 } else { 1 });
-  vz::ask(&vm, &format!("click {x} {y} {button} {clicks}"), "")?;
+  crate::ask(&vm, &format!("click {x} {y} {button} {clicks}"), "")?;
   eprintln!("clicked {} at {x},{y}", node.line());
   Ok(())
 }
 
+/// Brings a Windows window to the front, minimized and restored as its taskbar button does: Windows
+/// refuses `focus-window`'s `SetForegroundWindow` to a program in the background, as agent-desktop
+/// is in its task, but lets a window it restores take the focus. `focus-window` then checks it.
+fn raise(vm: &Vm, id: &str) -> io::Result<()> {
+  let args = format!(r#"{{"window_id":{}}}"#, json_str(id));
+  let batch: Vec<String> = ["minimize", "restore", "focus-window"]
+    .iter()
+    .map(|x| format!(r#"{{"command":"{x}","args":{args}}}"#))
+    .collect();
+  let done = agent_desktop(vm, &["batch", "--stop-on-error", &format!("[{}]", batch.join(","))])?;
+  let mut errors = done.get("results").items().iter().map(|x| x.get("error").get("message").str());
+  match errors.find(|x| !x.is_empty()) {
+    Some(msg) => Err(bad(format!("agent-desktop in {}: {msg}", vm.name))),
+    None => Ok(()),
+  }
+}
+
 /// The windows' elements, all apps' or one's, and where the one named `text` is among them, or
 /// among the elements of the window with the id given: an error when none or more than one is.
+/// Then all the windows, front to back.
 fn element(
   vm: &Vm,
   text: &str,
   app: Option<&str>,
   window: Option<&str>,
-) -> io::Result<(Vec<Node>, usize)> {
-  let nodes = tree(vm, &windows(vm)?, app)?;
+) -> io::Result<(Vec<Node>, usize, Vec<Node>)> {
+  let all = windows(vm)?;
+  let nodes = tree(vm, &all, app)?;
   let (mut name, mut some) = (vm.name.clone(), &nodes[..]);
   if let Some(id) = window {
     some = in_window(&nodes, id).ok_or_else(|| bad(format!("{text:?}: its window left {name}")))?;
@@ -212,7 +301,7 @@ fn element(
     }
   };
 
-  Ok((nodes, at))
+  Ok((nodes, at, all))
 }
 
 /// The window with the id and its elements, as `tree` lists them.
@@ -235,14 +324,12 @@ fn running(name: &str, cmd: &str) -> io::Result<Vm> {
   }
 }
 
-/// Whether trivm puts agent-desktop in the VM's system: not in Windows, though it has a build for
-/// it (UI Automation); nor in Ubuntu 22.04's Plasma: agent-desktop needs 24.04's AT-SPI, and found
-/// no X window to raise for Konsole's.
+/// Whether trivm puts agent-desktop in the VM's system: not in Ubuntu 22.04's Plasma, as
+/// agent-desktop needs 24.04's AT-SPI, and found no X window to raise for Konsole's.
 fn supported(vm: &Vm) -> io::Result<bool> {
   Ok(match vm.config.os() {
-    Os::Macos => true,
     Os::Linux => system::find(&vm.config.system)?.desktop != Desktop::Plasma,
-    Os::Windows => false,
+    _ => true,
   })
 }
 
@@ -380,6 +467,7 @@ fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
     }
   }
 
+  once(&mut out);
   if let Some(app) = app
     && out.is_empty()
   {
@@ -394,6 +482,28 @@ fn tree(vm: &Vm, all: &[Node], app: Option<&str>) -> io::Result<Vec<Node>> {
   }
 
   Ok(out)
+}
+
+/// Leaves out a popup's element alike in all but its window to one in a window before, unless
+/// something in it stays: Windows lists a popup's in the popup's own window, in front, and in the
+/// window it's for, under other elements there.
+fn once(nodes: &mut Vec<Node>) {
+  let (mut seen, mut keep) = (HashSet::new(), vec![true; nodes.len()]);
+  let starts: Vec<usize> = (0..nodes.len()).filter(|&i| nodes[i].depth == 0).collect();
+  for (n, &start) in starts.iter().enumerate() {
+    let end = starts.get(n + 1).copied().unwrap_or(nodes.len());
+    for i in (start + 1..end).rev() {
+      let inside = nodes[i + 1..end].iter().take_while(|x| x.depth > nodes[i].depth).count();
+      let twice = nodes[i].popup && seen.contains(&nodes[i].line());
+      keep[i] = !twice || keep[i + 1..=i + inside].contains(&true);
+    }
+
+    let popups = nodes[start + 1..end].iter().filter(|x| x.popup);
+    seen.extend(popups.map(|x| x.line()));
+  }
+
+  let mut keep = keep.into_iter();
+  nodes.retain(|_| keep.next().unwrap_or(true));
 }
 
 /// A window's or menu bar's line, then the elements of its snapshot.
@@ -411,19 +521,18 @@ fn add(out: &mut Vec<Node>, head: Node, snapshot: &Json) {
 /// agent-desktop's answer to the arguments in the running guest, its `data`. It is installed
 /// first when it isn't there, and on macOS granted Accessibility when it lacks it.
 fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
-  let (script, rest) = match vm.config.os() {
-    Os::Macos => (format!("{HAS}{ALLOWED}{MACOS_RUN}"), ssh::quote(&plist_strings(args))),
-    Os::Linux => {
-      let args: Vec<_> = args.iter().map(|x| ssh::quote(x)).collect();
-      (format!("{HAS}shift\nexec {BIN} \"$@\"\n"), args.join(" "))
-    }
-    Os::Windows => return Err(unsupported(vm, "agent-desktop")),
-  };
-
-  let line = format!("sh -c {} ui {VERSION} {rest}", ssh::quote(&script));
+  let (line, input) = command(vm, args)?;
   let (mut installed, mut granted) = (false, false);
   let out = loop {
-    let out = ssh::ssh(vm)?.arg("--").arg(&line).stdin(Stdio::null()).output()?;
+    let mut ssh = ssh::ssh(vm)?;
+    ssh.arg("--").arg(&line).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = ssh.spawn()?;
+    // Dropped once written: the end of the input.
+    if let Some(mut x) = child.stdin.take() {
+      x.write_all(input.as_bytes())?;
+    }
+
+    let out = child.wait_with_output()?;
     match out.status.code() {
       Some(3) if !installed => {
         install(vm)?;
@@ -453,19 +562,65 @@ fn agent_desktop(vm: &Vm, args: &[&str]) -> io::Result<Json> {
   }
 }
 
+/// The guest's command line that runs agent-desktop with the arguments, and its input.
+fn command(vm: &Vm, args: &[&str]) -> io::Result<(String, String)> {
+  let sh =
+    |script: String, rest: String| format!("sh -c {} ui {VERSION} {rest}", ssh::quote(&script));
+  Ok(match vm.config.os() {
+    Os::Macos => {
+      (sh(format!("{HAS}{ALLOWED}{MACOS_RUN}"), ssh::quote(&plist_strings(args))), String::new())
+    }
+    Os::Linux => {
+      let args: Vec<_> = args.iter().map(|x| ssh::quote(x)).collect();
+      (sh(format!("{HAS}shift\nexec {BIN} \"$@\"\n"), args.join(" ")), String::new())
+    }
+    Os::Windows => {
+      let line = windows::batch_line(&[&[WINDOWS_BIN], args].concat());
+      if format!("@{line} >out 2>err").len() > windows::CMD_MAX {
+        return Err(bad(format!(
+          "{} windows' trees are past cmd's line: --app picks fewer",
+          vm.name
+        )));
+      }
+
+      let exe = windows::quote(WINDOWS_BIN);
+      (windows::powershell(&format!("$version = '{VERSION}'\n$exe = {exe}\n{WINDOWS_RUN}"))?, line)
+    }
+  })
+}
+
 /// Puts agent-desktop in the guest from trivm's cache; on Linux switches accessibility on.
 fn install(vm: &Vm) -> io::Result<()> {
   let ((url, sha256), script) = match vm.config.os() {
     Os::Macos => (MACOS, INSTALL.to_string()),
     Os::Linux => (LINUX, format!("{INSTALL}{A11Y}")),
-    Os::Windows => return Err(unsupported(vm, "agent-desktop")),
+    Os::Windows => (WINDOWS, WINDOWS_INSTALL.to_string()),
   };
 
   let archive = system::download(url, sha256)?;
   eprintln!("installing agent-desktop {VERSION} in {}", vm.name);
+  if vm.config.os() == Os::Windows {
+    vc_runtime(vm)?;
+  }
 
   run(ssh::ssh(vm)?.arg("--").arg(script).stdin(fs::File::open(&archive)?))?;
   Ok(())
+}
+
+/// Installs the Visual C++ runtime in a Windows guest unless it has it, from Microsoft's installer.
+fn vc_runtime(vm: &Vm) -> io::Result<()> {
+  if ssh::output(vm, r"Test-Path $env:windir\System32\vcruntime140.dll")? == "True" {
+    return Ok(());
+  }
+
+  let (name, url, sha256) = VC_REDIST;
+  let exe = system::download_as(url, name, sha256)?;
+  eprintln!("installing the Visual C++ runtime in {}", vm.name);
+  if !ssh::cp(&exe.to_string_lossy(), &format!("{}:{VC_COPY}", vm.name))?.success() {
+    return Err(bad(format!("copying {name} into {} failed", vm.name)));
+  }
+
+  ssh::output(vm, VC_INSTALL).map(|_| ())
 }
 
 /// Accessibility for agent-desktop by its path, as `os grant` gives it, with SIP off. The
@@ -498,9 +653,15 @@ struct Node {
   states: Vec<String>,
   /// x, y, width and height in a shot's pixels.
   frame: [f64; 4],
+  /// Whether it is in a popup, a menu's on Windows, which may be listed twice.
+  popup: bool,
 }
 
 impl Node {
+  fn focused(&self) -> bool {
+    self.states.iter().any(|x| x == "focused")
+  }
+
   /// The middle of its frame, where a click goes.
   fn middle(&self) -> (f64, f64) {
     let [x, y, w, h] = self.frame;
@@ -557,11 +718,13 @@ fn cut(x: &str) -> String {
 /// items, and a nameless leaf with no value.
 fn flatten(node: &Json, depth: usize, out: &mut Vec<Node>) {
   let states: Vec<String> = node.get("states").items().iter().map(|x| x.str().into()).collect();
-  if states.iter().any(|x| x == "hidden" || x == "offscreen") {
+  let (role, name) = (node.get("role").str(), node.get("name").str());
+  // Windows' popup, a menu's, is a window with no frame, off the screen, its items on it.
+  let popup = role == "window" && frame(node.get("bounds")).is_none();
+  if states.iter().any(|x| x == "hidden" || (x == "offscreen" && !popup)) {
     return;
   }
 
-  let (role, name) = (node.get("role").str(), node.get("name").str());
   let children = node.get("children").items();
   let Some(frame) = frame(node.get("bounds")) else {
     // A closed menu's custom views (Finder's tags) have frames at the screen's corner.
@@ -569,8 +732,13 @@ fn flatten(node: &Json, depth: usize, out: &mut Vec<Node>) {
       return;
     }
 
+    let at = out.len();
     for x in children {
       flatten(x, depth, out);
+    }
+
+    if popup {
+      out[at..].iter_mut().for_each(|x| x.popup = true);
     }
 
     return;
@@ -649,6 +817,13 @@ fn in_menu(nodes: &[Node], node: &Node, frame: [f64; 4]) -> bool {
   };
 
   nodes[menu].role == "menu" && items.all(|x| x.depth > depth + 1 || inside(x))
+}
+
+/// Whether the window is in front: the menu bar, with no id, one focused, or one listed before the
+/// focused one, a popup on Windows, which agent-desktop lists from the front: raised, it'd close.
+fn in_front(nodes: &[Node], window: &Node) -> bool {
+  let at = nodes.iter().position(|x| std::ptr::eq(x, window)).unwrap_or(0);
+  window.id.is_empty() || nodes[at..].iter().any(|x| x.depth == 0 && x.focused())
 }
 
 /// The window or menu bar an element is in: the last line at depth 0 up to it.
@@ -940,6 +1115,7 @@ mod tests {
       value: String::new(),
       states: vec!["focused".into()],
       frame: [520.0, 100.0, 560.0, 593.0],
+      popup: false,
     };
     assert_eq!(window.to_string(), r#"Wavo: window "a \"b\"\n" [focused] 520,100 560x593"#);
     assert!(window.covers(520.0, 100.0) && window.covers(1079.0, 692.0));
@@ -1076,5 +1252,60 @@ _NET_WM_NAME:  not found."#;
       plist_strings(&["batch", r#"[{"a":"<&>"}]"#]),
       r#"<string>batch</string><string>[{"a":"&lt;&amp;&gt;"}]</string>"#
     );
+  }
+
+  /// Notepad's Edit menu open on Windows, cut down: the popup in the tree of its own window, which
+  /// has it under the menu bar's group, and in Notepad's, which has it under another.
+  const POPUP: &str = r#"{"bounds":{"height":0.0,"width":0.0,"x":0.0,"y":0.0},"name":"Popup","role":"window","states":["offscreen","modal"],"children":[
+    {"bounds":{"height":516.0,"width":232.0,"x":85.0,"y":100.0},"role":"menu","children":[
+      {"bounds":{"height":29.0,"width":222.0,"x":90.0,"y":513.0},"name":"Select all","role":"menuitem"}]}]}"#;
+  const BAR: &str =
+    r#"{"bounds":{"height":33.0,"width":1428.0,"x":32.0,"y":68.0},"role":"group","children":[%]}"#;
+
+  #[test]
+  fn popups() {
+    let window = |id: &str, focused: bool| Node {
+      id: id.into(),
+      role: "window".into(),
+      states: if focused { vec!["focused".into()] } else { vec![] },
+      ..Node::default()
+    };
+    let tree = |json: &str, out: &mut Vec<Node>| flatten(&Json::parse(json).unwrap(), 1, out);
+
+    let mut nodes = vec![window("w-1", false)];
+    tree(&BAR.replace('%', POPUP), &mut nodes);
+    nodes.push(window("w-2", true));
+    let host = r#"{"bounds":{"height":536.0,"width":252.0,"x":75.0,"y":98.0},"name":"PopupHost","role":"group","children":[%]}"#;
+    tree(&host.replace('%', POPUP), &mut nodes);
+    let item = r#"{"bounds":{"height":32.0,"width":44.0,"x":85.0,"y":68.0},"name":"Edit","role":"menuitem"}"#;
+    tree(&BAR.replace('%', item), &mut nodes);
+    // A window of the same controls behind: they're no popup's, all listed.
+    nodes.push(window("w-3", false));
+    tree(&BAR.replace('%', item), &mut nodes);
+
+    once(&mut nodes);
+    let lines: Vec<String> = nodes.iter().map(|x| x.to_string()).collect();
+    assert_eq!(
+      lines,
+      [
+        "window 0,0 0x0",
+        "  group 32,68 1428x33",
+        "    menu 85,100 232x516",
+        r#"      menuitem "Select all" 90,513 222x29"#,
+        "window [focused] 0,0 0x0",
+        r#"  group "PopupHost" 75,98 252x536"#,
+        "  group 32,68 1428x33",
+        r#"    menuitem "Edit" 85,68 44x32"#,
+        "window 0,0 0x0",
+        "  group 32,68 1428x33",
+        r#"    menuitem "Edit" 85,68 44x32"#,
+      ]
+    );
+
+    // The popup's window is in front, listed before the focused one; the one after isn't. Two
+    // "Edit"s are, in two windows.
+    let [popup, focused, behind] = [0, 4, 8].map(|i| in_front(&nodes, &nodes[i]));
+    assert!(popup && focused && !behind);
+    assert_eq!((find(&nodes, "Select all").len(), find(&nodes, "Edit").len()), (1, 2));
   }
 }
